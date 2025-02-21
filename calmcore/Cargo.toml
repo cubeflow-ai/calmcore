@@ -1,0 +1,32 @@
+[package]
+name = "calmcore"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+log = "0.4.6"
+regex = "1.10.6"
+crc32fast = "1.4.2"
+bytes = "1.1.0"
+byteorder = "1.5.0"
+bincode = "1.3.3"
+prost = "0.13.4"
+thiserror = "2.0.11"
+itertools = "0.14.0"
+# roaring = "0.10.3"
+croaring = "2.2.0"
+unicode-segmentation = "1.11.0"
+sqlparser = "0.53.0"
+serde_json = "1.0.114"
+lazy_static = "1.4.0"
+memcomparable = "0.2.0"
+rayon = "1.10"
+reqwest = { version = "0.12.4", features = ["blocking"] }
+rust-stemmers = "1.2.0"
+tonic = "0.12.3"
+serde = { version = "1.0.197", features = ["derive"] }
+memmap2 = "0.9.5"
+proto = { path = "../proto/rust_pb" }
+hora = { path = "../libs/hora_lib" }
+mem_btree = { path = "../libs/mem_btree" }

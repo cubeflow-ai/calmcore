@@ -1,0 +1,28 @@
+[package]
+name = "mem_btree"
+version = "0.3.2"
+edition = "2021"
+authors = ["Ansj <ansj-sun@163.com>"]
+license = "MIT OR Apache-2.0"
+categories = ["data-structures", "no-std"]
+description = "A Data Structure of BTree Implemented with Rust, support snapshot. not use any unsafe lib."
+repository = "https://github.com/ansjsun/mem_btree"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+memmap2 = "0.9.5"
+
+[dev-dependencies]
+rand = "0.8.5"
+
+
+[[example]]
+name = "bench"
+
+
+[[example]]
+name = "example"
+
+[[example]]
+name = "ttl"

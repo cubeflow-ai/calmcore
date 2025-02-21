@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package core;
+
+option go_package = "indexer/proto";
+
+//data model
+//an object type that contains fields and is connected by links
+
+message Value {
+    oneof kind {
+        bool bool_value = 1;
+        int64 int_value = 2;
+        float float_value = 3;
+        string string_value = 4;
+        ListValue list_value = 5;
+        ObjectValue object_value = 6;
+        Embedding vector_value = 7;
+    }
+}
+
+message ObjectValue { map<string, Value> fields = 1; }
+
+message ListValue { repeated Value values = 1; }
+
+message Embedding { repeated float e = 1 [packed = true]; }
+
+//links as an object, rather than a field type
+message Link {
+    uint64 source_space = 1;
+    uint64 source_record = 2;
+    string name = 3;
+    uint64 target_space = 4;
+    uint64 target_record = 5;
+    ObjectValue metadata = 6;
+}
+
+message Fields{
+    repeated Field fields = 1;
+}
+
+message Schema {
+    string name = 1;
+    bool schemaless = 2;
+    map<string,Field> fields = 3;
+    ObjectValue metadata = 4;
+}
+
+message UserSchema{
+    map<string,Field> fields = 1;
+}
+
+message Vector {
+    string field_name = 1;
+    repeated float vector = 2;
+}
+
+
+message Record {
+    string name = 1;
+    uint64 id = 2;
+    bytes data = 3;
+    repeated Vector vectors = 4;
+}
+
+message Field {
+    enum Type {
+        Bool = 0;
+        Int = 1;
+        Float = 2;
+        String = 3;
+        Text = 4;
+        Geo = 5;
+        Vector = 6;
+    }
+
+    message EmbeddingOption {
+        enum Metric {
+            DotProduct= 0;
+            Manhattan = 1; 
+            Euclidean = 2; 
+            CosineSimilarity = 3;
+            Angular = 4 ;
+        }
+        int32 dimension = 1;
+        string embedding = 2;
+        Metric metric = 3;
+        int32 batch_size = 4;
+    }
+
+    message FulltextOption {
+        enum Tokenizer {
+            Standard = 0;
+            Whitespace = 1;
+        }
+        enum Filter{
+            Lowercase = 0;
+            Stemmer = 1;
+        }
+        Tokenizer tokenizer = 1;
+        repeated Filter filters = 2;
+        Dict stopwords = 3;
+        Dict synonyms = 4;
+    }
+    
+
+    string name = 1;
+    Type type = 2;
+    oneof option {
+        EmbeddingOption embedding =3;
+        FulltextOption fulltext =4;
+    }
+}
+
+message Dict{
+    enum Protocol {
+        Json = 0;
+        Api = 1;
+        File = 2;
+    }
+    string name = 1;
+    Protocol protocol = 2;
+    string value  = 3;
+}
+
+// query protos
+message Query {
+    string query = 1;
+    uint32 offset = 2;
+    uint32 limit = 3;
+    repeated string order_by = 5;
+    repeated string group_by = 6;
+    repeated string fields = 7;
+}
+
+message Hit {
+    uint64 id = 1;
+    float score = 2;
+    Record record = 3;
+    repeated bytes sort = 4;
+}
+
+message QueryResult {
+  repeated Hit hits = 1;
+  uint64 total_hits = 2;
+}

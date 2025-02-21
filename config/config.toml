@@ -1,0 +1,9 @@
+cluster = "calm"
+data_path = "/tmp/"
+manager_addr = "http://127.0.0.1:5001"
+http_port = 5000
+grpc_port = 5001
+
+[log]
+path = "log"
+level = "warn"

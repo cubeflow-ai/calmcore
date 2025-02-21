@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package calmserver;
+
+// option go_package = "github.com/caiganio/caigan/processor/indexer;calmserver";
+option go_package = "indexer/proto";
+
+import "core.proto";
+
+service Server {
+    rpc Get (GetRequest) returns (GetResponse) {}
+    rpc Mutate (MutateRequest) returns (MutateResponse) {}
+    rpc Search (SearchRequest) returns (SearchResponse) {}
+
+    rpc CreateEngine(CreateEngineRequest) returns (CreateEngineResponse) {}
+    rpc LoadEngine(LoadEngineRequest) returns (LoadEngineResponse) {}
+    rpc ReleaseEngine(ReleaseEngineRequest) returns (ReleaseEngineResponse) {}
+}
+
+message Mutate{
+    enum Action {
+        Insert= 0;
+        Delete = 1; 
+        Upsert = 2; 
+    }
+    Action action = 1;
+    core.Record record = 2;
+}
+
+message Status {
+    int32 code = 1;
+    string message = 2;
+}
+
+message MutateRequest{
+    string name = 1;
+    repeated Mutate datas = 2;
+}
+
+message MutateResponse{
+    Status status =1 ;
+    repeated Status record_status = 2;
+}
+
+message SearchRequest {
+    string name = 1;
+    oneof query {
+        core.Query cql = 2;
+        string sql = 3 ;
+    }
+}
+
+message SearchResponse{
+    Status status =1 ;
+    core.QueryResult result =2;
+    uint32 timeuse_mill = 3;
+}
+
+message GetRequest {
+    string engine_name = 1;
+    uint64 id = 2;
+    string record_name = 3;
+}
+
+message GetResponse {
+    Status status = 1;
+    core.Record record = 2;
+}
+
+
+message LoadEngineRequest{
+    string name = 1 ;
+}
+message LoadEngineResponse{
+    Status status =1 ;
+}
+
+message CreateEngineRequest{
+    core.Schema schema = 1 ;
+}
+message CreateEngineResponse{
+    Status status =1 ;
+}
+
+message ReleaseEngineRequest{
+    string name = 1 ;
+}
+message ReleaseEngineResponse{
+    Status status =1 ;
+}

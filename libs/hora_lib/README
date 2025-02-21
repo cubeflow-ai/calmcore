@@ -1,0 +1,12 @@
+Hora is an efficient and scalable vector retrieval library designed to provide users with fast and accurate vector search capabilities. It utilizes advanced vector indexing techniques and efficient query algorithms to support rapid retrieval of high-dimensional vectors, suitable for various large-scale datasets.
+
+Project URL: https://github.com/hora-search/hora branch_num:239bd366693cd4fabf11c30786139ea9cc5cf40f
+
+Changes in this update:
+
+New Methods Added:
+
+node_search_k_with_filter: search for k nearest neighbors node internal method. We have added a new method with an additional filter parameter. This parameter is a very fast bitmap that can be used to filter during the query process, achieving the fusion of vector retrieval and scalar retrieval.
+
+search_with_filter: search for k nearest neighbors， We have added a new method with an additional filter parameter. This parameter is a very fast bitmap that can be used to filter during the query process, achieving the fusion of vector retrieval and scalar retrieval.
+

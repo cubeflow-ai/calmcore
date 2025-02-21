@@ -1,0 +1,41 @@
+[package]
+name = "indexer"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["calmcore", "proto/rust_pb"]
+
+[dependencies]
+calmcore = { path = "calmcore" }
+proto = { path = "proto/rust_pb" }
+
+tokio = { version = "1.43.0", features = ["full"] }
+tonic = "0.12.3"
+prost = "0.13.4"
+serde_json = "1.0.114"
+clap = { version = "4.5.3", features = ["derive"] }
+version_macro = "0.1.0"
+log = "0.4.6"
+env_logger = "0.11.3"
+serde = { version = "1.0.137", features = ["derive", "rc"] }
+itertools = "0.14.0"
+async-trait = "0.1.85"
+toml = "0.7.3"
+
+
+poem = { version = "3.0.0", features = ["session", "cookie", "websocket"] }
+async-graphql = "7.0.3"
+async-graphql-poem = "7.0.3"
+
+
+[build-dependencies]
+tonic-build = "0.12.3"
+prost-build = "0.13.4"
+
+
+[dev-dependencies]
+rand = "0.9.0"
+sys-info = "0.9.1"
+croaring = "2.2.0"
+mem_btree = { path = "libs/mem_btree" }
