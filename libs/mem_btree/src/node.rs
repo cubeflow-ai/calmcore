@@ -77,6 +77,72 @@ where
         self.children[self.search_index(k)].get(k)
     }
 
+    pub fn mget<Q>(&self, k: &[Q]) -> Vec<Option<&V>>
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord,
+    {
+        if k.len() == 1 {
+            return vec![self.get(&k[0])];
+        }
+
+        let items = self
+            .children
+            .iter()
+            .filter_map(|c| match c.key() {
+                Some(_) => Some(c),
+                None => None,
+            })
+            .collect::<Vec<_>>();
+
+        if items.len() == 0 {
+            return vec![None; k.len()];
+        }
+
+        let mut result = Vec::with_capacity(k.len());
+
+        let mut k_idx = 0;
+
+        for item_id in 0..items.len() - 1 {
+            let start = items[item_id];
+            let start_key = &start.key().unwrap().0.borrow();
+            let end_key = &items[item_id + 1].key().unwrap().0.borrow();
+
+            let mut has_data = false;
+
+            for i in k_idx..k.len() {
+                let key = k[i].borrow();
+
+                if key >= start_key && key < end_key {
+                    has_data = true;
+                    continue;
+                } else if key < start_key {
+                    result.push(None);
+                    k_idx += 1;
+                } else {
+                    if k_idx < i {
+                        result.extend(start.mget(&k[k_idx..i]));
+                        k_idx = i;
+                        has_data = false;
+                    }
+                    break;
+                }
+            }
+
+            if has_data {
+                // if go here means all keys iterated end
+                result.extend(start.mget(&k[k_idx..]));
+                k_idx = k.len();
+            }
+        }
+
+        if result.len() < k.len() {
+            result.extend(items.last().unwrap().mget(&k[k_idx..]));
+        }
+
+        result
+    }
+
     pub fn remove<Q>(&self, k: &Q) -> Option<(N<K, V>, Item<K, V>)>
     where
         K: Borrow<Q> + Ord,

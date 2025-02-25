@@ -24,6 +24,10 @@ impl<K, V> DiskInvertIndex<K, V> {
         self.term_record_index.get(key)
     }
 
+    pub(crate) fn mget(&self, key: &[K]) -> Vec<Option<V>> {
+        self.term_record_index.mget(key)
+    }
+
     pub(crate) fn range<F>(&self, start: Option<&K>, mut f: F)
     where
         F: FnMut(IterKey<K>, &V) -> bool,

@@ -482,7 +482,6 @@ mod tests {
 
         let scope = Scope {
             schema,
-            space: Default::default(),
             user_fields: RwLock::new(user_field),
         };
 

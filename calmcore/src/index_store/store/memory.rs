@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use mem_btree::BTree;
 
 use super::IterKey;
@@ -28,6 +29,14 @@ where
 
     pub(crate) fn get(&self, key: &K) -> Option<V> {
         self.term_record_index.get(key).cloned()
+    }
+
+    pub(crate) fn mget(&self, key: &[K]) -> Vec<Option<V>> {
+        self.term_record_index
+            .mget(key)
+            .into_iter()
+            .map(|v| v.cloned())
+            .collect_vec()
     }
 
     pub fn clone_map(&self) -> BTree<K, V> {

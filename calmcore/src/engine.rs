@@ -393,6 +393,7 @@ mod tests {
                     crate::ActionType::Append,
                     format!("record{}", i),
                     test_data.as_bytes(),
+                    None,
                 )
                 .unwrap();
         }
@@ -443,6 +444,7 @@ mod tests {
                     crate::ActionType::Append,
                     format!("record{}", i),
                     test_data.as_bytes(),
+                    None,
                 )
                 .unwrap();
         }

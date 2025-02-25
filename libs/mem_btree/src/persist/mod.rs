@@ -204,7 +204,6 @@ pub struct TreeReader<K, V> {
     node: memmap2::Mmap,
     data: memmap2::Mmap,
     deserializer: Box<dyn KVDeserializer<K, V>>,
-    dir: PathBuf,
 }
 
 impl<K, V> TreeReader<K, V> {
@@ -241,7 +240,6 @@ impl<K, V> TreeReader<K, V> {
             node,
             data,
             deserializer,
-            dir: dir.to_path_buf(),
         })
     }
 
@@ -262,6 +260,22 @@ impl<K, V> TreeReader<K, V> {
         Some(self.read_value(offset))
     }
 
+    /// Returns the values associated with the keys
+    /// If a key is not found, None is returned for that position
+    pub fn mget(&self, keys: &[K]) -> Vec<Option<V>> {
+        let keys = keys
+            .iter()
+            .map(|k| self.deserializer.serialize_key(k))
+            .collect::<Vec<_>>();
+
+        let offsets = self.mget_key_node_offsets(self.root_offset, &keys[..]);
+
+        offsets
+            .into_iter()
+            .map(|offset| offset.map(|o| self.read_value(o)))
+            .collect()
+    }
+
     pub fn iter(&self) -> Iter<K, V> {
         Iter::new(self)
     }
@@ -277,25 +291,12 @@ impl<K, V> TreeReader<K, V> {
 
     /// Find offset of a key in the node file using binary search
     fn find_key_offset(&self, key: &K) -> Option<i64> {
+        self.inner_find_key_offset(&*self.deserializer.serialize_key(key))
+    }
+
+    fn inner_find_key_offset(&self, key: &[u8]) -> Option<i64> {
         let mut current_offset = self.root_offset;
-
-        let key = &*self.deserializer.serialize_key(key);
-
         while current_offset < self.node.len() {
-            // if current_offset > 0 {
-            //     println!(
-            //         "---------------------start_offset:{}---------------:{:?}---------------{:?}",
-            //         current_offset,
-            //         Iter::read_keys(self, current_offset as i64),
-            //         key
-            //     );
-            // } else {
-            //     println!(
-            //         "---------------------start_offset:{}-----------------------------{:?}",
-            //         current_offset, key
-            //     );
-            // }
-
             // Read item count
             let count = read_u16(&self.node, &mut current_offset) as usize;
 
@@ -356,6 +357,144 @@ impl<K, V> TreeReader<K, V> {
         None
     }
 
+    fn mget_key_node_offsets(&self, mut offset: usize, keys: &[Cow<'_, [u8]>]) -> Vec<Option<i64>> {
+        let count = read_u16(&self.node, &mut offset) as usize;
+
+        if count == 0 {
+            return vec![None; keys.len()];
+        }
+
+        let mut result = Vec::with_capacity(keys.len());
+
+        let (mut k, mut next_offset) = self.read_key(&mut offset);
+
+        if next_offset < 0 {
+            // leaf node
+            for _ in 1..count {
+                let (end_k, end_next_offset) = self.read_key(&mut offset);
+                for i in result.len()..keys.len() {
+                    let key = keys[i].as_ref();
+                    match k.cmp(key) {
+                        std::cmp::Ordering::Equal => {
+                            result.push(Some(-next_offset));
+                            break;
+                        }
+                        std::cmp::Ordering::Greater => {
+                            result.push(None);
+                        }
+                        std::cmp::Ordering::Less => {
+                            break;
+                        }
+                    }
+                }
+
+                // if all offsets found then return
+                if result.len() == keys.len() {
+                    return result;
+                }
+                k = end_k;
+                next_offset = end_next_offset;
+            }
+
+            if result.len() == keys.len() {
+                return result;
+            }
+
+            if result.len() != keys.len() {
+                for i in result.len()..keys.len() {
+                    match k.cmp(keys[i].as_ref()) {
+                        std::cmp::Ordering::Equal => {
+                            result.push(Some(-next_offset));
+                        }
+                        _ => {
+                            result.push(None);
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        // here is node
+
+        for _ in 1..count {
+            let (end_k, end_next_offset) = self.read_key(&mut offset);
+
+            for i in result.len()..keys.len() {
+                let key = &keys[i];
+                match k.cmp(key) {
+                    std::cmp::Ordering::Equal => {
+                        result.push(Some(next_offset));
+                    }
+                    std::cmp::Ordering::Greater => {
+                        result.push(None);
+                    }
+                    std::cmp::Ordering::Less => {
+                        if key.as_ref() < end_k {
+                            result.push(Some(next_offset));
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // all keys found, so not need iter next
+            if result.len() == keys.len() {
+                break;
+            }
+
+            k = end_k;
+            next_offset = end_next_offset;
+        }
+
+        if result.len() < keys.len() {
+            for _ in result.len()..keys.len() {
+                //set all offset to last node
+                result.push(Some(next_offset));
+            }
+        }
+
+        let mut offsets = Vec::with_capacity(keys.len());
+
+        let mut start = 0;
+        let mut pre_offset = 0;
+        for i in 0..result.len() {
+            match result[i] {
+                Some(off) => {
+                    if off == pre_offset {
+                        continue;
+                    } else {
+                        if start < i {
+                            offsets.extend(
+                                self.mget_key_node_offsets(pre_offset as usize, &keys[start..i]),
+                            );
+                        }
+                        start = i;
+                        pre_offset = off;
+                    }
+                }
+                None => {
+                    if start < i {
+                        offsets.extend(
+                            self.mget_key_node_offsets(pre_offset as usize, &keys[start..i]),
+                        );
+                    }
+                    offsets.push(None);
+                    start = i + 1;
+                }
+            }
+        }
+
+        //all continue
+        if offsets.len() != keys.len() {
+            offsets.extend(self.mget_key_node_offsets(pre_offset as usize, &keys[start..]));
+        }
+
+        offsets
+    }
+
     // Validate data file magic number
     fn validate_magic(data: &memmap2::Mmap) -> std::io::Result<()> {
         if data.len() < 2 {
@@ -394,20 +533,6 @@ impl<K, V> TreeReader<K, V> {
         } else {
             self.key_len as usize
         };
-
-        if *offset + key_len > self.node.len() {
-            let dir = self.dir.join(NODE_NAME);
-            let file = File::open(&dir).unwrap();
-            let len = file.metadata().unwrap().len();
-            println!(
-                "path:{:?} offset: {:?}, key_len: {:?}, node_len: {:?}===========len:{}",
-                dir,
-                offset,
-                key_len,
-                self.node.len(),
-                len
-            );
-        }
 
         let data = read_data(&self.node, offset, key_len);
         let data_offset = read_i64(&self.node, offset);
@@ -947,6 +1072,373 @@ mod tests {
 
         assert!(tree.get(&s.to_be_bytes().to_vec()).is_some());
     }
-}
 
-mod main {}
+    #[test]
+    fn test_mget() {
+        let dir = PathBuf::from("data");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create tree and insert data
+        let mut tree = BTree::new(128);
+
+        for i in 0..1000 as i32 {
+            tree.put(i.to_be_bytes().to_vec(), i.to_be_bytes().to_vec());
+        }
+
+        let writer = TreeWriter::new(tree, 0, Box::new(DefaultSerializer {}));
+        writer.persist(&dir).unwrap();
+
+        let reader = TreeReader::new(&dir, Box::new(DefaultSerializer {})).unwrap();
+
+        // Test existing keys
+        let keys: Vec<Vec<u8>> = vec![0, 1, 2, 3, 4]
+            .into_iter()
+            .map(|i: i32| i.to_be_bytes().to_vec())
+            .collect();
+
+        let results = reader.mget(&keys);
+
+        for (i, result) in results.iter().enumerate() {
+            let i = i as i32;
+            match result {
+                Some(v) => {
+                    assert_eq!(&i.to_be_bytes().to_vec(), v);
+                }
+                None => panic!("Key {} should exist", i),
+            }
+        }
+
+        // Test mix of existing and non-existing keys
+        let keys: Vec<Vec<u8>> = vec![998, 999, 1000, 1001]
+            .into_iter()
+            .map(|i: i32| i.to_be_bytes().to_vec())
+            .collect();
+
+        let results = reader.mget(&keys);
+        assert!(results[0].is_some()); // 998 exists
+        assert!(results[1].is_some()); // 999 exists
+        assert!(results[2].is_none()); // 1000 doesn't exist
+        assert!(results[3].is_none()); // 1001 doesn't exist
+    }
+
+    #[test]
+    fn test_mget_ordered() {
+        let dir = PathBuf::from("data");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut tree = BTree::new(128);
+
+        // 插入0-999的数据
+        for i in 0..1000 as i32 {
+            tree.put(i.to_be_bytes().to_vec(), i.to_be_bytes().to_vec());
+        }
+
+        let writer = TreeWriter::new(tree, 0, Box::new(DefaultSerializer {}));
+        writer.persist(&dir).unwrap();
+
+        let reader = TreeReader::new(&dir, Box::new(DefaultSerializer {})).unwrap();
+
+        // 测试连续的key
+        let keys: Vec<Vec<u8>> = (10..20).map(|i: i32| i.to_be_bytes().to_vec()).collect();
+
+        let results = reader.mget(&keys);
+
+        // 验证结果
+        for (i, result) in results.iter().enumerate() {
+            let expected = (i as i32) + 10;
+            match result {
+                Some(v) => {
+                    assert_eq!(expected.to_be_bytes().to_vec(), *v);
+                }
+                None => panic!("Key {} should exist", expected),
+            }
+        }
+
+        // 测试部分存在部分不存在的连续key
+        let keys: Vec<Vec<u8>> = (998..1002).map(|i: i32| i.to_be_bytes().to_vec()).collect();
+
+        let results = reader.mget(&keys);
+        assert!(results[0].is_some()); // 998 exists
+        assert!(results[1].is_some()); // 999 exists
+        assert!(results[2].is_none()); // 1000 不存在
+        assert!(results[3].is_none()); // 1001 不存在
+    }
+
+    #[test]
+    fn test_mget_large_scale() {
+        let dir = PathBuf::from("data");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut tree = BTree::new(128);
+
+        // 构造有间隔的数据: 0,2,4,...,1998 (跳过奇数)
+        for i in (0..1000).map(|x: i32| x * 2) {
+            tree.put(i.to_be_bytes().to_vec(), i.to_be_bytes().to_vec());
+        }
+
+        let writer = TreeWriter::new(tree, 0, Box::new(DefaultSerializer {}));
+        writer.persist(&dir).unwrap();
+
+        let reader = TreeReader::new(&dir, Box::new(DefaultSerializer {})).unwrap();
+
+        // 测试1: 连续查询包含存在和不存在的键
+        let keys: Vec<Vec<u8>> = (0..10).map(|i: i32| i.to_be_bytes().to_vec()).collect();
+        let results = reader.mget(&keys);
+
+        for (i, result) in results.iter().enumerate() {
+            let i = i as i32;
+            if i % 2 == 0 {
+                assert!(result.is_some());
+                assert_eq!(&i.to_be_bytes().to_vec(), result.as_ref().unwrap());
+            } else {
+                assert!(result.is_none(), "Key {} should not exist", i);
+            }
+        }
+
+        // 测试2: 大规模间隔查询
+        let keys: Vec<Vec<u8>> = (900..1100).map(|i: i32| i.to_be_bytes().to_vec()).collect();
+        let results = reader.mget(&keys);
+
+        for (i, result) in results.iter().enumerate() {
+            let key_value = i as i32 + 900;
+            if key_value % 2 == 0 {
+                assert!(result.is_some());
+                assert_eq!(&key_value.to_be_bytes().to_vec(), result.as_ref().unwrap());
+            } else {
+                assert!(
+                    result.is_none(),
+                    "Key {} should not exist but found:{:?}",
+                    key_value,
+                    i32::from_be_bytes(result.as_ref().unwrap().as_slice().try_into().unwrap())
+                );
+            }
+        }
+
+        // 测试3: 边界值测试
+        let boundary_keys = vec![
+            0, 998, 999, 1000, // 测试最大值附近
+            1998, 1999,
+            2000, // 测试最大值以上
+                  // 测试不存在的值
+        ];
+        let mut keys: Vec<Vec<u8>> = boundary_keys
+            .into_iter()
+            .map(|i: i32| i.to_be_bytes().to_vec())
+            .collect();
+
+        keys.sort();
+
+        let results = reader.mget(&keys);
+        assert!(results[0].is_some()); // 0 存在
+        assert!(results[1].is_some()); // 998 存在
+        assert!(results[2].is_none()); // 999 不存在
+        assert!(results[3].is_some()); // 1000 不存在
+        assert!(results[4].is_some()); // 1998 不存在
+        assert!(results[5].is_none()); // 1999 不存在
+        assert!(results[6].is_none()); // 2000 不存在
+
+        // 测试4: 大间隔查询
+        let sparse_keys = vec![0, 100, 200, 300, 400, 500, 600, 700, 800, 900];
+        let keys: Vec<Vec<u8>> = sparse_keys
+            .clone()
+            .into_iter()
+            .map(|i: i32| i.to_be_bytes().to_vec())
+            .collect();
+
+        let results = reader.mget(&keys);
+        for (i, result) in results.iter().enumerate() {
+            let key_value: i32 = sparse_keys[i];
+            if key_value % 2 == 0 && key_value < 1000 {
+                assert!(result.is_some());
+                assert_eq!(&key_value.to_be_bytes().to_vec(), result.as_ref().unwrap());
+            } else {
+                assert!(result.is_none(), "Key {} should not exist", key_value);
+            }
+        }
+
+        // 测试5: 中间有大段空隙的查询
+        let gap_keys = vec![
+            0, 2, 4, // 开头连续存在
+            497, 498, 499, // 中间一段不存在
+            500, 502, 504, // 中间一段存在
+            995, 996, 997, // 结尾一段不存在
+        ];
+        let keys: Vec<Vec<u8>> = gap_keys
+            .into_iter()
+            .map(|i: i32| i.to_be_bytes().to_vec())
+            .collect();
+
+        let results = reader.mget(&keys);
+        assert!(results[0].is_some()); // 0 存在
+        assert!(results[1].is_some()); // 2 存在
+        assert!(results[2].is_some()); // 4 存在
+        assert!(results[3].is_none()); // 497 不存在
+        assert!(results[4].is_some()); // 498 存在
+        assert!(results[5].is_none()); // 499 不存在
+        assert!(results[6].is_some()); // 500 存在
+        assert!(results[7].is_some()); // 502 存在
+        assert!(results[8].is_some()); // 504 存在
+        assert!(results[9].is_none()); // 995 不存在
+        assert!(results[10].is_some()); // 996 存在
+        assert!(results[11].is_none()); // 997 不存在
+    }
+
+    #[test]
+    fn test_mget_u32_even() {
+        use std::path::PathBuf;
+        // 为避免与其它测试冲突，使用新的目录
+        let dir = PathBuf::from("data_u32");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut tree = BTree::new(4);
+
+        // 插入 1000 ~ 1_000_000 范围内的偶数
+        for i in 1000_u32..=1_000_000 {
+            if i % 2 == 0 {
+                tree.put(i.to_be_bytes().to_vec(), i.to_be_bytes().to_vec());
+            }
+        }
+
+        // 持久化到磁盘
+        let writer = TreeWriter::new(tree, 4, Box::new(DefaultSerializer {}));
+        writer.persist(&dir).unwrap();
+
+        // 从磁盘加载树
+        let reader = TreeReader::new(&dir, Box::new(DefaultSerializer {})).unwrap();
+
+        // 测试用例 1: 查询低边界附近的连续偶数 key
+        let keys: Vec<Vec<u8>> = (1000_u32..1010)
+            .filter(|i| i % 2 == 0)
+            .map(|i| i.to_be_bytes().to_vec())
+            .collect();
+        let results = reader.mget(&keys);
+        for (i, result) in results.iter().enumerate() {
+            let expected = 1000 + (i as u32) * 2;
+            assert!(
+                result.is_some(),
+                "Key {} should exist, but not found",
+                expected
+            );
+            assert_eq!(&expected.to_be_bytes().to_vec(), result.as_ref().unwrap());
+        }
+
+        // 测试用例 2: 混合存在与不存在的 key（偶数存在，奇数不存在）
+        let keys: Vec<Vec<u8>> = vec![
+            1000_u32,  // 存在
+            1001,      // 不存在
+            500000,    // 存在
+            500001,    // 不存在
+            999_999,   // 不存在
+            1_000_000, // 存在
+        ]
+        .into_iter()
+        .map(|i| i.to_be_bytes().to_vec())
+        .collect();
+        let results = reader.mget(&keys);
+        assert!(results[0].is_some());
+        assert!(results[1].is_none());
+        assert!(results[2].is_some());
+        assert!(results[3].is_none());
+        assert!(results[4].is_none());
+        assert!(results[5].is_some());
+
+        // 测试用例 3: 中间有较大空隙的查询
+        let keys: Vec<Vec<u8>> = vec![
+            1000_u32, // 存在
+            1002,     // 存在
+            1004,     // 存在
+            500000,   // 存在
+            500002,   // 存在
+            500003,   // 不存在 (奇数)
+        ]
+        .into_iter()
+        .map(|i| i.to_be_bytes().to_vec())
+        .collect();
+        let results = reader.mget(&keys);
+
+        assert!(results[0].is_some());
+        assert!(results[1].is_some());
+        assert!(results[2].is_some());
+        assert!(results[3].is_some());
+        assert!(results[4].is_some());
+        assert!(results[5].is_none());
+
+        let result = reader.mget(&vec![1004_u32.to_be_bytes().to_vec()]);
+        assert!(result[0].is_some() && result.len() == 1);
+    }
+
+    #[test]
+    fn test_mget_batch_even() {
+        let dir = PathBuf::from("data_batch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut tree = BTree::new(128);
+
+        // 只插入1000-1000000中的偶数
+        for i in (1000_u32..=1_000_000).step_by(2) {
+            tree.put(i.to_be_bytes().to_vec(), i.to_be_bytes().to_vec());
+        }
+
+        let writer = TreeWriter::new(tree, 0, Box::new(DefaultSerializer {}));
+        writer.persist(&dir).unwrap();
+
+        let reader = TreeReader::new(&dir, Box::new(DefaultSerializer {})).unwrap();
+
+        let start_time = std::time::Instant::now();
+
+        // 分批查询0-2000000的数据,每批1000个
+        let batch_size = 1000;
+        for start in (0..2_000_000).step_by(batch_size) {
+            let end = (start + batch_size).min(2_000_000);
+
+            let keys: Vec<Vec<u8>> = (start..end)
+                .map(|i| (i as u32).to_be_bytes().to_vec())
+                .collect();
+
+            let results = reader.mget(&keys);
+
+            // 验证结果
+            for (idx, result) in results.iter().enumerate() {
+                let key_value = start + idx;
+
+                if key_value >= 1000 && key_value <= 1_000_000 && key_value % 2 == 0 {
+                    // 在范围内的偶数应该存在
+                    assert!(result.is_some(), "Key {} should exist", key_value);
+                    assert_eq!(
+                        &(key_value as i32).to_be_bytes().to_vec(),
+                        result.as_ref().unwrap(),
+                        "Value mismatch for key {}",
+                        key_value
+                    );
+                } else {
+                    // 其他情况应该不存在
+                    assert!(
+                        result.is_none(),
+                        "Key {} should not exist but found {:?}",
+                        key_value,
+                        result
+                            .as_ref()
+                            .map(|v| i32::from_be_bytes(v.as_slice().try_into().unwrap()))
+                    );
+                }
+            }
+        }
+        println!("Batch done {:?}", start_time.elapsed());
+
+        let start_time = std::time::Instant::now();
+        // 单条查询0-2000000的数据
+        for i in 0..=2_000_000 {
+            if i >= 1000 && i <= 1_000_000 && i % 2 == 0 {
+                assert!(reader.get(&(i as u32).to_be_bytes().to_vec()).is_some());
+            } else {
+                assert!(reader.get(&(i as u32).to_be_bytes().to_vec()).is_none());
+            }
+        }
+        println!("Get done {:?}", start_time.elapsed());
+    }
+}

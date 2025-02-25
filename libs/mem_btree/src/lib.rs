@@ -102,6 +102,17 @@ where
         }
     }
 
+    fn mget<Q>(&self, k: &[Q]) -> Vec<Option<&V>>
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord,
+    {
+        match self {
+            BTreeType::Leaf(leaf) => leaf.mget(k),
+            BTreeType::Node(node) => node.mget(k),
+        }
+    }
+
     fn remove<Q>(&self, k: &Q) -> Option<(N<K, V>, Item<K, V>)>
     where
         K: Borrow<Q> + Ord,
@@ -543,6 +554,31 @@ where
             return None;
         }
         self.root.get(k)
+    }
+
+    /// Get the value vec for a given keys
+    /// If the key exists, the value is Some(v)
+    /// If the key does not exist is None
+    /// k mut is sorted key, k is must unique
+    /// # Examples
+    /// ```rust
+    /// use mem_btree::BTree;
+    /// let mut btree = BTree::new(32);
+    /// let datas = vec![1,2,3,4,5];
+    /// for i in datas.iter() {
+    ///     btree.put(i.clone(), i.clone());
+    /// }
+    /// assert_eq!(btree.mget(&[1, 2, 5]), vec![Some(&1), Some(&2), Some(&5)]);
+    /// ```
+    pub fn mget<Q>(&self, k: &[Q]) -> Vec<Option<&V>>
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord,
+    {
+        if self.root.len() == 0 {
+            return vec![None; k.len()];
+        }
+        self.root.mget(k)
     }
 
     /// Get the number of key-value pairs in the B-tree
@@ -1020,5 +1056,104 @@ mod tests {
     fn test_no_debug_value() {
         let mut btree = BTree::new(32);
         btree.put(1, A {});
+    }
+
+    #[test]
+    fn test_mget() {
+        let mut btree = BTree::new(32);
+        const DATA_SIZE: i32 = 1_000_000;
+
+        // 1. 测试空树
+        // assert_eq!(btree.mget(&[&1, &2]), vec![None, None]);
+
+        // 2. 插入大量测试数据
+        for i in 0..DATA_SIZE {
+            btree.put(i, i * 10);
+        }
+
+        // 3. 基本查询测试 - 前段数据
+        assert_eq!(
+            btree.mget(&[1, 2, 3]),
+            vec![Some(&10), Some(&20), Some(&30)]
+        );
+
+        // 4. 测试中段数据
+        let mid = DATA_SIZE / 2;
+        assert_eq!(
+            btree.mget(&[(mid - 1), mid, (mid + 1)]),
+            vec![
+                Some(&((mid - 1) * 10)),
+                Some(&(mid * 10)),
+                Some(&((mid + 1) * 10))
+            ]
+        );
+
+        // 5. 测试尾段数据
+        let end = DATA_SIZE - 1;
+        assert_eq!(
+            btree.mget(&[(end - 1), end]),
+            vec![Some(&((end - 1) * 10)), Some(&(end * 10))]
+        );
+
+        // 6. 测试大量连续键值
+        let start = DATA_SIZE / 2;
+        let keys: Vec<i32> = (start..start + 1000).collect();
+        let result = btree.mget(&keys);
+        assert_eq!(result.len(), 1000);
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(result[i], Some(&(key * 10)));
+        }
+
+        // 7. 测试稀疏查询（跨度大的键值）
+        let sparse_keys: Vec<i32> = (0..DATA_SIZE).step_by(10000).collect();
+        let result = btree.mget(&sparse_keys);
+        assert_eq!(result.len(), sparse_keys.len());
+        for (i, key) in sparse_keys.iter().enumerate() {
+            assert_eq!(result[i], Some(&(key * 10)));
+        }
+
+        // 8. 测试边界和不存在的值混合查询
+        let mixed_keys = vec![
+            -1,            // 不存在（小于最小值）
+            0,             // 最小值
+            DATA_SIZE / 2, // 中间值
+            DATA_SIZE - 1, // 最大值
+            DATA_SIZE,     // 不存在（大于最大值）
+        ];
+
+        let result = btree.mget(&mixed_keys);
+
+        assert_eq!(result.len(), mixed_keys.len());
+        assert_eq!(result[0], None);
+        assert_eq!(result[1], Some(&0));
+        assert_eq!(result[2], Some(&((DATA_SIZE / 2) * 10)));
+        assert_eq!(result[3], Some(&((DATA_SIZE - 1) * 10)));
+        assert_eq!(result[4], None);
+
+        // 9. 测试大规模删除后的查询
+        for i in 0..DATA_SIZE / 2 {
+            if i % 2 == 0 {
+                btree.remove(&i);
+            }
+        }
+        let test_keys: Vec<i32> = (0..100).collect();
+        let result = btree.mget(&test_keys);
+        for (i, key) in test_keys.iter().enumerate() {
+            if key % 2 == 0 {
+                assert_eq!(result[i], None);
+            } else {
+                assert_eq!(result[i], Some(&(key * 10)));
+            }
+        }
+
+        // 10. 测试大规模更新后的查询
+        for i in 0..1000 {
+            btree.put(i, i * 100); // 更新值为原来的10倍
+        }
+        let test_keys: Vec<i32> = (0..100).collect();
+        let result = btree.mget(&test_keys);
+        for (i, key) in test_keys.iter().enumerate() {
+            assert_eq!(result[i], Some(&(key * 100)));
+        }
     }
 }

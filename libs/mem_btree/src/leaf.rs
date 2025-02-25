@@ -64,6 +64,47 @@ where
         None
     }
 
+    pub fn mget<Q>(&self, k: &[Q]) -> Vec<Option<&V>>
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord,
+    {
+        if k.len() == 1 {
+            return vec![self.get(&k[0])];
+        }
+
+        let mut result = Vec::with_capacity(k.len());
+
+        let mut k_ptr = 0;
+
+        for i_ptr in 0..self.items.len() {
+            let item = &self.items[i_ptr];
+            for _ in k_ptr..k.len() {
+                match item.0.borrow().cmp(&k[k_ptr].borrow()) {
+                    std::cmp::Ordering::Equal => {
+                        result.push(Some(&item.1));
+                        k_ptr += 1;
+                    }
+                    std::cmp::Ordering::Less => {
+                        break;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        result.push(None);
+                        k_ptr += 1;
+                    }
+                }
+            }
+        }
+
+        if k.len() > result.len() {
+            for _ in result.len()..k.len() {
+                result.push(None);
+            }
+        }
+
+        result
+    }
+
     pub fn search_index<Q>(&self, k: &Q) -> Result<usize, usize>
     where
         K: Borrow<Q> + Ord,

@@ -81,6 +81,13 @@ where
         }
     }
 
+    pub fn mget(&self, key: &[K]) -> Vec<Option<V>> {
+        match self {
+            Self::Memory(m) => m.mget(key),
+            Self::Disk(d) => d.mget(key),
+        }
+    }
+
     pub fn range<F>(&self, start: Option<&K>, f: F)
     where
         F: FnMut(IterKey<K>, &V) -> bool,

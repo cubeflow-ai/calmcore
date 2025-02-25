@@ -253,7 +253,6 @@ mod tests {
     fn test_scope() {
         let scope = Scope {
             schema: Default::default(),
-            space: Default::default(),
             user_fields: Default::default(),
         };
 
@@ -275,7 +274,6 @@ mod tests {
     fn test_record_wrapper() {
         let scope = Scope {
             schema: Default::default(),
-            space: Default::default(),
             user_fields: Default::default(),
         };
 
@@ -308,7 +306,6 @@ mod tests {
     fn test_record_wrapper_serialize() {
         let scope = Scope {
             schema: Default::default(),
-            space: Default::default(),
             user_fields: Default::default(),
         };
 

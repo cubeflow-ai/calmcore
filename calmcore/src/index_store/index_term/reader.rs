@@ -33,13 +33,9 @@ impl TermIndexReader {
     }
 
     pub fn in_terms(&self, list: &[Vec<u8>]) -> Bitmap {
-        let mut result = Bitmap::new();
-        for v in list {
-            if let Some(bi) = self.term(v) {
-                result |= bi;
-            }
-        }
-        result
+        let result = self.term_record_index.mget(list);
+        let result = result.iter().filter_map(|b| b.as_ref()).collect_vec();
+        Bitmap::fast_or(&result)
     }
 
     pub fn between(
