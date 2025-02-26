@@ -20,8 +20,8 @@ fn query(schema_name: &str, data_path: &str) -> CoreResult<()> {
     let core = CalmCore::new(data_path)?;
     let engine = core.load_engine(schema_name)?;
 
-    let result = engine
-        .sql("select * from validate_test where age < 30 and city='北京' order by age limit 10")?;
+    let result =
+        engine.sql("select * from validate_test where  city='北京' and age=18  limit 10")?;
 
     let result: QueryResultWrapper = result.to_wrapper();
 
@@ -31,8 +31,8 @@ fn query(schema_name: &str, data_path: &str) -> CoreResult<()> {
     );
 
     let start = Instant::now();
-    for _ in 0..100 {
-        engine.sql("select * from validate_test where age < 30 and city='北京' limit 10")?;
+    for _ in 0..10000 {
+        engine.sql("select * from validate_test where city='北京' limit 10")?;
     }
 
     println!("Query finished in {:?}", start.elapsed());
@@ -59,7 +59,7 @@ fn insert(schema_name: &str, data_path: &str) -> CoreResult<()> {
     println!("Starting data insertion...");
     let start = Instant::now();
     let batch_size = 1000;
-    let total = 1_000_000_000;
+    let total = 100_000_000;
 
     let cities = ["北京", "上海", "广州", "深圳", "杭州"];
 

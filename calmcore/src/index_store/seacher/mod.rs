@@ -49,8 +49,30 @@ impl SegmentSearcher<'_> {
         })
     }
 
+    #[allow(dead_code)]
+    pub fn batch_next(&mut self, size: usize) -> Vec<Hit> {
+        let mut hits = Vec::with_capacity(size);
+        loop {
+            if hits.len() >= size {
+                break;
+            }
+
+            if let Some(hit) = self.next() {
+                hits.push(hit);
+            } else {
+                break;
+            }
+        }
+        hits
+    }
+
     fn doc(&self, id: u64) -> Option<Cow<Record>> {
         self.segment.doc(id)
+    }
+
+    #[allow(dead_code)]
+    fn batch_doc(&self, ids: &[u64]) -> Vec<Option<Cow<Record>>> {
+        self.segment.batch_doc(ids)
     }
 }
 
@@ -383,6 +405,49 @@ impl Searcher {
 
         for mut stream in streams {
             let mut min: Option<SortedHit> = None;
+
+            // loop {
+            //     let hits = stream.batch_next(size);
+            //     let hit_size = hits.len();
+            //     let ids = hits.iter().map(|h| h.id).collect_vec();
+
+            //     for (record, hit) in stream.batch_doc(&ids).into_iter().zip(hits) {
+            //         let record = match record {
+            //             Some(record) => record,
+            //             None => continue,
+            //         };
+
+            //         real_count += 1;
+
+            //         let (value, sort) =
+            //             SortedHit::make_sort(hit.id, hit.score, &record.data, order_by)?;
+
+            //         let sort_hit = if min.is_none()
+            //             || min.as_ref().unwrap().cmp_record(&sort) == Ordering::Greater
+            //         {
+            //             SortedHit::new(hit, record.into_owned(), value, sort)
+            //         } else {
+            //             continue;
+            //         };
+
+            //         heap.insert(sort_hit);
+
+            //         if heap.len() > size {
+            //             min = heap.pop_last();
+            //             //if order by only one field, it is id ,so we can return early
+            //             if order_by.is_empty() {
+            //                 return Ok((
+            //                     heap.into_iter().skip(limit.0).take(limit.1).collect_vec(),
+            //                     None,
+            //                 ));
+            //             }
+            //         }
+            //     }
+            //     if hit_size < size {
+            //         break;
+            //     }
+            // }
+
             while let Some(hit) = stream.next() {
                 let record = match stream.doc(hit.id) {
                     Some(record) => record,

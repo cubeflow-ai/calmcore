@@ -7,6 +7,7 @@ use std::{
 };
 
 use croaring::Bitmap;
+use itertools::Itertools;
 use mem_btree::persist;
 use proto::core::{Field, Record};
 
@@ -208,6 +209,15 @@ impl DiskSegment {
 
     pub(crate) fn doc(&self, id: u64) -> Option<Cow<Record>> {
         self.source_store.get(&self.abs_id(id)).map(Cow::Owned)
+    }
+
+    pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Option<Cow<Record>>> {
+        let ids = ids.iter().map(|id| self.abs_id(*id)).collect_vec();
+        self.source_store
+            .mget(&ids)
+            .into_iter()
+            .map(|v| v.map(Cow::Owned))
+            .collect()
     }
 
     pub(crate) fn find_by_name(&self, name: &String) -> Option<u64> {

@@ -6,6 +6,7 @@ use std::{
 };
 
 use croaring::{Bitmap, Bitmap64};
+use itertools::Itertools;
 use mem_btree::{BTree, BatchWrite};
 use proto::core::{Field, Record};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -274,6 +275,15 @@ impl MemSegmentReader {
 
     pub(crate) fn doc(&self, id: u64) -> Option<Cow<Record>> {
         self.source_store.get(&self.abs_id(id)).map(Cow::Borrowed)
+    }
+
+    pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Option<Cow<Record>>> {
+        let ids = ids.iter().map(|id| self.abs_id(*id)).collect_vec();
+        self.source_store
+            .mget(&ids)
+            .iter()
+            .map(|v| v.map(Cow::Borrowed))
+            .collect()
     }
 
     pub(crate) fn find_by_name(&self, name: &str) -> Option<u64> {

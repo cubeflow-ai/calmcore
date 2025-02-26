@@ -80,6 +80,13 @@ impl SegmentReader {
         }
     }
 
+    pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Option<Cow<Record>>> {
+        match self {
+            SegmentReader::Hot(h) => h.batch_doc(ids),
+            SegmentReader::Warm(w) => w.batch_doc(ids),
+        }
+    }
+
     pub(crate) fn get(&self, name: &String) -> Option<Cow<Record>> {
         match self {
             SegmentReader::Hot(h) => h.get(name),
