@@ -20,8 +20,8 @@ fn query(schema_name: &str, data_path: &str) -> CoreResult<()> {
     let core = CalmCore::new(data_path)?;
     let engine = core.load_engine(schema_name)?;
 
-    let result =
-        engine.sql("select * from validate_test where age < 30 and city='北京' limit 10")?;
+    let result = engine
+        .sql("select * from validate_test where age < 30 and city='北京' order by age limit 10")?;
 
     let result: QueryResultWrapper = result.to_wrapper();
 

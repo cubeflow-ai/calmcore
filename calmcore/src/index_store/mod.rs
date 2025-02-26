@@ -151,6 +151,12 @@ impl IndexStore {
     }
 
     pub(crate) fn hot_to_warm(&mut self, segment: DiskSegment) -> CoreResult<()> {
+        //history dels apply to freezed segments TODO:check lock
+        if let Some(hd) = crate::persist::read_history_del(&segment.path)? {
+            Self::write_delete(&self.freezed, hd)?;
+            crate::persist::rm_history_del(&segment.path)?;
+        }
+
         self.freezed
             .iter_mut()
             .find(|f| f.start() == segment.start())
