@@ -32,7 +32,7 @@ use crate::{
     store::Store,
     util::CoreResult,
 };
-use croaring::Bitmap;
+use croaring::{Bitmap, Bitmap64, Portable};
 use mem_btree::{
     persist::{self, KVSerializer, TreeWriter},
     BTree, BatchWrite,
@@ -44,6 +44,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
@@ -67,7 +68,7 @@ pub fn pos_write(path: PathBuf, data: &[u8]) -> CoreResult<()> {
     Ok(())
 }
 
-pub fn write_segment(store: &Store, reader: Box<MemSegmentReader>) -> CoreResult<()> {
+pub fn write_segment(store: &Store, reader: Arc<MemSegmentReader>) -> CoreResult<()> {
     // // 1.create dir for segment
     let active_path = store
         .base_path()
@@ -93,6 +94,8 @@ pub fn write_segment(store: &Store, reader: Box<MemSegmentReader>) -> CoreResult
 
     pos_write(data_path.join("version"), &version)?;
 
+    write_del(&data_path, &reader)?;
+
     write_name(&data_path, &reader)?;
 
     write_source(&data_path, &reader)?;
@@ -104,6 +107,55 @@ pub fn write_segment(store: &Store, reader: Box<MemSegmentReader>) -> CoreResult
     std::fs::rename(&data_path, active_path)?;
 
     Ok(())
+}
+
+fn write_del(data_path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
+    if !reader.dels.read().unwrap().is_empty() {
+        let buffer = reader.dels.read().unwrap().serialize::<Portable>();
+        pos_write(data_path.join("_dels"), &buffer)?;
+    }
+    if !reader.dels_history.is_empty() {
+        let buffer = reader.dels_history.serialize::<Portable>();
+        pos_write(data_path.join("_dels_history"), &buffer)?;
+    }
+    Ok(())
+}
+
+pub fn read_del(data_path: &Path) -> CoreResult<Bitmap> {
+    let path = data_path.join("_dels");
+    if path.exists() {
+        let buffer = std::fs::read(path)?;
+        Ok(Bitmap::deserialize::<Portable>(&buffer))
+    } else {
+        Ok(Bitmap::new())
+    }
+}
+
+pub fn read_history_del(data_path: &Path) -> CoreResult<Option<Bitmap64>> {
+    let path = data_path.join("_dels_history");
+    if path.exists() {
+        let buffer = std::fs::read(path)?;
+        Ok(Some(Bitmap64::deserialize::<Portable>(&buffer)))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn rm_history_del(data_path: &Path) -> CoreResult<()> {
+    let path = data_path.join("_dels_history");
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+pub fn merge_del_history(data_path: &Path, dels: &Bitmap) -> CoreResult<()> {
+    let mut data = read_del(data_path)?;
+    data.or_inplace(dels);
+    data.run_optimize();
+    data.shrink_to_fit();
+    let buffer = data.serialize::<Portable>();
+    pos_write(data_path.join("_dels"), &buffer)
 }
 
 fn wrrite_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
@@ -142,7 +194,7 @@ fn wrrite_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
         };
 
     for (field, ft) in reader.index_fulltext.iter() {
-        write_fulltext(path.join(field), ft, &reader.dels)?;
+        write_fulltext(path.join(field), ft, &reader.dels.read().unwrap())?;
     }
 
     Ok(())
@@ -178,7 +230,7 @@ fn write_terms(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
         };
 
     for e in reader.index_term.iter() {
-        write_term(path.join(e.0), e.1, &reader.dels)?;
+        write_term(path.join(e.0), e.1, &reader.dels.read().unwrap())?;
     }
 
     Ok(())
@@ -233,7 +285,7 @@ fn write_source(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
     reader
         .source_store
         .iter()
-        .filter(|e| !dels.contains(e.0))
+        .filter(|e| !dels.read().unwrap().contains(e.0))
         .for_each(|e| {
             bw.put(e.0, e.1.clone());
         });

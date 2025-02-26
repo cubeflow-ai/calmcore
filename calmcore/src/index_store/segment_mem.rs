@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use croaring::Bitmap;
+use croaring::{Bitmap, Bitmap64};
 use mem_btree::{BTree, BatchWrite};
 use proto::core::{Field, Record};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -30,6 +30,7 @@ pub struct MemSegment {
     start: u64,
     end: AtomicU64,
     dels: RwLock<Bitmap>,
+    dels_history: RwLock<Bitmap64>,
     source_store: RwLock<BTree<u32, Record>>,
     name_store: RwLock<BTree<String, u32>>,
     index_term: RwLock<HashMap<String, Arc<TermIndex>>>,
@@ -46,6 +47,7 @@ impl MemSegment {
             start,
             end: AtomicU64::new(start),
             dels: RwLock::new(Default::default()),
+            dels_history: RwLock::new(Default::default()),
             source_store: RwLock::new(BTree::new(32)),
             name_store: RwLock::new(BTree::new(32)),
             index_term: RwLock::new(HashMap::new()),
@@ -163,7 +165,11 @@ impl MemSegment {
     }
 
     pub(crate) fn mark_delete(&self, del: u64) {
-        self.dels.write().unwrap().remove((del - self.start) as u32);
+        if del < self.start {
+            self.dels_history.write().unwrap().add(del);
+        } else {
+            self.dels.write().unwrap().remove((del - self.start) as u32);
+        }
     }
 
     pub fn find_by_id(&self, id: u64) -> Option<Record> {
@@ -203,7 +209,8 @@ impl MemSegment {
         MemSegmentReader {
             start: self.start(),
             end: self.end(),
-            dels: self.dels.read().unwrap().clone(),
+            dels: RwLock::new(self.dels.read().unwrap().clone()),
+            dels_history: self.dels_history.read().unwrap().clone(),
             source_store: self.source_store.read().unwrap().clone(),
             name_store: self.name_store.read().unwrap().clone(),
             index_term,
@@ -217,7 +224,8 @@ impl MemSegment {
 pub struct MemSegmentReader {
     pub start: u64,
     pub end: u64,
-    pub dels: Bitmap,
+    pub dels: RwLock<Bitmap>,
+    pub dels_history: Bitmap64,
     pub source_store: BTree<u32, Record>,
     pub name_store: BTree<String, u32>,
     pub index_term: HashMap<String, TermIndexReader>,
@@ -239,7 +247,7 @@ impl MemSegmentReader {
             return Bitmap::new();
         }
         let all_records = Bitmap::from_iter((0..self.end - self.start + 1).map(|v| v as u32));
-        all_records - &self.dels
+        all_records - &*self.dels.read().unwrap()
     }
 
     pub(crate) fn between(
@@ -280,6 +288,10 @@ impl MemSegmentReader {
         self.index_term.get(field).map(|v| v.field().clone())
     }
 
+    pub(crate) fn mark_delete(&self, del: u64) {
+        self.dels.write().unwrap().add((del - self.start) as u32);
+    }
+
     fn abs_id(&self, id: u64) -> u32 {
         (id - self.start) as u32
     }
@@ -300,7 +312,7 @@ impl MemSegmentReader {
             store_type: "hot".to_string(),
             size_bytes: 0, //TODO impl me
             doc_count: self.source_store.len() as u32,
-            del_count: self.dels.cardinality() as u32,
+            del_count: self.dels.read().unwrap().cardinality() as u32,
             marker: self.marker.clone(),
         })
     }

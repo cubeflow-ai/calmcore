@@ -291,7 +291,7 @@ impl<K, V> TreeReader<K, V> {
 
     /// Find offset of a key in the node file using binary search
     fn find_key_offset(&self, key: &K) -> Option<i64> {
-        self.inner_find_key_offset(&*self.deserializer.serialize_key(key))
+        self.inner_find_key_offset(&self.deserializer.serialize_key(key))
     }
 
     fn inner_find_key_offset(&self, key: &[u8]) -> Option<i64> {
@@ -357,6 +357,7 @@ impl<K, V> TreeReader<K, V> {
         None
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn mget_key_node_offsets(&self, mut offset: usize, keys: &[Cow<'_, [u8]>]) -> Vec<Option<i64>> {
         let count = read_u16(&self.node, &mut offset) as usize;
 

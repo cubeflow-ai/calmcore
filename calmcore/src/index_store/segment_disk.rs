@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use croaring::{Bitmap, Portable};
+use croaring::Bitmap;
 use mem_btree::persist;
 use proto::core::{Field, Record};
 
@@ -21,6 +21,7 @@ use super::{
 };
 
 pub struct DiskSegment {
+    pub path: PathBuf,
     start: u64,
     end: u64,
     dels: RwLock<Bitmap>,
@@ -91,14 +92,7 @@ impl DiskSegment {
         let name_store =
             persist::TreeReader::new(&path.join("_name"), Box::new(U32BeDeserializer {}))?;
 
-        let dels_path = path.join("_dels");
-
-        let dels = if dels_path.exists() {
-            let buffer = std::fs::read(dels_path)?;
-            RwLock::new(Bitmap::deserialize::<Portable>(&buffer))
-        } else {
-            RwLock::new(Bitmap::new())
-        };
+        let dels = RwLock::new(crate::persist::read_del(&path)?);
 
         //read version
         let marker = crate::persist::read_version(&path)?.marker;
@@ -140,6 +134,7 @@ impl DiskSegment {
         }
 
         Ok(DiskSegment {
+            path,
             start,
             end,
             dels,
@@ -161,9 +156,12 @@ impl DiskSegment {
             })
     }
 
-    pub fn mark_delete(&self, _del: u64) {
-        unimplemented!();
-        // self.dels.write().unwrap().add((del - self.start) as u32);
+    pub fn mark_delete(&self, del: u64) {
+        self.dels.write().unwrap().add((del - self.start) as u32);
+    }
+
+    pub fn merge_delete(&self, del: &Bitmap) {
+        self.dels.write().unwrap().or_inplace(del);
     }
 
     pub fn end(&self) -> u64 {

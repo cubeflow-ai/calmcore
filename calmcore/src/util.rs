@@ -11,7 +11,7 @@ pub type CoreResult<T> = Result<T, CoreError>;
 #[derive(Debug, Error, Clone, Serialize, Deserialize)]
 pub enum CoreError {
     #[error("ok")]
-    Ok,
+    Ok(u64),
 
     #[error("{0}")]
     Internal(String),
@@ -41,7 +41,7 @@ pub enum CoreError {
 impl CoreError {
     pub fn code(&self) -> i32 {
         match self {
-            CoreError::Ok => 0,
+            CoreError::Ok(_) => 0,
             CoreError::Internal(_) => 1,
             CoreError::Duplicated(_) => 2,
             CoreError::NotExisted(_) => 3,
@@ -54,7 +54,7 @@ impl CoreError {
     }
 
     pub fn is_ok(&self) -> bool {
-        matches!(self, CoreError::Ok)
+        matches!(self, CoreError::Ok(_))
     }
 }
 

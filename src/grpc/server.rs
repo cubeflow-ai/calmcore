@@ -58,7 +58,7 @@ impl proto::calmserver::server_server::Server for GrpcServer {
         let record = engine.get(&req.record_name);
 
         return Ok(tonic::Response::new(GetResponse {
-            status: status(&CoreError::Ok),
+            status: status(&CoreError::Ok(0)),
             record,
         }));
     }
@@ -94,7 +94,7 @@ impl proto::calmserver::server_server::Server for GrpcServer {
             .collect_vec();
 
         Ok(tonic::Response::new(MutateResponse {
-            status: status(&CoreError::Ok),
+            status: status(&CoreError::Ok(0)),
             record_status: results,
         }))
     }
@@ -120,7 +120,7 @@ impl proto::calmserver::server_server::Server for GrpcServer {
         let result = result!(result, SearchResponse);
 
         Ok(tonic::Response::new(SearchResponse {
-            status: status(&CoreError::Ok),
+            status: status(&CoreError::Ok(0)),
             result: Some(result),
             timeuse_mill: 0,
         }))
@@ -143,7 +143,7 @@ impl proto::calmserver::server_server::Server for GrpcServer {
         result!(result, CreateEngineResponse);
 
         Ok(tonic::Response::new(CreateEngineResponse {
-            status: status(&CoreError::Ok),
+            status: status(&CoreError::Ok(0)),
         }))
     }
 
@@ -158,7 +158,7 @@ impl proto::calmserver::server_server::Server for GrpcServer {
         result!(result, LoadEngineResponse);
 
         Ok(tonic::Response::new(LoadEngineResponse {
-            status: status(&CoreError::Ok),
+            status: status(&CoreError::Ok(0)),
         }))
     }
 
@@ -170,7 +170,7 @@ impl proto::calmserver::server_server::Server for GrpcServer {
         let result = self.service.core().release_engine(&req.name);
         result!(result, ReleaseEngineResponse);
         Ok(tonic::Response::new(ReleaseEngineResponse {
-            status: status(&CoreError::Ok),
+            status: status(&CoreError::Ok(0)),
         }))
     }
 }

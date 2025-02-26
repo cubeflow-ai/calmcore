@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, path::PathBuf, sync::Arc};
+use std::{borrow::Cow, sync::Arc};
 
 use croaring::Bitmap;
 use proto::core::{Field, Record};
@@ -6,62 +6,13 @@ use proto::core::{Field, Record};
 use crate::util::CoreResult;
 
 use super::{
-    index_fulltext::reader::FulltextIndexReader,
-    segment_disk::DiskSegment,
-    segment_mem::{MemSegment, MemSegmentReader},
+    index_fulltext::reader::FulltextIndexReader, segment_disk::DiskSegment,
+    segment_mem::MemSegmentReader,
 };
 
-pub enum Segment {
-    Hot(Box<MemSegment>),
-    Warm(Arc<DiskSegment>),
-}
-
-impl Segment {
-    pub fn new(
-        path: PathBuf,
-        fields: &HashMap<String, Arc<proto::core::Field>>,
-    ) -> CoreResult<Self> {
-        DiskSegment::new(path, fields).map(|d| Segment::Warm(Arc::new(d)))
-    }
-
-    pub(crate) fn mark_delete(&self, del: u64) {
-        match self {
-            Segment::Hot(s) => s.mark_delete(del),
-            Segment::Warm(s) => s.mark_delete(del),
-        }
-    }
-
-    pub(crate) fn end(&self) -> u64 {
-        match self {
-            Segment::Hot(h) => h.end(),
-            Segment::Warm(w) => w.end(),
-        }
-    }
-
-    pub(crate) fn start(&self) -> u64 {
-        match self {
-            Segment::Hot(h) => h.start(),
-            Segment::Warm(w) => w.start(),
-        }
-    }
-
-    pub(crate) fn reader(&self) -> SegmentReader {
-        match self {
-            Segment::Hot(h) => SegmentReader::Hot(Box::new(h.reader())),
-            Segment::Warm(w) => SegmentReader::Warm(w.clone()),
-        }
-    }
-
-    pub(crate) fn find_by_name(&self, name: &String) -> Option<u64> {
-        match self {
-            Segment::Hot(h) => h.find_by_name(name),
-            Segment::Warm(w) => w.find_by_name(name),
-        }
-    }
-}
-
+#[derive(Clone)]
 pub enum SegmentReader {
-    Hot(Box<MemSegmentReader>),
+    Hot(Arc<MemSegmentReader>),
     Warm(Arc<DiskSegment>),
 }
 
@@ -161,6 +112,20 @@ impl SegmentReader {
         match self {
             SegmentReader::Hot(h) => h.info(),
             SegmentReader::Warm(w) => w.info(),
+        }
+    }
+
+    pub(crate) fn mark_delete(&self, del: u64) {
+        match self {
+            SegmentReader::Hot(h) => h.mark_delete(del),
+            SegmentReader::Warm(w) => w.mark_delete(del),
+        }
+    }
+
+    pub(crate) fn find_by_name(&self, name: &String) -> Option<u64> {
+        match self {
+            SegmentReader::Hot(h) => h.find_by_name(name),
+            SegmentReader::Warm(w) => w.find_by_name(name),
         }
     }
 }

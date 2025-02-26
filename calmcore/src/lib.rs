@@ -159,7 +159,7 @@ impl RecordWrapper {
                 record,
                 value: Some(value),
                 vectors,
-                result: CoreError::Ok,
+                result: CoreError::Ok(0),
             },
             Some(Err(result)) => Self {
                 action_type,
@@ -173,7 +173,7 @@ impl RecordWrapper {
                 record,
                 value: None,
                 vectors,
-                result: CoreError::Ok,
+                result: CoreError::Ok(0),
             },
         }
     }

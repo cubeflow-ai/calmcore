@@ -77,6 +77,7 @@ where
         self.children[self.search_index(k)].get(k)
     }
 
+    #[allow(clippy::mut_range_bound)]
     pub fn mget<Q>(&self, k: &[Q]) -> Vec<Option<&V>>
     where
         K: Borrow<Q> + Ord,
@@ -89,13 +90,13 @@ where
         let items = self
             .children
             .iter()
-            .filter_map(|c| match c.key() {
-                Some(_) => Some(c),
-                None => None,
+            .filter_map(|c| {
+                c.key()?;
+                Some(c)
             })
             .collect::<Vec<_>>();
 
-        if items.len() == 0 {
+        if items.is_empty() {
             return vec![None; k.len()];
         }
 

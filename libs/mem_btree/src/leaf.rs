@@ -64,6 +64,7 @@ where
         None
     }
 
+    #[allow(clippy::mut_range_bound, clippy::needless_borrow)]
     pub fn mget<Q>(&self, k: &[Q]) -> Vec<Option<&V>>
     where
         K: Borrow<Q> + Ord,
@@ -80,7 +81,7 @@ where
         for i_ptr in 0..self.items.len() {
             let item = &self.items[i_ptr];
             for _ in k_ptr..k.len() {
-                match item.0.borrow().cmp(&k[k_ptr].borrow()) {
+                match item.0.borrow().cmp(&&k[k_ptr]) {
                     std::cmp::Ordering::Equal => {
                         result.push(Some(&item.1));
                         k_ptr += 1;
