@@ -112,11 +112,19 @@ pub struct Field {
     pub name: ::prost::alloc::string::String,
     #[prost(enumeration = "field::Type", tag = "2")]
     pub r#type: i32,
-    #[prost(oneof = "field::Option", tags = "3, 4")]
+    #[prost(oneof = "field::Option", tags = "3, 4, 5")]
     pub option: ::core::option::Option<field::Option>,
 }
 /// Nested message and enum types in `Field`.
 pub mod field {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct TermOption {
+        #[prost(bool, tag = "1")]
+        pub no_index: bool,
+        #[prost(bool, tag = "2")]
+        pub no_store: bool,
+    }
     #[derive(serde::Serialize, serde::Deserialize)]
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct EmbeddingOption {
@@ -189,6 +197,8 @@ pub mod field {
         pub stopwords: ::core::option::Option<super::Dict>,
         #[prost(message, optional, tag = "4")]
         pub synonyms: ::core::option::Option<super::Dict>,
+        #[prost(bool, tag = "7")]
+        pub no_store: bool,
     }
     /// Nested message and enum types in `FulltextOption`.
     pub mod fulltext_option {
@@ -323,8 +333,10 @@ pub mod field {
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Option {
         #[prost(message, tag = "3")]
-        Embedding(EmbeddingOption),
+        Term(TermOption),
         #[prost(message, tag = "4")]
+        Embedding(EmbeddingOption),
+        #[prost(message, tag = "5")]
         Fulltext(FulltextOption),
     }
 }
@@ -406,7 +418,7 @@ pub struct Hit {
     #[prost(float, tag = "2")]
     pub score: f32,
     #[prost(message, optional, tag = "3")]
-    pub record: ::core::option::Option<Record>,
+    pub value: ::core::option::Option<ObjectValue>,
     #[prost(bytes = "vec", repeated, tag = "4")]
     pub sort: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }

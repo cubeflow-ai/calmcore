@@ -119,7 +119,7 @@ pub struct GetResponse {
     #[prost(message, optional, tag = "1")]
     pub status: ::core::option::Option<Status>,
     #[prost(message, optional, tag = "2")]
-    pub record: ::core::option::Option<super::core::Record>,
+    pub value: ::core::option::Option<super::core::ObjectValue>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]

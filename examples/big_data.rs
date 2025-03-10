@@ -31,8 +31,16 @@ fn query(schema_name: &str, data_path: &str) -> CoreResult<()> {
     );
 
     let start = Instant::now();
-    for _ in 0..10000 {
-        engine.sql("select * from validate_test where city='北京' limit 10")?;
+    for i in 0..1 {
+        let result: proto::core::QueryResult =
+            engine.sql("select age from validate_test where city='北京' and age = 18 limit 10")?;
+
+        if i == 0 {
+            println!(
+                "Query result: {}",
+                serde_json::to_string(&result.to_wrapper()).unwrap()
+            );
+        }
     }
 
     println!("Query finished in {:?}", start.elapsed());

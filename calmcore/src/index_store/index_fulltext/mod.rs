@@ -119,6 +119,7 @@ impl FulltextIndex {
         if records.is_empty() {
             return;
         }
+
         let mut handler = self.handler();
         for r in records {
             if let Some(val) = &r.value {

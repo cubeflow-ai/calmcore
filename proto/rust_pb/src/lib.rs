@@ -45,12 +45,6 @@ impl Ord for core::Hit {
     }
 }
 
-impl core::Record {
-    pub fn to_wrapper(self) -> result_wrapper::RecordWrapper {
-        result_wrapper::RecordWrapper::new(self)
-    }
-}
-
 impl core::QueryResult {
     pub fn to_wrapper(self) -> result_wrapper::QueryResultWrapper {
         result_wrapper::QueryResultWrapper::new(self)
@@ -58,11 +52,12 @@ impl core::QueryResult {
 }
 
 pub mod result_wrapper {
+    use std::collections::HashMap;
     use std::fmt::Debug;
 
     use crate::calmserver::*;
+    use crate::core::value::Kind;
     use crate::core::*;
-    use serde_json::json;
 
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
     pub struct SearchResponseWrapper {
@@ -86,10 +81,45 @@ pub mod result_wrapper {
     }
 
     #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct ObjectValueWrapper {
+        pub value: HashMap<String, serde_json::Value>,
+    }
+
+    impl ObjectValueWrapper {
+        pub fn new(value: ObjectValue) -> Self {
+            let value = value
+                .fields
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        k,
+                        match v.kind.unwrap() {
+                            Kind::BoolValue(b) => serde_json::json!(b),
+                            Kind::IntValue(i) => serde_json::json!(i),
+                            Kind::FloatValue(f) => serde_json::json!(f),
+                            Kind::StringValue(s) => serde_json::json!(s),
+                            _ => unreachable!("unsupported value type"),
+                        },
+                    )
+                })
+                .collect();
+            Self { value }
+        }
+    }
+
+    impl Debug for ObjectValueWrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            serde_json::to_string(self)
+                .map_err(|_| std::fmt::Error)
+                .and_then(|s| write!(f, "{}", s))
+        }
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
     pub struct HitWrapper {
         pub id: u64,
         pub score: f32,
-        pub record: Option<RecordWrapper>,
+        pub value: Option<ObjectValueWrapper>,
     }
 
     impl Debug for HitWrapper {
@@ -100,38 +130,12 @@ pub mod result_wrapper {
         }
     }
 
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct RecordWrapper {
-        pub name: String,
-        pub data: serde_json::Value,
-        pub vectors: Vec<Vector>,
-    }
-
-    impl Debug for RecordWrapper {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            serde_json::to_string(self)
-                .map_err(|_| std::fmt::Error)
-                .and_then(|s| write!(f, "{}", s))
-        }
-    }
-
-    impl RecordWrapper {
-        pub fn new(record: Record) -> Self {
-            let data = serde_json::from_slice(&record.data).unwrap_or_else(|_| json!(&record.data));
-            Self {
-                name: record.name,
-                data,
-                vectors: record.vectors,
-            }
-        }
-    }
-
     impl HitWrapper {
         pub fn new(hit: Hit) -> Self {
             Self {
                 id: hit.id,
                 score: hit.score,
-                record: hit.record.map(RecordWrapper::new),
+                value: hit.value.map(ObjectValueWrapper::new),
             }
         }
     }

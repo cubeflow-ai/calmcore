@@ -1,7 +1,8 @@
 use std::{borrow::Cow, sync::Arc};
 
+use arrow::array::RecordBatch;
 use croaring::Bitmap;
-use proto::core::{Field, Record};
+use proto::core::{Field, ObjectValue, Record};
 
 use crate::util::CoreResult;
 
@@ -73,24 +74,31 @@ impl SegmentReader {
         }
     }
 
-    pub(crate) fn doc(&self, id: u64) -> Option<Cow<Record>> {
+    pub(crate) fn doc(&self, id: u64) -> Option<Cow<ObjectValue>> {
+        // match self {
+        //     SegmentReader::Hot(h) => h.doc(id),
+        //     SegmentReader::Warm(w) => w.doc(id),
+        // }
+        todo!()
+    }
+
+    pub(crate) fn batch_doc(
+        &self,
+        columns: Option<&[String]>,
+        ids: &[u64],
+    ) -> CoreResult<Vec<Cow<ObjectValue>>> {
         match self {
-            SegmentReader::Hot(h) => h.doc(id),
-            SegmentReader::Warm(w) => w.doc(id),
+            SegmentReader::Hot(h) => Ok(h.batch_doc(ids)),
+            SegmentReader::Warm(w) => w
+                .batch_doc(columns, ids)
+                .map(|v| v.into_iter().map(Cow::Owned).collect()),
         }
     }
 
-    pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Option<Cow<Record>>> {
-        match self {
-            SegmentReader::Hot(h) => h.batch_doc(ids),
-            SegmentReader::Warm(w) => w.batch_doc(ids),
-        }
-    }
-
-    pub(crate) fn get(&self, name: &String) -> Option<Cow<Record>> {
+    pub(crate) fn get(&self, name: &String) -> Option<Cow<ObjectValue>> {
         match self {
             SegmentReader::Hot(h) => h.get(name),
-            SegmentReader::Warm(w) => w.get(name),
+            SegmentReader::Warm(w) => w.get(name).ok()?.map(Cow::Owned),
         }
     }
 

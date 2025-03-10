@@ -9,7 +9,13 @@ pub struct TermDeserializer;
 
 impl persist::KVDeserializer<Vec<u8>, Bitmap> for TermDeserializer {
     fn deserialize_value(&self, v: &[u8]) -> std::result::Result<Bitmap, Box<dyn Error>> {
-        Bitmap::try_deserialize::<Portable>(v).ok_or_else(|| {
+        if v[0] == 0 {
+            let mut bitmap = Bitmap::new();
+            bitmap.add(u32::from_be_bytes(v[1..].try_into().unwrap()));
+            return Ok(bitmap);
+        }
+
+        Bitmap::try_deserialize::<Portable>(&v[1..]).ok_or_else(|| {
             CoreError::DecodeError("decode bitmap err".to_string(), v.to_vec()).into()
         })
     }
@@ -28,10 +34,22 @@ impl persist::KVSerializer<Vec<u8>, Bitmap> for TermSerializer {
     }
 
     fn serialize_value<'a>(&self, v: &'a Bitmap) -> std::borrow::Cow<'a, [u8]> {
+        if v.cardinality() == 1 {
+            let mut data = Vec::with_capacity(5);
+            data.push(0);
+            data.extend_from_slice(&v.iter().next().unwrap().to_be_bytes()[..]);
+            return Cow::Owned(data);
+        }
+
+        let mut dst = Vec::new();
+        dst.push(1);
+
         let mut optimized = v.clone();
         optimized.run_optimize();
         optimized.shrink_to_fit();
-        Cow::Owned(optimized.serialize::<Portable>())
+
+        let _ = optimized.serialize_into_vec::<Portable>(&mut dst);
+        Cow::Owned(dst)
     }
 }
 

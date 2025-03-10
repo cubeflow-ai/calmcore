@@ -58,56 +58,90 @@ impl CoreError {
     }
 }
 
+// 添加一个辅助函数来处理backtrace
+fn log_error_with_backtrace<E: std::fmt::Debug>(e: &E) {
+    // 检查环境变量是否启用backtrace
+    if std::env::var("RUST_BACKTRACE").unwrap_or_default() == "1" {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!("{:?}\nBacktrace:\n{:?}", e, backtrace);
+    } else {
+        log::error!("{:?} (no set RUST_BACKTRACE=1)", e);
+    }
+}
+
 impl From<prost::DecodeError> for CoreError {
     fn from(e: prost::DecodeError) -> Self {
+        log_error_with_backtrace(&e);
         CoreError::DecodeError(e.to_string(), vec![])
     }
 }
 
 impl From<serde_json::Error> for CoreError {
     fn from(e: serde_json::Error) -> Self {
+        log_error_with_backtrace(&e);
         CoreError::DecodeError(e.to_string(), vec![])
     }
 }
 
 impl From<std::str::ParseBoolError> for CoreError {
     fn from(e: std::str::ParseBoolError) -> Self {
+        log_error_with_backtrace(&e);
         CoreError::InvalidParam(e.to_string())
     }
 }
 
 impl From<std::num::ParseIntError> for CoreError {
     fn from(e: std::num::ParseIntError) -> Self {
+        log_error_with_backtrace(&e);
         CoreError::InvalidParam(e.to_string())
     }
 }
 
 impl From<std::convert::Infallible> for CoreError {
     fn from(e: std::convert::Infallible) -> Self {
+        log_error_with_backtrace(&e);
         CoreError::InvalidParam(e.to_string())
     }
 }
 
 impl From<sqlparser::parser::ParserError> for CoreError {
     fn from(e: sqlparser::parser::ParserError) -> Self {
+        log_error_with_backtrace(&e);
         CoreError::InvalidParam(e.to_string())
     }
 }
 
 impl From<std::num::ParseFloatError> for CoreError {
     fn from(e: std::num::ParseFloatError) -> Self {
+        log_error_with_backtrace(&e);
         CoreError::InvalidParam(e.to_string())
+    }
+}
+
+impl From<arrow::error::ArrowError> for CoreError {
+    fn from(e: arrow::error::ArrowError) -> Self {
+        log_error_with_backtrace(&e);
+        CoreError::Internal(e.to_string())
+    }
+}
+
+impl From<parquet::errors::ParquetError> for CoreError {
+    fn from(e: parquet::errors::ParquetError) -> Self {
+        log_error_with_backtrace(&e);
+        CoreError::Internal(e.to_string())
     }
 }
 
 impl From<std::io::Error> for CoreError {
     fn from(e: std::io::Error) -> Self {
+        log_error_with_backtrace(&e);
         CoreError::IOError(e.to_string())
     }
 }
 
 impl From<bincode::Error> for CoreError {
     fn from(e: bincode::Error) -> Self {
+        log_error_with_backtrace(&e);
         CoreError::DecodeError(e.to_string(), vec![])
     }
 }
@@ -385,5 +419,81 @@ pub fn kind_to_vec(kind: &Kind) -> CoreResult<KindType<Vec<u8>>> {
             "field:{:?} can not memcomparable err:{:?}",
             kind, e
         ))),
+    }
+}
+
+/// Group the range of the array by the keys
+pub fn group_range<'a, K, V, F>(arr: &'a [V], keys: &'a [K], mut f: F) -> Vec<(&'a V, &'a [K])>
+where
+    F: FnMut(&V, Option<&V>, &K) -> std::cmp::Ordering,
+{
+    let mut result = Vec::with_capacity(arr.len());
+    if arr.is_empty() || keys.is_empty() {
+        return result;
+    }
+
+    let mut v_start = 0;
+    let mut k_start = 0;
+
+    let mut start = None;
+
+    while k_start < keys.len() && v_start < arr.len() {
+        match f(&arr[v_start], arr.get(v_start + 1), &keys[k_start]) {
+            std::cmp::Ordering::Less => {
+                k_start += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                if start.is_none() {
+                    start = Some(k_start);
+                }
+                k_start += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                if let Some(start) = start {
+                    result.push((&arr[v_start], &keys[start..k_start]));
+                }
+                start = None;
+                v_start += 1;
+            }
+        }
+    }
+
+    if let Some(start) = start {
+        result.push((&arr[usize::min(v_start, arr.len() - 1)], &keys[start..]));
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::group_range;
+
+    #[test]
+    fn test_group_range() {
+        let arr = vec![0, 10, 20, 30];
+
+        let keys = vec![
+            -10, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+            22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+        ];
+
+        let abc = group_range(&arr, &keys, |a1, a2, k| {
+            if a1 > k {
+                return std::cmp::Ordering::Less;
+            }
+
+            if let Some(a2) = a2 {
+                if a2 > k {
+                    return std::cmp::Ordering::Equal;
+                } else {
+                    return std::cmp::Ordering::Greater;
+                }
+            }
+
+            std::cmp::Ordering::Equal
+        });
+
+        println!("{:#?}", abc);
     }
 }

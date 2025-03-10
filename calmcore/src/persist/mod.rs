@@ -18,6 +18,8 @@
 //!
 //!
 
+pub mod arrow_util;
+pub mod block_reader;
 pub mod schema;
 
 use crate::{
@@ -30,19 +32,32 @@ use crate::{
         segment_mem::MemSegmentReader,
     },
     store::Store,
-    util::CoreResult,
+    util::{CoreError, CoreResult},
 };
+use arrow::{
+    array::{Array, ArrayBuilder, RecordBatch, StructArray, StructBuilder},
+    datatypes::{DataType, Field, Schema},
+};
+use arrow_util::{write_none, write_object_to_arrow};
 use croaring::{Bitmap, Bitmap64, Portable};
+use itertools::Itertools;
 use mem_btree::{
     persist::{self, KVSerializer, TreeWriter},
     BTree, BatchWrite,
+};
+use memmap2::MmapOptions;
+use parquet::{
+    arrow::ArrowWriter,
+    basic::Compression,
+    file::properties::{EnabledStatistics, WriterProperties},
+    record,
 };
 use proto::core::Record;
 use serde_json::json;
 use std::{
     borrow::Cow,
-    fs::File,
-    io::Read,
+    fs::{File, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -277,23 +292,83 @@ fn write_name(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
 }
 
 fn write_source(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
+    let path = &path.join("_source");
+    std::fs::create_dir_all(path)?;
+
     let dels = &reader.dels;
-    let mut persist_tree = BTree::new(1024);
 
-    let mut bw = BatchWrite::default();
+    let schema = arrow_util::make_arrow_schema(reader);
 
-    reader
-        .source_store
-        .iter()
-        .filter(|e| !dels.read().unwrap().contains(e.0))
-        .for_each(|e| {
-            bw.put(e.0, e.1.clone());
-        });
+    let mut builder = StructBuilder::from_fields(schema.fields.clone(), 1024);
 
-    persist_tree.write(bw);
+    let mut index_file = File::create(path.join("index"))?;
+    let mut data_file = File::create(path.join("data"))?;
 
-    TreeWriter::new(persist_tree, 4, Box::new(SourceSerializer {}))
-        .persist(&path.join("_source"))?;
+    for chunk in &reader.source_store.iter().chunks(1024) {
+        let arr = chunk.collect_vec();
+
+        let start = arr.first().unwrap().0 as u64 + reader.start;
+        let end = arr.last().unwrap().0 as u64 + reader.start;
+
+        for a in arr {
+            if dels.read().unwrap().contains(a.0) {
+                write_none(&schema, &mut builder);
+            } else {
+                write_object_to_arrow(&schema, &mut builder, &a.1)?;
+            }
+            builder.append(true);
+        }
+
+        write_block(
+            &mut index_file,
+            &mut data_file,
+            start,
+            end,
+            builder.finish(),
+        )?;
+    }
+
+    index_file.flush()?;
+    data_file.flush()?;
+
+    Ok(())
+}
+
+fn write_block(
+    index_file: &mut File,
+    data_file: &mut File,
+    start: u64,
+    end: u64,
+    sa: StructArray,
+) -> CoreResult<()> {
+    use parquet::{
+        arrow::ArrowWriter,
+        basic::Compression,
+        file::properties::{EnabledStatistics, WriterProperties},
+    };
+
+    let record_batch = RecordBatch::from(sa);
+
+    let props = WriterProperties::builder()
+        .set_compression(Compression::LZ4)
+        .set_statistics_enabled(EnabledStatistics::Page)
+        .set_max_row_group_size(1024 * 1024)
+        .build();
+
+    index_file.write_all(start.to_be_bytes().as_ref())?;
+    index_file.write_all(end.to_be_bytes().as_ref())?;
+    index_file.write_all(data_file.metadata().unwrap().len().to_be_bytes().as_ref())?;
+
+    {
+        // 创建ArrowWriter，它会将Arrow数据转换为Parquet格式
+        let mut writer = ArrowWriter::try_new(&mut *data_file, record_batch.schema(), Some(props))?;
+        // 写入记录批次
+        writer.write(&record_batch)?;
+        // 关闭写入器，确保数据被刷新到磁盘
+        writer.close()?;
+    }
+
+    index_file.write_all(data_file.metadata().unwrap().len().to_be_bytes().as_ref())?;
 
     Ok(())
 }

@@ -55,11 +55,11 @@ impl proto::calmserver::server_server::Server for GrpcServer {
         let req = request.into_inner();
         let engine = get_engine!(self, &req.engine_name, GetResponse);
 
-        let record = engine.get(&req.record_name);
+        let value = engine.get(&req.record_name);
 
         return Ok(tonic::Response::new(GetResponse {
             status: status(&CoreError::Ok(0)),
-            record,
+            value,
         }));
     }
 

@@ -1,9 +1,10 @@
 use std::{
+    borrow::Cow,
     path::PathBuf,
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
 };
 
-use proto::core::Record;
+use proto::core::{ObjectValue, Record};
 
 use crate::{
     index_store::{segment::SegmentReader, IndexStore, StoreInfo},
@@ -94,12 +95,12 @@ impl Store {
             .write(records, dels, self.max_id(), marker)
     }
 
-    pub fn get(&self, name: &String) -> Option<Record> {
+    pub fn get(&self, name: &String) -> Option<ObjectValue> {
         let readers: Vec<SegmentReader> = self.index_store.read().unwrap().segment_readers();
         readers
             .iter()
             .find_map(|r| r.get(name))
-            .map(|r| (*r).clone())
+            .map(Cow::into_owned)
     }
 
     fn increment_id(&self) -> u64 {
@@ -112,8 +113,12 @@ impl Store {
         self.increment_id.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn find_record_by_id(&self, id: u64) -> Option<Record> {
-        self.index_store.read().unwrap().find_by_id(id)
+    pub fn find_record_by_id(&self, id: u64) -> Option<ObjectValue> {
+        self.index_store
+            .read()
+            .unwrap()
+            .find_by_id(id)
+            .map(Cow::into_owned)
     }
 
     pub(crate) fn base_path(&self) -> &PathBuf {

@@ -64,7 +64,7 @@ message GetRequest {
 
 message GetResponse {
     Status status = 1;
-    core.Record record = 2;
+    core.ObjectValue value = 2;
 }
 
 

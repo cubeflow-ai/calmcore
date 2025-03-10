@@ -37,6 +37,7 @@ impl TryInto<Field> for GqlField {
                     filters: vec![],
                     stopwords: o.stopwords.map(|gd| gd.into()),
                     synonyms: o.synonyms.map(|gd| gd.into()),
+                    no_store: false,
                 }));
             }
             GqlType::Geo => field.set_type(Type::Geo),
@@ -156,6 +157,8 @@ pub enum GqlType {
 }
 
 pub mod result_wrapper {
+    use std::collections::HashMap;
+
     use proto::calmserver::SearchResponse;
     use serde_json::json;
 
@@ -176,7 +179,34 @@ pub mod result_wrapper {
     pub struct HitWrapper {
         pub id: u64,
         pub score: f32,
-        pub record: Option<RecordWrapper>,
+        pub value: Option<ObjectValueWrapper>,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct ObjectValueWrapper {
+        pub value: HashMap<String, serde_json::Value>,
+    }
+
+    impl ObjectValueWrapper {
+        pub fn new(value: proto::core::ObjectValue) -> Self {
+            let value = value
+                .fields
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        k,
+                        match v.kind.unwrap() {
+                            proto::core::value::Kind::BoolValue(b) => json!(b),
+                            proto::core::value::Kind::IntValue(i) => json!(i),
+                            proto::core::value::Kind::FloatValue(f) => json!(f),
+                            proto::core::value::Kind::StringValue(s) => json!(s),
+                            _ => unreachable!("unsupported value type"),
+                        },
+                    )
+                })
+                .collect();
+            Self { value }
+        }
     }
 
     #[derive(serde::Serialize, serde::Deserialize)]
@@ -202,7 +232,7 @@ pub mod result_wrapper {
             Self {
                 id: hit.id,
                 score: hit.score,
-                record: hit.record.map(RecordWrapper::new),
+                value: hit.value.map(ObjectValueWrapper::new),
             }
         }
     }

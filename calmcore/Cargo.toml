@@ -30,3 +30,5 @@ memmap2 = "0.9.5"
 proto = { path = "../proto/rust_pb" }
 hora = { path = "../libs/hora_lib" }
 mem_btree = { path = "../libs/mem_btree" }
+arrow = "54.2.0"
+parquet = "54.2.0"

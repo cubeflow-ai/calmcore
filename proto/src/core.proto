@@ -74,6 +74,11 @@ message Field {
         Vector = 6;
     }
 
+    message TermOption{
+        bool no_index = 1;
+        bool no_store = 2;
+    }
+
     message EmbeddingOption {
         enum Metric {
             DotProduct= 0;
@@ -101,14 +106,16 @@ message Field {
         repeated Filter filters = 2;
         Dict stopwords = 3;
         Dict synonyms = 4;
+        bool no_store = 7;
     }
     
 
     string name = 1;
     Type type = 2;
     oneof option {
-        EmbeddingOption embedding =3;
-        FulltextOption fulltext =4;
+        TermOption term = 3;
+        EmbeddingOption embedding =4;
+        FulltextOption fulltext =5;
     }
 }
 
@@ -136,7 +143,7 @@ message Query {
 message Hit {
     uint64 id = 1;
     float score = 2;
-    Record record = 3;
+    ObjectValue value = 3;
     repeated bytes sort = 4;
 }
 

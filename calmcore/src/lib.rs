@@ -39,6 +39,7 @@ pub mod analyzer;
 mod calm_core;
 mod embedding;
 mod engine;
+pub mod entity;
 mod index_store;
 mod job;
 pub mod persist;

@@ -6,13 +6,18 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use arrow::array::RecordBatch;
 use croaring::Bitmap;
 use itertools::Itertools;
-use mem_btree::persist;
-use proto::core::{Field, Record};
+use mem_btree::{
+    persist::{self, TreeReader},
+    BTree,
+};
+use proto::core::{Field, ObjectValue, Record};
 
 use crate::{
     index_store::index_fulltext::FulltextIndex,
+    persist::{arrow_util::batch_to_record, block_reader::BlockReader},
     util::{CoreError, CoreResult},
 };
 
@@ -27,7 +32,7 @@ pub struct DiskSegment {
     end: u64,
     dels: RwLock<Bitmap>,
     name_store: persist::TreeReader<String, u32>,
-    source_store: persist::TreeReader<u32, Record>,
+    source_store: BlockReader,
     index_terms: HashMap<String, TermIndexReader>,
     index_fulltext: HashMap<String, Arc<FulltextIndexReader>>,
     marker: Option<String>,
@@ -87,8 +92,7 @@ impl DiskSegment {
             usage_bytes
         );
 
-        let source_store =
-            persist::TreeReader::new(&path.join("_source"), Box::new(RecordDeserializer {}))?;
+        let source_store = BlockReader::new(&path.join("_source"))?;
 
         let name_store =
             persist::TreeReader::new(&path.join("_name"), Box::new(U32BeDeserializer {}))?;
@@ -207,25 +211,34 @@ impl DiskSegment {
             .ok_or_else(|| CoreError::InvalidParam(format!("field:{:?} not found", name)))
     }
 
-    pub(crate) fn doc(&self, id: u64) -> Option<Cow<Record>> {
-        self.source_store.get(&self.abs_id(id)).map(Cow::Owned)
+    pub(crate) fn doc(
+        &self,
+        columns: Option<&[String]>,
+        id: u64,
+    ) -> CoreResult<Option<ObjectValue>> {
+        Ok(self.batch_doc(columns, &vec![id])?.into_iter().next())
     }
 
-    pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Option<Cow<Record>>> {
-        let ids = ids.iter().map(|id| self.abs_id(*id)).collect_vec();
-        self.source_store
-            .mget(&ids)
-            .into_iter()
-            .map(|v| v.map(Cow::Owned))
-            .collect()
+    pub(crate) fn batch_doc(
+        &self,
+        columns: Option<&[String]>,
+        ids: &[u64],
+    ) -> CoreResult<Vec<ObjectValue>> {
+        let batch = match self.source_store.read(columns, ids)? {
+            Some(b) => b,
+            None => return Ok(vec![]),
+        };
+        Ok(batch_to_record(batch))
     }
 
     pub(crate) fn find_by_name(&self, name: &String) -> Option<u64> {
         self.name_store.get(name).map(|id| id as u64 + self.start)
     }
 
-    pub(crate) fn get(&self, name: &String) -> Option<Cow<Record>> {
-        self.find_by_name(name).and_then(|id| self.doc(id))
+    pub(crate) fn get(&self, name: &String) -> CoreResult<Option<ObjectValue>> {
+        self.find_by_name(name)
+            .map(|id| self.doc(None, id))
+            .ok_or_else(|| CoreError::InvalidParam(format!("record:{:?} not found", name)))?
     }
 
     pub(crate) fn get_field(&self, field: &str) -> Option<Arc<Field>> {
@@ -242,7 +255,7 @@ impl DiskSegment {
             end: self.end,
             store_type: "warm".to_string(),
             size_bytes: self.usage_bytes,
-            doc_count: self.source_store.len(),
+            doc_count: 0,
             del_count: self.dels.read().unwrap().cardinality() as u32,
             marker: self.marker.clone(),
         })

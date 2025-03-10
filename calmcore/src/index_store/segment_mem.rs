@@ -8,7 +8,7 @@ use std::{
 use croaring::{Bitmap, Bitmap64};
 use itertools::Itertools;
 use mem_btree::{BTree, BatchWrite};
-use proto::core::{Field, Record};
+use proto::core::{field::TermOption, value::Kind, Field, ObjectValue, Record, Value};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{
@@ -30,23 +30,54 @@ pub enum IndexEnum {
 pub struct MemSegment {
     start: u64,
     end: AtomicU64,
+    fields: Arc<Vec<Field>>,
     dels: RwLock<Bitmap>,
     dels_history: RwLock<Bitmap64>,
-    source_store: RwLock<BTree<u32, Record>>,
+    source_store: RwLock<BTree<u32, ObjectValue>>,
     name_store: RwLock<BTree<String, u32>>,
     index_term: RwLock<HashMap<String, Arc<TermIndex>>>,
     index_fulltext: RwLock<HashMap<String, Arc<FulltextIndex>>>,
     marker: RwLock<Option<String>>,
-    indexs_arr: RwLock<Vec<IndexEnum>>,
     created_at: std::time::Instant,
 }
 
 impl MemSegment {
     pub fn new(start: u64, fields: HashMap<String, Arc<Field>>) -> CoreResult<Self> {
         let start = start + 1;
-        let segment = MemSegment {
+
+        let mut fields = fields.values().map(|v| (&**v).clone()).collect_vec();
+
+        fields.push(Field {
+            name: "_id".to_string(),
+            r#type: proto::core::field::Type::Int as i32,
+            option: Some(proto::core::field::Option::Term(TermOption {
+                no_index: true,
+                no_store: false,
+            })),
+        });
+
+        fields.push(Field {
+            name: "_name".to_string(),
+            r#type: proto::core::field::Type::String as i32,
+            option: Some(proto::core::field::Option::Term(TermOption {
+                no_index: true,
+                no_store: false,
+            })),
+        });
+
+        use itertools::Itertools;
+
+        if fields.iter().map(|f| &f.name).dedup().count() != fields.len() {
+            return Err(CoreError::InvalidParam(format!(
+                "field name must be unique: fields:{:?}",
+                fields,
+            )));
+        }
+
+        let mut segment = MemSegment {
             start,
             end: AtomicU64::new(start),
+            fields: Arc::new(fields),
             dels: RwLock::new(Default::default()),
             dels_history: RwLock::new(Default::default()),
             source_store: RwLock::new(BTree::new(32)),
@@ -54,51 +85,55 @@ impl MemSegment {
             index_term: RwLock::new(HashMap::new()),
             index_fulltext: RwLock::new(HashMap::new()),
             marker: RwLock::new(None),
-            indexs_arr: RwLock::new(Vec::new()),
             created_at: std::time::Instant::now(),
         };
 
-        for (_, field) in fields {
-            segment.add_index_field(start, field)?;
-        }
+        segment.index_field()?;
+
+        for field in segment.fields.iter() {}
 
         Ok(segment)
     }
 
     /// add index field to segment
     /// if field already exists, return error
-    #[allow(clippy::arc_with_non_send_sync)]
-    pub fn add_index_field(&self, start: u64, field: Arc<Field>) -> CoreResult<()> {
-        let name = field.name.clone();
-        if self.index_term.read().unwrap().contains_key(&name) {
-            return Err(CoreError::Existed(format!(
-                "field {} already existed in index store",
-                name
-            )));
-        }
+    pub fn index_field(&mut self) -> CoreResult<()> {
+        let start = self.start;
+        for field in self.fields.iter() {
+            use proto::core::field::Type::*;
 
-        use proto::core::field::Type::*;
-        match field.r#type() {
-            Bool | Int | Float | String => {
-                let index = Arc::new(TermIndex::new_mem(start, field)?);
-                self.indexs_arr
-                    .write()
-                    .unwrap()
-                    .push(IndexEnum::TermIndex(index.clone()));
-                self.index_term.write().unwrap().insert(name, index);
-            }
-            proto::core::field::Type::Text => {
-                let index = Arc::new(FulltextIndex::new_mem(start, field)?);
-                self.indexs_arr
-                    .write()
-                    .unwrap()
-                    .push(IndexEnum::FulltextIndex(index.clone()));
-                self.index_fulltext.write().unwrap().insert(name, index);
-            }
-            proto::core::field::Type::Geo => todo!(),
-            proto::core::field::Type::Vector => todo!(),
-        }
+            let field = Arc::new(field.clone());
 
+            let name = field.name.clone();
+
+            match field.r#type() {
+                Bool | Int | Float | String => {
+                    if match &field.option {
+                        Some(proto::core::field::Option::Term(t)) => !t.no_index,
+                        Some(_) => {
+                            return Err(CoreError::InvalidParam(format!(
+                                "invalid option field:{:?}",
+                                field
+                            )))
+                        }
+                        None => true,
+                    } {
+                        self.index_term
+                            .write()
+                            .unwrap()
+                            .insert(name, Arc::new(TermIndex::new_mem(start, field)?));
+                    }
+                }
+                proto::core::field::Type::Text => {
+                    self.index_fulltext
+                        .write()
+                        .unwrap()
+                        .insert(name, Arc::new(FulltextIndex::new_mem(start, field)?));
+                }
+                proto::core::field::Type::Geo => todo!(),
+                proto::core::field::Type::Vector => todo!(),
+            }
+        }
         Ok(())
     }
 
@@ -108,18 +143,26 @@ impl MemSegment {
         max: u64,
         marker: Option<String>,
     ) -> Vec<CoreError> {
-        self.indexs_arr
+        self.index_term
             .read()
             .unwrap()
             .par_iter()
-            .for_each(|index| match index {
-                IndexEnum::TermIndex(i) => {
-                    i.write(&records);
-                }
-                IndexEnum::FulltextIndex(i) => {
-                    i.write(&records);
-                }
-            });
+            .for_each(|(_, i)| i.write(&records));
+
+        self.index_fulltext
+            .read()
+            .unwrap()
+            .par_iter()
+            .for_each(|(_, i)| i.write(&records));
+
+        let to_value = |value| {
+            let value: Value = value?;
+            if let Some(Kind::ObjectValue(obj)) = value.kind {
+                Some(obj)
+            } else {
+                None
+            }
+        };
 
         let mut source_bw = BatchWrite::default();
         let mut name_bw = BatchWrite::default();
@@ -131,7 +174,7 @@ impl MemSegment {
                 if !r.record.name.is_empty() {
                     name_bw.put(r.record.name.clone(), id);
                 }
-                source_bw.put(id, r.record);
+                source_bw.put(id, to_value(r.value).unwrap());
 
                 r.result
             })
@@ -173,12 +216,13 @@ impl MemSegment {
         }
     }
 
-    pub fn find_by_id(&self, id: u64) -> Option<Record> {
+    pub fn find_by_id(&self, id: u64) -> Option<Cow<ObjectValue>> {
         self.source_store
             .read()
             .unwrap()
             .get(&((id - self.start) as u32))
             .cloned()
+            .map(Cow::Owned)
     }
 
     pub(crate) fn find_by_name(&self, name: &String) -> Option<u64> {
@@ -196,20 +240,18 @@ impl MemSegment {
         let mut index_term = HashMap::new();
         let mut index_fulltext = HashMap::new();
 
-        for index in self.indexs_arr.read().unwrap().iter() {
-            match index {
-                IndexEnum::TermIndex(i) => {
-                    index_term.insert(i.field_name().to_string(), i.reader());
-                }
-                IndexEnum::FulltextIndex(f) => {
-                    index_fulltext.insert(f.field_name().to_string(), Arc::new(f.reader()));
-                }
-            }
+        for (n, i) in self.index_term.read().unwrap().iter() {
+            index_term.insert(n.to_string(), i.reader());
+        }
+
+        for (n, i) in self.index_fulltext.read().unwrap().iter() {
+            index_fulltext.insert(n.to_string(), Arc::new(i.reader()));
         }
 
         MemSegmentReader {
             start: self.start(),
             end: self.end(),
+            fields: self.fields.clone(),
             dels: RwLock::new(self.dels.read().unwrap().clone()),
             dels_history: self.dels_history.read().unwrap().clone(),
             source_store: self.source_store.read().unwrap().clone(),
@@ -225,9 +267,10 @@ impl MemSegment {
 pub struct MemSegmentReader {
     pub start: u64,
     pub end: u64,
+    pub fields: Arc<Vec<Field>>,
     pub dels: RwLock<Bitmap>,
     pub dels_history: Bitmap64,
-    pub source_store: BTree<u32, Record>,
+    pub source_store: BTree<u32, ObjectValue>,
     pub name_store: BTree<String, u32>,
     pub index_term: HashMap<String, TermIndexReader>,
     pub index_fulltext: HashMap<String, Arc<FulltextIndexReader>>,
@@ -273,24 +316,25 @@ impl MemSegmentReader {
             .ok_or_else(|| CoreError::InvalidParam(format!("field:{:?} not found", name)))
     }
 
-    pub(crate) fn doc(&self, id: u64) -> Option<Cow<Record>> {
+    pub(crate) fn doc(&self, id: u64) -> Option<Cow<ObjectValue>> {
         self.source_store.get(&self.abs_id(id)).map(Cow::Borrowed)
     }
 
-    pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Option<Cow<Record>>> {
+    pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Cow<ObjectValue>> {
         let ids = ids.iter().map(|id| self.abs_id(*id)).collect_vec();
         self.source_store
             .mget(&ids)
             .iter()
-            .map(|v| v.map(Cow::Borrowed))
-            .collect()
+            .filter_map(|v| *v)
+            .map(Cow::Borrowed)
+            .collect::<Vec<_>>()
     }
 
     pub(crate) fn find_by_name(&self, name: &str) -> Option<u64> {
         self.name_store.get(name).map(|v| (*v as u64) + self.start)
     }
 
-    pub(crate) fn get(&self, name: &str) -> Option<Cow<Record>> {
+    pub(crate) fn get(&self, name: &str) -> Option<Cow<ObjectValue>> {
         self.find_by_name(name).and_then(|id| self.doc(id))
     }
 

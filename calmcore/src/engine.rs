@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use itertools::Itertools;
-use proto::core::{Field, Query, QueryResult, Record, Schema};
+use proto::core::{Field, ObjectValue, Query, QueryResult, Record, Schema};
 
 use crate::index_store::seacher::Searcher;
 use crate::index_store::segment::SegmentReader;
@@ -176,7 +176,7 @@ impl Engine {
     /// Get a record by name from the Engine.
     /// Arguments:
     /// - `record_name` - The name of the record.
-    pub fn get(&self, record_name: &String) -> Option<Record> {
+    pub fn get(&self, record_name: &String) -> Option<ObjectValue> {
         self.store.get(record_name)
     }
 
@@ -456,11 +456,7 @@ mod tests {
         println!("{:?}---{:?}", result.total_hits, result.hits.len());
 
         for hi in result.hits.iter() {
-            println!(
-                "{:?}-------{}",
-                hi.score,
-                String::from_utf8(hi.record.as_ref().unwrap().data.clone()).unwrap()
-            );
+            println!("{:?}-------{:?}", hi.score, hi.value);
         }
 
         // Clean up
