@@ -90,8 +90,6 @@ impl MemSegment {
 
         segment.index_field()?;
 
-        for field in segment.fields.iter() {}
-
         Ok(segment)
     }
 
@@ -174,6 +172,7 @@ impl MemSegment {
                 if !r.record.name.is_empty() {
                     name_bw.put(r.record.name.clone(), id);
                 }
+
                 source_bw.put(id, to_value(r.value).unwrap());
 
                 r.result
@@ -186,6 +185,10 @@ impl MemSegment {
         {
             *self.name_store.write().unwrap() = name_store;
         }
+
+        let map = source_bw.into_map();
+
+        let source_bw = BatchWrite::from(map);
 
         //write id -> source mapping
         let mut source_store = { self.source_store.write().unwrap().clone() };

@@ -308,6 +308,7 @@ fn write_source(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
         let arr = chunk.collect_vec();
 
         let start = arr.first().unwrap().0 as u64 + reader.start;
+
         let end = arr.last().unwrap().0 as u64 + reader.start;
 
         for a in arr {

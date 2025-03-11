@@ -31,9 +31,9 @@ fn query(schema_name: &str, data_path: &str) -> CoreResult<()> {
     );
 
     let start = Instant::now();
-    for i in 0..1 {
+    for i in 0..10000 {
         let result: proto::core::QueryResult =
-            engine.sql("select age from validate_test where city='北京' and age = 18 limit 10")?;
+            engine.sql("select age from validate_test where city='北京' limit 10")?;
 
         if i == 0 {
             println!(

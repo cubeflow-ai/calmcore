@@ -69,10 +69,6 @@ impl SegmentSearcher<'_> {
         hits
     }
 
-    fn doc(&self, id: u64) -> Option<Cow<ObjectValue>> {
-        self.segment.doc(id)
-    }
-
     fn batch_doc(
         &self,
         columns: Option<&[String]>,
@@ -140,7 +136,6 @@ impl Searcher {
                     println!("topn_with_filter");
                     (self.topn_with_filter(limit, filters)?, None)
                 } else {
-                    println!("topn_with_filter======");
                     self.topn(limit, &order_by, streams)?
                 };
 
@@ -390,10 +385,6 @@ impl Searcher {
         order_by: &Vec<(Arc<Field>, bool)>,
         streams: Vec<Box<dyn HitStream>>,
     ) -> CoreResult<(Vec<SortedHit>, Option<u64>)> {
-        self.segments.iter().for_each(|s| {
-            println!("segment hot:{}", s.is_hot());
-        });
-
         let streams = self
             .segments
             .par_iter()
@@ -415,21 +406,11 @@ impl Searcher {
                 let hit_size = hits.len();
                 let ids = hits.iter().map(|h| h.id).collect_vec();
 
-                let records = stream.batch_doc(None, &ids)?;
+                if ids.is_empty() {
+                    break;
+                }
 
-                println!(
-                    "hot:{} start:{} end:{} ids:{:?}",
-                    stream.segment.is_hot(),
-                    stream.segment.start(),
-                    stream.segment.end(),
-                    ids
-                );
-                println!(
-                    "size:{} hits:{:?} records:{}",
-                    hit_size,
-                    hits.len(),
-                    records.len()
-                );
+                let records = stream.batch_doc(None, &ids)?;
 
                 real_count += hits.len();
 
@@ -447,6 +428,13 @@ impl Searcher {
                     };
 
                     heap.insert(sort_hit);
+
+                    if order_by.is_empty() && heap.len() == size {
+                        return Ok((
+                            heap.into_iter().skip(limit.0).take(limit.1).collect_vec(),
+                            None,
+                        ));
+                    }
 
                     if heap.len() > size {
                         min = heap.pop_last();

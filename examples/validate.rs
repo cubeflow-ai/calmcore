@@ -11,12 +11,6 @@ fn validate_query_results(
 ) -> CoreResult<bool> {
     let results = space.sql(query)?;
 
-    println!(
-        "======================returned {} results{}",
-        results.total_hits,
-        results.hits.len()
-    );
-
     if results.total_hits as usize != expected_count {
         println!(
             "Query '{}' returned {} results, expected {}",
