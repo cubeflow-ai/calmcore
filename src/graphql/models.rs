@@ -209,24 +209,6 @@ pub mod result_wrapper {
         }
     }
 
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct RecordWrapper {
-        pub name: String,
-        pub data: serde_json::Value,
-        pub vectors: Vec<proto::core::Vector>,
-    }
-
-    impl RecordWrapper {
-        pub fn new(record: proto::core::Record) -> Self {
-            let data = serde_json::from_slice(&record.data).unwrap_or(json!(&record.data));
-            Self {
-                name: record.name,
-                data,
-                vectors: record.vectors,
-            }
-        }
-    }
-
     impl HitWrapper {
         pub fn new(hit: proto::core::Hit) -> Self {
             Self {

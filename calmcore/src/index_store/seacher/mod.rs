@@ -4,24 +4,20 @@ pub(crate) mod plan;
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     sync::{Arc, LazyLock},
 };
 
-use arrow::array::RecordBatch;
 use context::SearchContext;
 use croaring::Bitmap;
 use itertools::Itertools;
 use plan::{PhysicsPlan, Query};
 use proto::core::{
     field::{self},
-    Field, Hit, ObjectValue, QueryResult, Record,
+    Field, Hit, ObjectValue, QueryResult,
 };
-use rayon::{
-    iter::{
-        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
-    },
-    result,
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
 
 use crate::util::{self, kind_to_vec, CoreError, CoreResult};
@@ -131,19 +127,24 @@ impl Searcher {
 
             let order_by = self.make_order_by(order_by)?;
 
+            let projection = if projection.len() == 0 {
+                None
+            } else {
+                Some(projection.as_slice())
+            };
+
             let (hits, realcount) =
                 if (streams.is_empty() && order_by.is_empty()) || limit.0 + limit.1 == 0 {
-                    println!("topn_with_filter");
-                    (self.topn_with_filter(limit, filters)?, None)
+                    (self.topn_with_filter(projection, filters, limit)?, None)
                 } else {
-                    self.topn(limit, &order_by, streams)?
+                    self.topn(projection, streams, &order_by, limit)?
                 };
 
             if let Some(realcount) = realcount {
                 total_hits = realcount;
             }
 
-            let hits = self.projection(&projection, hits)?;
+            let hits = self.projection(hits)?;
 
             QueryResult { hits, total_hits }
         };
@@ -195,7 +196,7 @@ impl Searcher {
         Ok(value)
     }
 
-    fn projection(&self, projection: &Vec<String>, hits: Vec<SortedHit>) -> CoreResult<Vec<Hit>> {
+    fn projection(&self, hits: Vec<SortedHit>) -> CoreResult<Vec<Hit>> {
         let mut result = Vec::with_capacity(hits.len());
         for hit in hits {
             let SortedHit {
@@ -205,18 +206,6 @@ impl Searcher {
                 sort,
                 ..
             } = hit;
-
-            // if !projection.is_empty() {
-            //     let mut new_obj = HashMap::new();
-            //     for field in projection {
-            //         if let Some(v) = value.remove(field) {
-            //             new_obj.insert(field, v);
-            //         }
-            //     }
-            //     if let Ok(v) = serde_json::to_vec(&new_obj) {
-            //         record.data = v;
-            //     }
-            // }
 
             result.push(Hit {
                 id,
@@ -253,40 +242,51 @@ impl Searcher {
 
     fn topn_with_filter(
         &self,
-        limit: (usize, usize),
+        projection: Option<&[String]>,
         filters: Vec<Bitmap>,
+        limit: (usize, usize),
     ) -> CoreResult<Vec<SortedHit>> {
-        let size = limit.0 + limit.1;
-
-        let mut skip = limit.0 as i32;
+        let skip = limit.0 as i32;
+        let size = limit.1 as usize;
 
         let mut results = Vec::with_capacity(size);
 
         'outer: for (b, s) in filters.into_iter().zip(self.segments.iter()) {
-            for v in b.iter() {
-                if skip > 0 {
-                    skip -= 1;
-                    continue;
+            let mut iter = b.iter();
+
+            if skip > 0 {
+                for _ in 0..skip {
+                    if iter.next().is_none() {
+                        break 'outer;
+                    }
                 }
+            }
 
-                let id = v as u64 + s.start();
+            loop {
+                let ids = iter
+                    .by_ref()
+                    .take(size)
+                    .map(|id| id as u64 + s.start())
+                    .collect_vec();
 
-                if let Some(record) = s.doc(id) {
+                let objects = s.batch_doc(projection, &ids)?;
+
+                for (v, record) in ids.into_iter().zip(objects) {
                     results.push(SortedHit {
-                        id,
+                        id: v,
                         score: 0.0,
                         value: record.into_owned(),
                         sort: Vec::new(),
                     });
-                }
 
-                if results.len() >= size {
-                    break 'outer;
+                    if results.len() >= size {
+                        break 'outer;
+                    }
                 }
             }
         }
 
-        Ok(results.into_iter().skip(limit.0).collect_vec())
+        Ok(results)
     }
 }
 
@@ -381,9 +381,10 @@ impl Eq for SortedHit {}
 impl Searcher {
     fn topn(
         &self,
-        limit: (usize, usize),
-        order_by: &Vec<(Arc<Field>, bool)>,
+        projection: Option<&[String]>,
         streams: Vec<Box<dyn HitStream>>,
+        order_by: &Vec<(Arc<Field>, bool)>,
+        limit: (usize, usize),
     ) -> CoreResult<(Vec<SortedHit>, Option<u64>)> {
         let streams = self
             .segments
@@ -410,7 +411,7 @@ impl Searcher {
                     break;
                 }
 
-                let records = stream.batch_doc(None, &ids)?;
+                let records = stream.batch_doc(projection, &ids)?;
 
                 real_count += hits.len();
 

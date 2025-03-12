@@ -93,10 +93,6 @@ impl FulltextIndex {
         }
     }
 
-    pub fn field_name(&self) -> &str {
-        &self.inner.name
-    }
-
     fn abs_id(&self, id: u64) -> u32 {
         (id - self.start) as u32
     }

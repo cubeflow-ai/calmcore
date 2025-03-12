@@ -1,21 +1,13 @@
-use std::{
-    fs::{self, File},
-    io::Cursor,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{fs::File, path::Path};
 
 use arrow::array::{RecordBatch, UInt32Array};
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::Bytes;
 use log::error;
 use memmap2::Mmap;
-use parquet::{
-    arrow::{
-        arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder},
-        ProjectionMask,
-    },
-    file::reader::SerializedFileReader,
+use parquet::arrow::{
+    arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder},
+    ProjectionMask,
 };
 
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -184,15 +176,9 @@ impl BlockReader {
 }
 
 mod tests {
-    use crate::index_store::segment_mem::MemSegment;
-
-    use super::*;
 
     #[test]
     fn test_block_reader() {
-        let path = PathBuf::from(
-            "/Users/sunjian/rustworkspace/calmcore/big_data/big_test/segments/1-3955000/_source",
-        );
         let reader = BlockReader::new(Path::new(
             "/Users/sunjian/rustworkspace/calmcore/big_data/big_test/segments/1-3955000/_source",
         ))

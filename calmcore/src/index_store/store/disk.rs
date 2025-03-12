@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, path::PathBuf, sync::RwLock};
+use std::path::PathBuf;
 
 use mem_btree::persist::{self, KVDeserializer};
 

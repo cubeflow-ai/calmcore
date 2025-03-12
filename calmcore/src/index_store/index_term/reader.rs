@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use croaring::Bitmap;
 use itertools::Itertools;
-use mem_btree::persist::KVSerializer;
+use mem_btree::{persist::KVSerializer, BTree};
 
 use crate::{
     index_store::store::{InvertIndexReader, IterKey},
@@ -72,5 +72,9 @@ impl TermIndexReader {
         });
 
         Ok(Bitmap::fast_or(&results.iter().collect_vec()))
+    }
+
+    pub fn clone_map(&self) -> BTree<Vec<u8>, Bitmap> {
+        self.term_record_index.clone_map()
     }
 }

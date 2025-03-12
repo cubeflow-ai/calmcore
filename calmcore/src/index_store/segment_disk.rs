@@ -6,14 +6,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use arrow::array::RecordBatch;
 use croaring::Bitmap;
-use itertools::Itertools;
-use mem_btree::{
-    persist::{self, TreeReader},
-    BTree,
-};
-use proto::core::{Field, ObjectValue, Record};
+use mem_btree::persist::{self};
+use proto::core::{Field, ObjectValue};
 
 use crate::{
     index_store::index_fulltext::FulltextIndex,
@@ -37,18 +32,6 @@ pub struct DiskSegment {
     index_fulltext: HashMap<String, Arc<FulltextIndexReader>>,
     marker: Option<String>,
     usage_bytes: u64,
-}
-
-struct RecordDeserializer;
-
-impl persist::KVDeserializer<u32, Record> for RecordDeserializer {
-    fn deserialize_value(&self, v: &[u8]) -> std::result::Result<Record, Box<dyn Error>> {
-        bincode::deserialize(v).map_err(|e| e.into())
-    }
-
-    fn serialize_key<'a>(&self, k: &'a u32) -> Cow<'a, [u8]> {
-        Cow::Owned(k.to_be_bytes().to_vec())
-    }
 }
 
 struct U32BeDeserializer;
@@ -243,10 +226,6 @@ impl DiskSegment {
 
     pub(crate) fn get_field(&self, field: &str) -> Option<Arc<Field>> {
         self.index_terms.get(field).map(|v| v.field().clone())
-    }
-
-    fn abs_id(&self, id: u64) -> u32 {
-        (id - self.start) as u32
     }
 
     pub(crate) fn info(&self) -> CoreResult<super::SegmentInfo> {

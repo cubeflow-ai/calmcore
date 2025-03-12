@@ -4,7 +4,7 @@ use std::{
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
 };
 
-use proto::core::{ObjectValue, Record};
+use proto::core::ObjectValue;
 
 use crate::{
     index_store::{segment::SegmentReader, IndexStore, StoreInfo},
@@ -115,12 +115,13 @@ impl Store {
         self.increment_id.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn find_record_by_id(&self, id: u64) -> Option<ObjectValue> {
-        self.index_store
+    pub fn find_record_by_id<'a>(&'a self, id: u64) -> CoreResult<Option<ObjectValue>> {
+        Ok(self
+            .index_store
             .read()
             .unwrap()
-            .find_by_id(id)
-            .map(Cow::into_owned)
+            .find_by_id(id)?
+            .map(|v| v.into_owned()))
     }
 
     pub(crate) fn base_path(&self) -> &PathBuf {

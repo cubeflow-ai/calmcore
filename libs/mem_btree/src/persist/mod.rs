@@ -5,7 +5,6 @@ use std::{
     collections::LinkedList,
     error::Error,
     fs::{File, OpenOptions},
-    hash::Hash,
     io::{BufWriter, Read, Seek, Write},
     path::{Path, PathBuf},
 };
@@ -119,10 +118,16 @@ where
 
         zigzag::write_u16(items.len() as u16, node_file)?;
 
+        let mut data_offsets = Vec::with_capacity(items.len());
+        let mut data_len = Vec::with_capacity(items.len());
+        let mut node_data = Vec::new();
+        let mut node_offsets = Vec::with_capacity(items.len());
+
         for k in items {
             let key_bytes = self.serializer.serialize_key(&k.0);
             if self.var_len {
-                zigzag::write_u16(key_bytes.len() as u16, node_file)?;
+                node_offsets.push(key_bytes.len() as u16);
+                // zigzag::write_u16(key_bytes.len() as u16, node_file)?;
             };
 
             node_file.write_all(&key_bytes)?;

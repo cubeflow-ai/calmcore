@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBuilder, Float32Array, Float32Builder,
-        Float64Array, Float64Builder, Int64Array, Int64Builder, LargeStringBuilder, StringArray,
-        StringBuilder, StructArray, StructBuilder, UInt32Array, UInt64Array,
+        Array, BooleanArray, BooleanBuilder, Float32Array, Float32Builder, Float64Array,
+        Float64Builder, Int64Array, Int64Builder, LargeStringBuilder, StringArray, StringBuilder,
+        StructBuilder,
     },
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
@@ -12,11 +12,7 @@ use arrow::{
 use itertools::Itertools;
 use proto::core::{value::Kind, ObjectValue, Value};
 
-use crate::{
-    index_store::segment_mem::MemSegmentReader,
-    util::{CoreError, CoreResult},
-    Scope,
-};
+use crate::{index_store::segment_mem::MemSegmentReader, util::CoreResult};
 
 pub fn make_arrow_schema(reader: &MemSegmentReader) -> Schema {
     let fields = reader

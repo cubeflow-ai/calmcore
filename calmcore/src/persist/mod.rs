@@ -21,6 +21,7 @@
 pub mod arrow_util;
 pub mod block_reader;
 pub mod schema;
+pub mod skip_list;
 
 use crate::{
     index_store::{
@@ -34,10 +35,7 @@ use crate::{
     store::Store,
     util::{CoreError, CoreResult},
 };
-use arrow::{
-    array::{Array, ArrayBuilder, RecordBatch, StructArray, StructBuilder},
-    datatypes::{DataType, Field, Schema},
-};
+use arrow::array::{RecordBatch, StructArray, StructBuilder};
 use arrow_util::{write_none, write_object_to_arrow};
 use croaring::{Bitmap, Bitmap64, Portable};
 use itertools::Itertools;
@@ -45,21 +43,16 @@ use mem_btree::{
     persist::{self, KVSerializer, TreeWriter},
     BTree, BatchWrite,
 };
-use memmap2::MmapOptions;
-use parquet::{
-    arrow::ArrowWriter,
-    basic::Compression,
-    file::properties::{EnabledStatistics, WriterProperties},
-    record,
-};
-use proto::core::Record;
+
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde_json::json;
 use std::{
     borrow::Cow,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
+    thread::spawn,
 };
 
 use serde::{Deserialize, Serialize};
@@ -111,13 +104,52 @@ pub fn write_segment(store: &Store, reader: Arc<MemSegmentReader>) -> CoreResult
 
     write_del(&data_path, &reader)?;
 
+    // let mut features = Vec::with_capacity(4);
+
+    // features.push({
+    //     let reader = reader.clone();
+    //     let data_path = data_path.clone();
+    //     spawn(move || write_name(&data_path, &reader))
+    // });
+
+    // features.push({
+    //     let reader = reader.clone();
+    //     let data_path = data_path.clone();
+    //     spawn(move || write_source(&data_path, &reader))
+    // });
+
+    // features.push({
+    //     let reader = reader.clone();
+    //     let data_path = data_path.clone();
+    //     spawn(move || write_terms(&data_path, &reader))
+    // });
+
+    // features.push({
+    //     let reader = reader.clone();
+    //     let data_path = data_path.clone();
+    //     spawn(move || wrrite_fulltext(&data_path, &reader))
+    // });
+
+    // for f in features {
+    //     f.join()
+    //         .map_err(|e| CoreError::Internal(format!("{:?}", e)))??;
+    // }
+
+    let start = std::time::Instant::now();
     write_name(&data_path, &reader)?;
+    println!("write_name cost:{:?}", start.elapsed());
 
+    let start = std::time::Instant::now();
     write_source(&data_path, &reader)?;
+    println!("write_source cost:{:?}", start.elapsed());
 
+    let start = std::time::Instant::now();
     write_terms(&data_path, &reader)?;
+    println!("write_terms cost:{:?}", start.elapsed());
 
+    let start = std::time::Instant::now();
     wrrite_fulltext(&data_path, &reader)?;
+    println!("wrrite_fulltext cost:{:?}", start.elapsed());
 
     std::fs::rename(&data_path, active_path)?;
 
@@ -174,38 +206,37 @@ pub fn merge_del_history(data_path: &Path, dels: &Bitmap) -> CoreResult<()> {
 }
 
 fn wrrite_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
-    let write_fulltext =
-        |path: PathBuf, ft: &FulltextIndexReader, dels: &Bitmap| -> std::io::Result<()> {
-            let tser: Box<dyn KVSerializer<String, Bitmap>> = Box::new(TokenSerializer);
-            let mut persist_tree = BTree::new(1024);
-            persist_tree.merge(ft.token_index.clone_map());
-            TreeWriter::new(persist_tree, 0, tser).persist(&path.join(TERM_INDEX))?;
+    let write_fulltext = |path: PathBuf, ft: &FulltextIndexReader| -> std::io::Result<()> {
+        let tser: Box<dyn KVSerializer<String, Bitmap>> = Box::new(TokenSerializer);
+        let mut persist_tree = BTree::new(1024);
+        persist_tree.merge(ft.token_index.clone_map());
+        TreeWriter::new(persist_tree, 0, tser).persist(&path.join(TERM_INDEX))?;
 
-            let dser: Box<dyn KVSerializer<(u32, String), Vec<u32>>> = Box::new(DocSerializer);
-            let mut persist_tree = BTree::new(1024);
-            let mut batch_write = BatchWrite::default();
+        let dser: Box<dyn KVSerializer<(u32, String), Vec<u32>>> = Box::new(DocSerializer);
+        let mut persist_tree = BTree::new(1024);
+        let mut batch_write = BatchWrite::default();
 
-            persist_tree.merge(ft.doc_index.clone_map());
-            ft.doc_index.range(None, |k, v| {
-                batch_write.put(k.mem_value().clone(), v.clone());
-                true
-            });
-            persist_tree.write(batch_write);
-            TreeWriter::new(persist_tree, 0, dser).persist(&path.join(DOC_INDEX))?;
+        persist_tree.merge(ft.doc_index.clone_map());
+        ft.doc_index.range(None, |k, v| {
+            batch_write.put(k.mem_value().clone(), v.clone());
+            true
+        });
+        persist_tree.write(batch_write);
+        TreeWriter::new(persist_tree, 0, dser).persist(&path.join(DOC_INDEX))?;
 
-            let info = json!({
-                "doc_count":ft.doc_count,
-                "total_term":ft.total_term,
-            });
+        let info = json!({
+            "doc_count":ft.doc_count,
+            "total_term":ft.total_term,
+        });
 
-            pos_write(path.join(INDEX_INFO), info.to_string().as_bytes())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        pos_write(path.join(INDEX_INFO), info.to_string().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-            Ok(())
-        };
+        Ok(())
+    };
 
     for (field, ft) in reader.index_fulltext.iter() {
-        write_fulltext(path.join(field), ft, &reader.dels.read().unwrap())?;
+        write_fulltext(path.join(field), ft)?;
     }
 
     Ok(())
@@ -240,23 +271,16 @@ fn write_terms(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
             TreeWriter::new(persist_tree, len, ser).persist(&path)
         };
 
-    for e in reader.index_term.iter() {
-        write_term(path.join(e.0), e.1, &reader.dels.read().unwrap())?;
+    for r in reader
+        .index_term
+        .par_iter()
+        .map(|(field, term)| write_term(path.join(field), term, &reader.dels.read().unwrap()))
+        .collect::<Vec<_>>()
+    {
+        r?;
     }
 
     Ok(())
-}
-
-struct SourceSerializer;
-
-impl persist::KVSerializer<u32, Record> for SourceSerializer {
-    fn serialize_key<'a>(&self, k: &'a u32) -> std::borrow::Cow<'a, [u8]> {
-        Cow::Owned(k.to_be_bytes().into())
-    }
-
-    fn serialize_value<'a>(&self, v: &'a Record) -> std::borrow::Cow<'a, [u8]> {
-        Cow::Owned(bincode::serialize(v).unwrap())
-    }
 }
 
 struct NameSerializer;

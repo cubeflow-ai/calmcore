@@ -1,8 +1,7 @@
 use std::{borrow::Cow, sync::Arc};
 
-use arrow::array::RecordBatch;
 use croaring::Bitmap;
-use proto::core::{Field, ObjectValue, Record};
+use proto::core::{Field, ObjectValue};
 
 use crate::util::CoreResult;
 
@@ -72,14 +71,6 @@ impl SegmentReader {
             SegmentReader::Hot(h) => h.get_text_reader(field),
             SegmentReader::Warm(w) => w.get_text_reader(field),
         }
-    }
-
-    pub(crate) fn doc(&self, id: u64) -> Option<Cow<ObjectValue>> {
-        // match self {
-        //     SegmentReader::Hot(h) => h.doc(id),
-        //     SegmentReader::Warm(w) => w.doc(id),
-        // }
-        todo!()
     }
 
     pub(crate) fn batch_doc(

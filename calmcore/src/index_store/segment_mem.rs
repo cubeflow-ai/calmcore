@@ -8,7 +8,7 @@ use std::{
 use croaring::{Bitmap, Bitmap64};
 use itertools::Itertools;
 use mem_btree::{BTree, BatchWrite};
-use proto::core::{field::TermOption, value::Kind, Field, ObjectValue, Record, Value};
+use proto::core::{field::TermOption, value::Kind, Field, ObjectValue, Value};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{
@@ -21,11 +21,6 @@ use super::{
     index_fulltext::{reader::FulltextIndexReader, FulltextIndex},
     index_term::reader::TermIndexReader,
 };
-
-pub enum IndexEnum {
-    TermIndex(Arc<TermIndex>),
-    FulltextIndex(Arc<FulltextIndex>),
-}
 
 pub struct MemSegment {
     start: u64,

@@ -9,7 +9,7 @@ mod store;
 pub mod stream;
 
 use croaring::{Bitmap, Bitmap64};
-use proto::core::{Field, ObjectValue, Record};
+use proto::core::{Field, ObjectValue};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 use segment::SegmentReader;
@@ -94,18 +94,18 @@ impl IndexStore {
 
         self.current.write_records(records, max, marker)
     }
-    pub fn find_by_id(&self, id: u64) -> Option<Cow<ObjectValue>> {
+    pub fn find_by_id<'a>(&'a self, id: u64) -> CoreResult<Option<Cow<'a, ObjectValue>>> {
         if id >= self.current.start() {
-            self.current.find_by_id(id)
+            Ok(self.current.find_by_id(id))
         } else {
             let index = self
                 .freezed
                 .binary_search_by(|f| f.start().cmp(&id))
                 .unwrap_or_else(|v| v - 1);
-            match self.freezed[index].doc(id)? {
-                Cow::Borrowed(v) => Some(Cow::Borrowed(v)),
-                Cow::Owned(v) => Some(Cow::Owned(v)),
-            }
+
+            self.freezed[index]
+                .batch_doc(None, &vec![id])
+                .and_then(|mut v| Ok(v.pop()))
         }
     }
 

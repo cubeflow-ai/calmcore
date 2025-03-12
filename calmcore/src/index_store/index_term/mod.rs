@@ -54,10 +54,6 @@ impl TermIndex {
     pub fn field_type(&self) -> proto::core::field::Type {
         self.inner.r#type()
     }
-
-    pub fn field_name(&self) -> &str {
-        &self.inner.name
-    }
 }
 
 impl TermIndex {
