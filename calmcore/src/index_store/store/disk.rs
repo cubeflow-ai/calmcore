@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, hash::Hash, path::PathBuf, sync::RwLock};
 
 use mem_btree::persist::{self, KVDeserializer};
 
@@ -10,7 +10,11 @@ pub struct DiskInvertIndex<K, V> {
     term_record_index: persist::TreeReader<K, V>,
 }
 
-impl<K, V> DiskInvertIndex<K, V> {
+impl<K, V> DiskInvertIndex<K, V>
+where
+    K: Ord + Clone + std::hash::Hash,
+    V: Clone,
+{
     pub fn new(path: PathBuf, deserializer: Box<dyn KVDeserializer<K, V>>) -> CoreResult<Self> {
         let term_record_index = persist::TreeReader::new(&path, deserializer)?;
         Ok(Self { term_record_index })

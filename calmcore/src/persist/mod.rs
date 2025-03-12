@@ -178,18 +178,14 @@ fn wrrite_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
         |path: PathBuf, ft: &FulltextIndexReader, dels: &Bitmap| -> std::io::Result<()> {
             let tser: Box<dyn KVSerializer<String, Bitmap>> = Box::new(TokenSerializer);
             let mut persist_tree = BTree::new(1024);
-            let mut batch_write = BatchWrite::default();
-            ft.token_index.range(None, |k, v| {
-                let v = v - dels;
-                batch_write.put(k.mem_value().to_string(), v);
-                true
-            });
-            persist_tree.write(batch_write);
+            persist_tree.merge(ft.token_index.clone_map());
             TreeWriter::new(persist_tree, 0, tser).persist(&path.join(TERM_INDEX))?;
 
             let dser: Box<dyn KVSerializer<(u32, String), Vec<u32>>> = Box::new(DocSerializer);
             let mut persist_tree = BTree::new(1024);
             let mut batch_write = BatchWrite::default();
+
+            persist_tree.merge(ft.doc_index.clone_map());
             ft.doc_index.range(None, |k, v| {
                 batch_write.put(k.mem_value().clone(), v.clone());
                 true
@@ -277,15 +273,7 @@ impl persist::KVSerializer<String, u32> for NameSerializer {
 
 fn write_name(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
     let mut persist_tree = BTree::new(1024);
-
-    let mut bw = BatchWrite::default();
-
-    reader.name_store.iter().for_each(|e| {
-        bw.put(e.0.clone(), e.1);
-    });
-
-    persist_tree.write(bw);
-
+    persist_tree.merge(reader.name_store.clone());
     TreeWriter::new(persist_tree, 0, Box::new(NameSerializer {})).persist(&path.join("_name"))?;
 
     Ok(())

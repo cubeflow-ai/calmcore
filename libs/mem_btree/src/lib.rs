@@ -131,6 +131,13 @@ where
         }
     }
 
+    fn merge(&self, m: usize, other: BTree<K, V>) -> Vec<N<K, V>> {
+        match self {
+            BTreeType::Leaf(leaf) => leaf.merge(m, other),
+            BTreeType::Node(node) => node.merge(m, other),
+        }
+    }
+
     fn split_off<Q>(&self, k: &Q) -> (N<K, V>, N<K, V>)
     where
         K: Borrow<Q> + Ord,
@@ -476,6 +483,47 @@ where
     ///
     pub fn write(&mut self, batch_write: BatchWrite<K, V>) {
         let mut nodes = self.root.write(self.m, batch_write.into_map());
+
+        while nodes.len() > self.m {
+            nodes = nodes
+                .chunks(self.m)
+                .filter_map(|c| {
+                    if c.is_empty() {
+                        None
+                    } else {
+                        Some(Node::instance(c.to_vec()))
+                    }
+                })
+                .collect();
+        }
+
+        if nodes.len() > 1 {
+            self.root = Node::instance(nodes);
+        } else {
+            match nodes.into_iter().next() {
+                Some(v) => self.root = v,
+                None => self.root = Leaf::instance(Vec::with_capacity(self.m)),
+            };
+        }
+    }
+
+    /// Merge another B-tree into this B-tree
+    /// # Examples
+    /// ```rust
+    /// use mem_btree::BTree;
+    /// let mut btree = BTree::new(32);
+    /// let mut btree2 = BTree::new(32);
+    /// let datas = vec![1,2,3,4,5];
+    /// for i in datas.iter() {
+    ///    btree.put(i.clone(), i.clone());
+    /// }
+    /// for i in datas.iter() {
+    ///   btree2.put(i+1, i+1);
+    /// }
+    /// btree.merge(btree2);
+    /// assert_eq!(btree.len(), 6);
+    pub fn merge(&mut self, other: BTree<K, V>) {
+        let mut nodes = self.root.merge(self.m, other);
 
         while nodes.len() > self.m {
             nodes = nodes
@@ -1155,5 +1203,233 @@ mod tests {
         for (i, key) in test_keys.iter().enumerate() {
             assert_eq!(result[i], Some(&(key * 100)));
         }
+    }
+
+    #[test]
+    fn test_merge() {
+        // 测试基本合并功能
+        let mut btree1 = BTree::new(32);
+        let mut btree2 = BTree::new(32);
+        let datas = vec![1, 2, 3, 4, 5];
+        for i in datas.iter() {
+            btree1.put(i.clone(), i.clone());
+        }
+        for i in datas.iter() {
+            btree2.put(i + 1, i + 1);
+        }
+        btree1.merge(btree2);
+        assert_eq!(btree1.len(), 6); // 1,2,3,4,5,6
+
+        // 验证合并后的值正确性
+        for i in 1..=6 {
+            assert_eq!(btree1.get(&i), Some(&i));
+        }
+    }
+
+    #[test]
+    fn test_merge_comprehensive() {
+        // 1. 合并空树测试
+        let mut btree_empty = BTree::<i32, i32>::new(32);
+        let mut btree_with_data = BTree::new(32);
+        for i in 1..=5 {
+            btree_with_data.put(i, i * 10);
+        }
+
+        // 空树合并到有数据的树
+        let mut test_tree = btree_with_data.clone();
+        let empty_tree = BTree::<i32, i32>::new(32);
+        test_tree.merge(empty_tree);
+        assert_eq!(test_tree.len(), 5);
+
+        // 有数据的树合并到空树
+        let mut test_empty = BTree::<i32, i32>::new(32);
+        test_empty.merge(btree_with_data.clone());
+        assert_eq!(test_empty.len(), 5);
+        for i in 1..=5 {
+            assert_eq!(test_empty.get(&i), Some(&(i * 10)));
+        }
+
+        // 2. 非重叠范围合并测试
+        let mut btree_low = BTree::new(32);
+        let mut btree_high = BTree::new(32);
+
+        for i in 1..=100 {
+            btree_low.put(i, i);
+        }
+
+        for i in 101..=200 {
+            btree_high.put(i, i);
+        }
+
+        let len_before = btree_low.len();
+        btree_low.merge(btree_high);
+        assert_eq!(btree_low.len(), 200);
+        assert_eq!(btree_low.len(), len_before + 100);
+
+        // 验证合并后的顺序性
+        let mut iter = btree_low.iter();
+        let mut prev: Option<i32> = None;
+        while let Some(item) = iter.next() {
+            if let Some(p) = prev {
+                assert!(item.0 > p);
+            }
+            prev = Some(item.0);
+        }
+
+        // 3. 有重叠键值的合并测试
+        let mut btree_a = BTree::new(32);
+        let mut btree_b = BTree::new(32);
+
+        for i in 1..=100 {
+            btree_a.put(i, i * 10); // 值为 i*10
+        }
+
+        for i in 50..=150 {
+            btree_b.put(i, i * 100); // 值为 i*100，与btree_a部分重叠
+        }
+
+        btree_a.merge(btree_b);
+        assert_eq!(btree_a.len(), 150); // 1-150 的键
+
+        // 验证重叠部分的值被更新
+        for i in 1..=49 {
+            assert_eq!(btree_a.get(&i), Some(&(i * 10)));
+        }
+        for i in 50..=150 {
+            assert_eq!(btree_a.get(&i), Some(&(i * 100)));
+        }
+
+        // 4. 大规模数据合并测试
+        let mut btree_large1 = BTree::new(32);
+        let mut btree_large2 = BTree::new(32);
+
+        for i in 0..10000 {
+            if i % 2 == 0 {
+                btree_large1.put(i, i);
+            } else {
+                btree_large2.put(i, i);
+            }
+        }
+
+        btree_large1.merge(btree_large2);
+        assert_eq!(btree_large1.len(), 10000);
+
+        for i in 0..10000 {
+            assert_eq!(btree_large1.get(&i), Some(&i));
+        }
+
+        // 5. 边界情况测试 - 合并后导致树结构变化
+        let mut btree_small = BTree::new(4); // 小的m值使树更容易分裂
+        let mut btree_addon = BTree::new(4);
+
+        for i in 1..=8 {
+            btree_small.put(i, i);
+        }
+
+        for i in 9..=16 {
+            btree_addon.put(i, i);
+        }
+
+        btree_small.merge(btree_addon);
+        assert_eq!(btree_small.len(), 16);
+
+        // 验证合并和树结构重组后数据完整性
+        for i in 1..=16 {
+            assert_eq!(btree_small.get(&i), Some(&i));
+        }
+    }
+
+    #[test]
+    fn test_merge_different_m_values() {
+        // 创建不同m值的树
+        let mut btree_m32 = BTree::new(32);
+        let mut btree_m1024 = BTree::new(1024);
+
+        // 数据量
+        const DATA_SIZE: i32 = 1_000_000;
+
+        println!("开始插入数据到m值为32的树中...");
+        // 向32 m值的树中插入100万条数据
+        for i in 0..DATA_SIZE {
+            btree_m32.put(i, format!("value-{}", i));
+        }
+        println!("插入完成，树大小为: {}", btree_m32.len());
+
+        // 确认数据正确插入
+        assert_eq!(btree_m32.len(), DATA_SIZE as usize);
+
+        // 创建一个克隆用于后续验证
+        let btree_m32_clone = btree_m32.clone();
+
+        println!("开始合并到m值为1024的树中...");
+        // 合并到1024 m值的树
+        btree_m1024.merge(btree_m32);
+        println!("合并完成，树大小为: {}", btree_m1024.len());
+
+        // 确认数据量一致
+        assert_eq!(btree_m1024.len(), DATA_SIZE as usize);
+        assert_eq!(btree_m1024.len(), btree_m32_clone.len());
+
+        println!("开始验证树中的数据...");
+        // 随机抽样验证（全部验证太耗时）
+        let mut rng = rand::thread_rng();
+        let sample_count = 10_000; // 抽样1万个点验证
+
+        for _ in 0..sample_count {
+            let key = rng.gen_range(0..DATA_SIZE);
+            assert_eq!(btree_m1024.get(&key), btree_m32_clone.get(&key));
+        }
+
+        // 验证顺序性（通过迭代器）
+        println!("验证树的迭代顺序...");
+        let mut iter1 = btree_m32_clone.iter();
+        let mut iter2 = btree_m1024.iter();
+
+        // 由于100万个元素比较太多，只比较前10万和后10万个元素
+        for _ in 0..100_000 {
+            assert_eq!(
+                iter1.next().map(|i| (i.0.clone(), i.1.clone())),
+                iter2.next().map(|i| (i.0.clone(), i.1.clone()))
+            );
+        }
+
+        // 重置迭代器并使用prev测试反向迭代
+        let mut iter1 = btree_m32_clone.iter();
+        let mut iter2 = btree_m1024.iter();
+
+        for _ in 0..100_000 {
+            assert_eq!(
+                iter1.prev().map(|i| (i.0.clone(), i.1.clone())),
+                iter2.prev().map(|i| (i.0.clone(), i.1.clone()))
+            );
+        }
+
+        // 额外测试 - 验证seek操作后的元素一致性
+        println!("验证seek操作...");
+        let test_keys = [
+            0,
+            DATA_SIZE / 4,
+            DATA_SIZE / 2,
+            DATA_SIZE * 3 / 4,
+            DATA_SIZE - 1,
+        ];
+
+        for key in &test_keys {
+            let mut iter1 = btree_m32_clone.iter();
+            let mut iter2 = btree_m1024.iter();
+
+            iter1.seek(key);
+            iter2.seek(key);
+
+            // 验证seek后的10个元素
+            for _ in 0..10 {
+                assert_eq!(
+                    iter1.next().map(|i| (i.0.clone(), i.1.clone())),
+                    iter2.next().map(|i| (i.0.clone(), i.1.clone()))
+                );
+            }
+        }
+
+        println!("测试完成，两棵树的数据内容完全一致。");
     }
 }

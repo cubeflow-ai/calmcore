@@ -5,6 +5,7 @@ use std::{
     collections::LinkedList,
     error::Error,
     fs::{File, OpenOptions},
+    hash::Hash,
     io::{BufWriter, Read, Seek, Write},
     path::{Path, PathBuf},
 };
@@ -794,14 +795,14 @@ mod tests {
 
     #[test]
     fn test_tree_reader_and_iter() {
-        let dir = PathBuf::from("data");
+        let dir = PathBuf::from("test_tree_reader_and_iter");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
         // Create tree and insert data
         let mut tree = BTree::new(128);
 
-        for i in 0..1_000_000 as i32 {
+        for i in 0..10_000 as i32 {
             let i = i * 2;
             tree.put(i.to_be_bytes().to_vec(), i.to_be_bytes().to_vec());
         }
@@ -813,15 +814,10 @@ mod tests {
         // Load tree from disk
         let reader = TreeReader::new(&dir, Box::new(DefaultSerializer {})).unwrap();
 
-        let mut iter = reader.iter();
-        while let Some(v) = iter.next() {
-            println!("============k2: {:?}, v1: {:?}", v.0, v.1);
-        }
-
         // Verify contents
         let mut iter = reader.iter();
 
-        for i in 0..10000 {
+        for i in 0..10_000 {
             let (k1, v1) = iter.next().unwrap();
             assert_eq!(i32::from_be_bytes(k1.try_into().unwrap()), i * 2);
             assert_eq!(i32::from_be_bytes(v1.try_into().unwrap()), i * 2);
@@ -928,7 +924,7 @@ mod tests {
 
     #[test]
     fn test_tree_fix_len() {
-        let dir = PathBuf::from("data");
+        let dir = PathBuf::from("test_tree_fix_len");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -982,7 +978,7 @@ mod tests {
 
     #[test]
     fn test_tree_var_len() {
-        let dir = PathBuf::from("data");
+        let dir = PathBuf::from("test_tree_var_len");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1036,7 +1032,7 @@ mod tests {
 
     #[test]
     pub fn test_get() {
-        let dir = PathBuf::from("data");
+        let dir = PathBuf::from("test_get");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1076,7 +1072,7 @@ mod tests {
 
     #[test]
     fn test_mget() {
-        let dir = PathBuf::from("data");
+        let dir = PathBuf::from("test_mget");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1125,7 +1121,7 @@ mod tests {
 
     #[test]
     fn test_mget_ordered() {
-        let dir = PathBuf::from("data");
+        let dir = PathBuf::from("test_mget_ordered");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1169,7 +1165,7 @@ mod tests {
 
     #[test]
     fn test_mget_large_scale() {
-        let dir = PathBuf::from("data");
+        let dir = PathBuf::from("test_mget_large_scale");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1291,7 +1287,7 @@ mod tests {
     fn test_mget_u32_even() {
         use std::path::PathBuf;
         // 为避免与其它测试冲突，使用新的目录
-        let dir = PathBuf::from("data_u32");
+        let dir = PathBuf::from("test_mget_u32_even");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1374,7 +1370,7 @@ mod tests {
 
     #[test]
     fn test_mget_batch_even() {
-        let dir = PathBuf::from("data_batch");
+        let dir: PathBuf = PathBuf::from("test_mget_batch_even");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

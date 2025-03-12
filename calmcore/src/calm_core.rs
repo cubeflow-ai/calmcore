@@ -58,7 +58,7 @@ impl Config {
     pub fn new(data_path: &str) -> Self {
         Config {
             data_path: data_path.to_string(),
-            segment_max_size: 1_000_000,
+            segment_max_size: 10_000_000,
             flush_interval_secs: 3600,
         }
     }

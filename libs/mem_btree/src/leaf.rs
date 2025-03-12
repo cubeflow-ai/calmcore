@@ -164,6 +164,22 @@ where
             .collect()
     }
 
+    pub fn merge(&self, m: usize, bw: BTree<K, V>) -> Vec<N<K, V>> {
+        let items =
+            Self::merge_sort_arr_2(self.items.len() + bw.len(), self.items.iter(), bw.iter());
+
+        items
+            .chunks(m)
+            .filter_map(|c| {
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(Self::instance(c.to_vec()))
+                }
+            })
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.items.len()
     }
@@ -239,6 +255,46 @@ where
                             v2 = iter2.next();
                         }
                     },
+                },
+            }
+        }
+
+        result
+    }
+
+    fn merge_sort_arr_2(
+        new_len: usize,
+        mut iter1: std::slice::Iter<'_, Item<K, V>>,
+        mut iter2: Iter<K, V>,
+    ) -> Vec<Item<K, V>> {
+        let mut result = Vec::with_capacity(new_len);
+        let mut v1 = iter1.next().cloned();
+        let mut v2 = iter2.next();
+        loop {
+            match (&v1, &v2) {
+                (None, None) => break,
+                (None, Some(j)) => {
+                    result.push(j.clone());
+                    v2 = iter2.next();
+                }
+                (Some(i), None) => {
+                    result.push(i.clone());
+                    v1 = iter1.next().cloned();
+                }
+                (Some(i), Some(j)) => match i.0.cmp(&j.0) {
+                    std::cmp::Ordering::Less => {
+                        result.push(i.clone());
+                        v1 = iter1.next().cloned();
+                    }
+                    std::cmp::Ordering::Equal => {
+                        result.push(j.clone());
+                        v1 = iter1.next().cloned();
+                        v2 = iter2.next();
+                    }
+                    std::cmp::Ordering::Greater => {
+                        result.push(j.clone());
+                        v2 = iter2.next();
+                    }
                 },
             }
         }

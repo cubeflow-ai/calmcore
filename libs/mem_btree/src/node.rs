@@ -228,6 +228,49 @@ where
             .collect()
     }
 
+    pub fn merge(&self, m: usize, mut actions: BTree<K, V>) -> Vec<N<K, V>> {
+        let mut children = Vec::with_capacity(self.children.len() + actions.len());
+
+        let mut start_index = 0;
+
+        loop {
+            if let Some(j) = actions.min() {
+                let index = self.search_index(&j.0);
+
+                if start_index < index {
+                    children.extend_from_slice(&self.children[start_index..index]);
+                }
+
+                if index + 1 < self.children.len() {
+                    //get next key for current childs
+                    if let Some(k) = self.children[index + 1].key() {
+                        let temp = actions.split_off(&k.0);
+                        children.extend(self.children[index].merge(m, actions));
+                        start_index = index + 1;
+                        actions = temp;
+                    }
+                } else {
+                    children.extend(self.children[index].merge(m, actions));
+                    break;
+                }
+            } else {
+                children.extend_from_slice(&self.children[start_index..]);
+                break;
+            }
+        }
+
+        children
+            .chunks(m)
+            .filter_map(|c| {
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(Self::instance(c.to_vec()))
+                }
+            })
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.length
     }

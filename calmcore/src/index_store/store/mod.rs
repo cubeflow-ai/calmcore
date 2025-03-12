@@ -1,6 +1,7 @@
 mod disk;
 pub(crate) mod memory;
 use std::{
+    hash::Hash,
     path::PathBuf,
     sync::{Arc, RwLock},
 };
@@ -21,7 +22,7 @@ pub(crate) enum InvertIndex<K, V> {
 
 impl<K, V> InvertIndex<K, V>
 where
-    K: Ord + Clone,
+    K: Ord + Clone + Hash,
     V: Clone,
 {
     pub(crate) fn new_memory() -> Self {
@@ -71,7 +72,7 @@ pub(crate) enum InvertIndexReader<K, V> {
 
 impl<K, V> InvertIndexReader<K, V>
 where
-    K: Ord + Clone,
+    K: Ord + Hash + Clone,
     V: Clone,
 {
     pub fn get(&self, key: &K) -> Option<V> {
@@ -103,6 +104,13 @@ where
         match self {
             Self::Memory(m) => m.len(),
             Self::Disk(d) => d.len(),
+        }
+    }
+
+    pub fn clone_map(&self) -> BTree<K, V> {
+        match self {
+            Self::Memory(m) => m.clone_map(),
+            Self::Disk(_) => panic!("not support mem_clone for disk index"),
         }
     }
 }
