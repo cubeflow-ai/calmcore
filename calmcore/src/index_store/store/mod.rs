@@ -89,14 +89,15 @@ where
         }
     }
 
-    pub fn range<F>(&self, start: Option<&K>, f: F)
+    pub fn range<F>(&self, start: Option<&K>, f: F) -> CoreResult<()>
     where
         F: FnMut(IterKey<K>, &V) -> bool,
     {
         match self {
             Self::Memory(m) => m.range(start, f),
-            Self::Disk(d) => d.range(start, f),
+            Self::Disk(d) => d.range(start, f)?,
         }
+        Ok(())
     }
 
     #[allow(dead_code)]

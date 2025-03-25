@@ -1372,7 +1372,7 @@ mod tests {
 
         println!("开始验证树中的数据...");
         // 随机抽样验证（全部验证太耗时）
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let sample_count = 10_000; // 抽样1万个点验证
 
         for _ in 0..sample_count {

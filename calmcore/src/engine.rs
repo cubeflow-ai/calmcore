@@ -298,7 +298,8 @@ impl Engine {
     /// Return an error if the data could not be written to disk.
     pub fn persist(self: &Arc<Engine>) -> CoreResult<()> {
         self.store.new_current_segment()?;
-        Job::persist(self.clone(), true)
+        Job::persist(self.clone(), true)?;
+        Ok(())
     }
 
     pub fn info(&self) -> CoreResult<StoreInfo> {

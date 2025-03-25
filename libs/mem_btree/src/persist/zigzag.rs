@@ -116,8 +116,28 @@ pub fn read_u32<B: BufferRead>(buf: &B, pos: &mut usize) -> u32 {
     result
 }
 
+// /// Read a u64 value using varint decoding
+// pub fn read_u64(buf: &memmap2::Mmap, pos: &mut usize) -> u64 {
+//     let mut result = 0u64;
+//     let mut shift = 0;
+
+//     loop {
+//         let byte = buf.get_byte(*pos);
+//         *pos += 1;
+
+//         result |= ((byte & 0x7f) as u64) << shift;
+//         if byte & 0x80 == 0 {
+//             break;
+//         }
+
+//         shift += 7;
+//     }
+
+//     result
+// }
+
 /// Read a u64 value using varint decoding
-pub fn read_u64(buf: &memmap2::Mmap, pos: &mut usize) -> u64 {
+pub fn read_u64<B: BufferRead>(buf: &B, pos: &mut usize) -> u64 {
     let mut result = 0u64;
     let mut shift = 0;
 
@@ -162,8 +182,14 @@ pub fn read_i32<B: BufferRead>(buf: &B, pos: &mut usize) -> i32 {
     decode_zigzag_32(val)
 }
 
+// /// Read an i64 value using varint and zigzag decoding
+// pub fn read_i64(buf: &memmap2::Mmap, pos: &mut usize) -> i64 {
+//     let val = read_u64(buf, pos);
+//     decode_zigzag_64(val)
+// }
+
 /// Read an i64 value using varint and zigzag decoding
-pub fn read_i64(buf: &memmap2::Mmap, pos: &mut usize) -> i64 {
+pub fn read_i64<B: BufferRead>(buf: &B, pos: &mut usize) -> i64 {
     let val = read_u64(buf, pos);
     decode_zigzag_64(val)
 }

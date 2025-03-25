@@ -57,14 +57,20 @@ impl Job {
 
 impl Job {
     fn persist_job(self: Arc<Self>) {
+        let mut persist = false;
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            if !persist {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            persist = false;
             let engines = self.engines.read().unwrap().clone();
             for engine in engines {
-                //TODO : force persist?
-                if let Err(e) = Self::persist(engine, true) {
-                    log::error!("persist error: {:?}", e);
-                };
+                match Self::persist(engine, true) {
+                    Ok(p) => persist |= p,
+                    Err(e) => {
+                        log::error!("persist error: {:?}", e);
+                    }
+                }
             }
         }
     }
@@ -79,13 +85,13 @@ impl Job {
                     self.segment_max_size as u64,
                     self.flush_interval_secs,
                 ) {
-                    log::error!("segment error: {:?}", e);
-                };
+                    log::error!("segment error:{:?}", e);
+                }
             }
         }
     }
 
-    pub(crate) fn segment(engine: Arc<Engine>, max: u64, ttl: u64) -> CoreResult<()> {
+    pub(crate) fn segment(engine: Arc<Engine>, max: u64, ttl: u64) -> CoreResult<bool> {
         let segments = engine.segment_readers();
 
         let engine_name = &engine.scope().schema.name;
@@ -107,6 +113,8 @@ impl Job {
         let mut iter = segments.into_iter();
         let current = iter.next().unwrap(); // remove current
 
+        let mut persist = false;
+
         if current.end() - current.start() > max || current.live_time().as_secs() > ttl {
             log::info!(
                 "engine:{} active current segment:{}-{} freeze it",
@@ -115,17 +123,20 @@ impl Job {
                 current.end()
             );
             engine.store.new_current_segment()?;
+            persist = true;
         }
-        Ok(())
+        Ok(persist)
     }
 
-    pub(crate) fn persist(engine: Arc<Engine>, force: bool) -> CoreResult<()> {
+    pub(crate) fn persist(engine: Arc<Engine>, force: bool) -> CoreResult<bool> {
         let lock = PERSIST_LOCK.lock().unwrap();
         let segments = engine.segment_readers();
         let engine_name = &engine.scope().schema.name;
 
         let mut iter = segments.into_iter();
         iter.next().unwrap(); // remove current
+
+        let mut persist = false;
 
         for segment in iter {
             if let SegmentReader::Hot(reader) = segment {
@@ -163,6 +174,7 @@ impl Job {
                     );
 
                     engine.hot_to_warm(start, end)?;
+                    persist = true;
 
                     log::info!(
                         "engine:{} hot segment:{}-{} to warm cost:{:?}",
@@ -177,6 +189,6 @@ impl Job {
 
         drop(lock);
 
-        Ok(())
+        Ok(persist)
     }
 }

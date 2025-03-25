@@ -32,18 +32,19 @@ where
         self.term_record_index.mget(key)
     }
 
-    pub(crate) fn range<F>(&self, start: Option<&K>, mut f: F)
+    pub(crate) fn range<F>(&self, start: Option<&K>, mut f: F) -> CoreResult<()>
     where
         F: FnMut(IterKey<K>, &V) -> bool,
     {
-        let mut iter = self.term_record_index.iter();
+        let mut iter = self.term_record_index.iter()?;
         if let Some(start) = start {
-            iter.seek(start);
+            iter.seek(start)?;
         }
-        while let Some(item) = iter.next() {
-            if !f(IterKey::Disk(item.0), &item.1) {
+        while let Some(item) = iter.next()? {
+            if !f(IterKey::Disk(&item.0), &item.1) {
                 break;
             }
         }
+        Ok(())
     }
 }
