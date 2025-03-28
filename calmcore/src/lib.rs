@@ -37,7 +37,6 @@ use util::{CoreError, CoreResult};
 
 pub mod analyzer;
 mod calm_core;
-mod embedding;
 mod engine;
 pub mod entity;
 mod index_store;

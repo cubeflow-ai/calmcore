@@ -1,19 +1,55 @@
-mod disk;
-pub(crate) mod memory;
+mod disk_invert;
+mod disk_vector;
+pub(crate) mod memory_invert;
+mod memory_vector;
 use std::{
     hash::Hash,
     path::PathBuf,
     sync::{Arc, RwLock},
 };
 
-use disk::DiskInvertIndex;
+use disk_invert::DiskInvertIndex;
 use mem_btree::{
     persist::{KVDeserializer, KVSerializer},
     BTree,
 };
-use memory::MemoryInvertIndex;
+use memory_invert::MemoryInvertIndex;
 
 use crate::util::CoreResult;
+
+pub(crate) enum VectorIndexReader {
+    Memory(memory_vector::MemoryVectorIndex),
+    Disk(Arc<disk_vector::DiskVectorIndex>),
+}
+
+impl VectorIndexReader {
+    pub fn new_memory(
+        start: u64,
+        _inner: Arc<proto::core::Field>,
+        index: BTree<u64, Vec<f32>>,
+    ) -> CoreResult<Self> {
+        Ok(Self::Memory(memory_vector::MemoryVectorIndexReader::new(
+            start, inner, index,
+        )))
+    }
+
+    pub fn new_disk(start: u64, inner: Arc<proto::core::Field>, path: PathBuf) -> CoreResult<Self> {
+        Ok(Self::Disk(Arc::new(disk_vector::DiskVectorIndex::new(
+            start, inner, path,
+        )?)))
+    }
+}
+
+fn check_vector_size(i: &[f32], q: &[f32]) -> CoreResult<()> {
+    if a.len() != b.len() {
+        return Err(CoreError::InvalidParam(format!(
+            "vectory query and index vector must have the same dimension index:{} query:{}",
+            i.len(),
+            q.len()
+        )));
+    }
+    Ok(())
+}
 
 pub(crate) enum InvertIndex<K, V> {
     Memory(RwLock<MemoryInvertIndex<K, V>>),
