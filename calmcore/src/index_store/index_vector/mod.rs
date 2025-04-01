@@ -1,11 +1,10 @@
 pub mod reader;
-mod writer;
 use crate::{
     util::{CoreError, CoreResult},
     RecordWrapper,
 };
 use croaring::Bitmap;
-use faiss::MetricType;
+use faiss::{index_factory, MetricType};
 use hora::{
     core::{ann_index::ANNIndex, metrics::Metric},
     index::hnsw_idx::HNSWIndex,
@@ -13,14 +12,16 @@ use hora::{
 use itertools::Itertools;
 use mem_btree::{BTree, BatchWrite};
 use parquet::file::page_index::index;
-use proto::core::{value::Kind, Hit, Value};
+use proto::core::{field, value::Kind, Hit, Value};
 use rayon::iter::IntoParallelRefIterator;
 use rayon::prelude::*;
 use std::{
     collections::BinaryHeap,
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
+
+use super::store::VectorIndexReader;
 
 pub struct VectorIndex {
     inner: Arc<proto::core::Field>,
@@ -31,16 +32,41 @@ pub struct VectorIndex {
 }
 
 impl VectorIndex {
-    pub fn new_mem(start: u64, inner: Arc<proto::core::Field>) -> CoreResult<Self> {
-        todo!()
+    pub fn new(start: u64, inner: Arc<proto::core::Field>) -> CoreResult<Self> {
+        let embedding = if let Some(field::Option::Embedding(e)) = &inner.option {
+            e
+        } else {
+            return Err(CoreError::Internal(format!(
+                "field:{:?} not set embedding",
+                inner
+            )));
+        };
+
+        let dimension = embedding.dimension as usize;
+
+        let metric = match embedding.metric() {
+            field::embedding_option::Metric::InnerProduct => MetricType::InnerProduct,
+            field::embedding_option::Metric::L2 => MetricType::L2,
+        };
+
+        // let index = index_factory(dimension, &embedding.index_params, metric)?;
+
+        Ok(VectorIndex {
+            inner,
+            start,
+            dimension,
+            metric,
+            index: RwLock::new(BTree::new(32)),
+        })
     }
 
-    pub fn new_disk(start: u64, inner: Arc<proto::core::Field>, path: PathBuf) -> CoreResult<Self> {
-        todo!()
-    }
-
-    pub fn reader() -> VectorIndexReader {
-        todo!()
+    pub fn reader(&self) -> VectorIndexReader {
+        VectorIndexReader::new_memory(
+            self.start,
+            self.metric,
+            self.dimension,
+            self.index.read().unwrap().clone(),
+        )
     }
 
     pub fn field_type(&self) -> proto::core::field::Type {

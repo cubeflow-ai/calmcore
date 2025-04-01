@@ -20,6 +20,8 @@ use crate::{
 use super::{
     index_fulltext::{reader::FulltextIndexReader, FulltextIndex},
     index_term::reader::TermIndexReader,
+    index_vector::VectorIndex,
+    store::VectorIndexReader,
 };
 
 pub struct MemSegment {
@@ -32,6 +34,7 @@ pub struct MemSegment {
     name_store: RwLock<BTree<String, u32>>,
     index_term: RwLock<HashMap<String, Arc<TermIndex>>>,
     index_fulltext: RwLock<HashMap<String, Arc<FulltextIndex>>>,
+    index_vector: RwLock<HashMap<String, Arc<VectorIndex>>>,
     marker: RwLock<Option<String>>,
     created_at: std::time::Instant,
 }
@@ -79,6 +82,7 @@ impl MemSegment {
             name_store: RwLock::new(BTree::new(32)),
             index_term: RwLock::new(HashMap::new()),
             index_fulltext: RwLock::new(HashMap::new()),
+            index_vector: RwLock::new(HashMap::new()),
             marker: RwLock::new(None),
             created_at: std::time::Instant::now(),
         };
@@ -124,7 +128,12 @@ impl MemSegment {
                         .insert(name, Arc::new(FulltextIndex::new_mem(start, field)?));
                 }
                 proto::core::field::Type::Geo => todo!(),
-                proto::core::field::Type::Vector => todo!(),
+                proto::core::field::Type::Vector => {
+                    self.index_vector
+                        .write()
+                        .unwrap()
+                        .insert(name, Arc::new(VectorIndex::new(start, field.clone())?));
+                }
             }
         }
         Ok(())
@@ -147,6 +156,14 @@ impl MemSegment {
             .unwrap()
             .par_iter()
             .for_each(|(_, i)| i.write(&records));
+
+        self.index_vector
+            .read()
+            .unwrap()
+            .par_iter()
+            .for_each(|(_, i)| {
+                i.write(&records);
+            });
 
         let to_value = |value| {
             let value: Value = value?;
@@ -237,6 +254,7 @@ impl MemSegment {
     pub(crate) fn reader(&self) -> MemSegmentReader {
         let mut index_term = HashMap::new();
         let mut index_fulltext = HashMap::new();
+        let mut index_vector = HashMap::new();
 
         for (n, i) in self.index_term.read().unwrap().iter() {
             index_term.insert(n.to_string(), i.reader());
@@ -244,6 +262,10 @@ impl MemSegment {
 
         for (n, i) in self.index_fulltext.read().unwrap().iter() {
             index_fulltext.insert(n.to_string(), Arc::new(i.reader()));
+        }
+
+        for (n, i) in self.index_vector.read().unwrap().iter() {
+            index_vector.insert(n.to_string(), Arc::new(i.reader()));
         }
 
         MemSegmentReader {
@@ -256,6 +278,7 @@ impl MemSegment {
             name_store: self.name_store.read().unwrap().clone(),
             index_term,
             index_fulltext,
+            index_vector,
             live_time: self.created_at.elapsed(),
             marker: self.marker.read().unwrap().clone(),
         }
@@ -272,6 +295,7 @@ pub struct MemSegmentReader {
     pub name_store: BTree<String, u32>,
     pub index_term: HashMap<String, TermIndexReader>,
     pub index_fulltext: HashMap<String, Arc<FulltextIndexReader>>,
+    pub index_vector: HashMap<String, Arc<VectorIndexReader>>,
     pub live_time: Duration,
     pub marker: Option<String>,
 }
@@ -355,6 +379,12 @@ impl MemSegmentReader {
             .ok_or_else(|| {
                 CoreError::InvalidParam(format!("field:{:?} not found in text index", field.name))
             })
+    }
+
+    pub(crate) fn get_vector_reader(&self, field: &Field) -> CoreResult<Arc<VectorIndexReader>> {
+        self.index_vector.get(&field.name).cloned().ok_or_else(|| {
+            CoreError::InvalidParam(format!("field:{:?} not found in vector index", field.name))
+        })
     }
 
     pub(crate) fn info(&self) -> CoreResult<super::SegmentInfo> {

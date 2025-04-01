@@ -1,6 +1,16 @@
-use faiss::Index;
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 
-use crate::util::CoreResult;
+use croaring::Bitmap;
+use faiss::{
+    index::{io, IndexImpl, TryClone},
+    ConcurrentIndex, Index,
+};
+use itertools::Itertools;
+
+use crate::util::{CoreError, CoreResult};
 
 pub struct DiskVectorIndex {
     start: u64,
@@ -11,12 +21,14 @@ pub struct DiskVectorIndex {
 
 impl DiskVectorIndex {
     pub fn new(start: u64, inner: Arc<proto::core::Field>, path: PathBuf) -> CoreResult<Self> {
-        let index = Index::new_hnsw(
-            inner.dimension() as usize,
-            inner.metric_type() as MetricType,
-            16,
-            16,
-        )?;
+        let index = faiss::index::io::read_index(path.to_str().unwrap()).map_err(|e| {
+            CoreError::Internal(format!(
+                "Failed to read index from file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
         Ok(Self {
             start,
             path,
@@ -25,13 +37,13 @@ impl DiskVectorIndex {
         })
     }
 
-    pub fn search(
-        &self,
-        size: usize,
-        query: &[f32],
-        filter: &Bitmap,
-    ) -> CoreResult<Vec<(f32, u64)>> {
-        let result = self.index.read().unwrap().search(query, size)?;
+    pub fn search(&self, size: usize, query: &[f32], ids: &Bitmap) -> CoreResult<Vec<(f32, u64)>> {
+        let result = self
+            .index
+            .read()
+            .unwrap()
+            .try_clone()?
+            .search(query, size)?;
 
         Ok(result
             .labels

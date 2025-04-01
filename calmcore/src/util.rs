@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, sync::RwLock};
 
-use proto::core::{field, value::Kind, ListValue, ObjectValue, Value};
+use proto::core::{field, value::Kind, ListValue, ObjectValue, Value, VectorValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -146,6 +146,13 @@ impl From<bincode::Error> for CoreError {
     }
 }
 
+impl From<faiss::error::Error> for CoreError {
+    fn from(value: faiss::error::Error) -> Self {
+        log_error_with_backtrace(&value);
+        CoreError::Internal(value.to_string())
+    }
+}
+
 pub fn value_to_json(value: Value) -> serde_json::Value {
     if value.kind.is_none() {
         return serde_json::Value::Null;
@@ -168,7 +175,8 @@ pub fn value_to_json(value: Value) -> serde_json::Value {
                 .collect(),
         ),
         Kind::VectorValue(v) => serde_json::Value::Array(
-            v.e.iter()
+            v.vector
+                .iter()
                 .map(|v| {
                     serde_json::Value::Number(serde_json::Number::from_f64(*v as f64).unwrap())
                 })
@@ -258,8 +266,9 @@ pub fn json_to_value(scope: &Scope, json: serde_json::Value) -> CoreResult<Value
                         obj.insert(
                             k,
                             Value {
-                                kind: Some(Kind::VectorValue(proto::core::Embedding {
-                                    e: v.as_array()
+                                kind: Some(Kind::VectorValue(VectorValue {
+                                    vector: v
+                                        .as_array()
                                         .ok_or(CoreError::InvalidParam(format!(
                                             "field:{:?} value is not array",
                                             v

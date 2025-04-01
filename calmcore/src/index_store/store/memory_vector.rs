@@ -1,10 +1,10 @@
-use std::collections::BinaryHeap;
+use std::{cmp::Ordering, collections::BinaryHeap};
 
 use faiss::MetricType;
 use itertools::Itertools;
 use mem_btree::{BTree, BatchWrite};
 
-use crate::util::CoreResult;
+use crate::util::{CoreError, CoreResult};
 
 pub struct MemoryVectorIndexReader {
     start: u64,
@@ -34,16 +34,26 @@ impl MemoryVectorIndexReader {
             let distance = match self.metric {
                 MetricType::InnerProduct => dot_product(&item.1, query)?,
                 MetricType::L2 => euclidean_distance(&item.1, query)?,
-                _ => return None,
             };
-            heap.push((distance, item.0));
+            heap.push((ComparableF32(distance), item.0));
 
             if heap.len() > size {
                 heap.pop();
             }
         }
 
-        Ok(heap.into_iter().collect_vec())
+        Ok(heap.into_iter().map(|(s, i)| (s.0, i)).collect_vec())
+    }
+}
+
+#[derive(PartialEq, PartialOrd)]
+struct ComparableF32(f32);
+
+impl Eq for ComparableF32 {} // 需要同时实现 Eq
+
+impl Ord for ComparableF32 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or(Ordering::Less)
     }
 }
 
@@ -64,9 +74,9 @@ fn dot_product(a: &[f32], b: &[f32]) -> CoreResult<f32> {
         let d = a[size..].iter().zip(&b[size..]).map(|(p, q)| p * q).sum();
         Ok(-(c + d))
     }
-    #[cfg(not(feature = $simd_size))]
+    #[cfg(not(feature = "simd"))]
     {
-        Ok(-(a.iter().zip(b).map(|(p, q)| p * q).sum()))
+        Ok(-(a.iter().zip(b).map(|(p, q)| p * q).sum::<f32>()))
     }
 }
 
@@ -95,7 +105,7 @@ fn euclidean_distance(a: &[f32], b: &[f32]) -> CoreResult<f32> {
             .sum();
         Ok((d + c))
     }
-    #[cfg(not(feature = $simd_size))]
+    #[cfg(not(feature = "simd"))]
     {
         Ok(a.iter().zip(b).map(|(p, q)| (p - q).powi(2)).sum())
     }

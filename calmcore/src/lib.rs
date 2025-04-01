@@ -128,7 +128,6 @@ pub struct RecordWrapper {
     pub action_type: ActionType,
     pub record: Record,
     pub value: Option<Value>,
-    pub vectors: Option<Vec<proto::core::Vector>>,
     pub result: CoreError,
 }
 
@@ -147,32 +146,24 @@ impl RecordWrapper {
         } else {
             Some(util::json_data_to_value(scope, &record.data))
         };
-        let vectors = if record.vectors.is_empty() {
-            None
-        } else {
-            Some(std::mem::take(&mut record.vectors))
-        };
 
         match result {
             Some(Ok(value)) => Self {
                 action_type,
                 record,
                 value: Some(value),
-                vectors,
                 result: CoreError::Ok(0),
             },
             Some(Err(result)) => Self {
                 action_type,
                 record,
                 value: None,
-                vectors,
                 result,
             },
             None => Self {
                 action_type,
                 record,
                 value: None,
-                vectors,
                 result: CoreError::Ok(0),
             },
         }

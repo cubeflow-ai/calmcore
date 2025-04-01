@@ -44,7 +44,7 @@ impl TryInto<Field> for GqlField {
             GqlType::Embedding => {
                 field.set_type(Type::Vector);
                 let o: GqlEmbeddingOption = self.embedding_option.unwrap_or_default();
-                if o.dimension == 0 && o.embedding.is_none() {
+                if o.dimension == 0 && o.index_params.is_empty() {
                     return Err(CoreError::InvalidParam(format!(
                         "field:{:?} dimension and embedding can't be empty",
                         field
@@ -54,23 +54,18 @@ impl TryInto<Field> for GqlField {
                 let GqlEmbeddingOption {
                     dimension,
                     metric,
-                    embedding,
-                    batch_size,
+                    index_params,
                 } = o;
 
                 let mut eo = field::EmbeddingOption {
                     dimension,
                     metric: 0,
-                    embedding: embedding.unwrap_or("".to_string()),
-                    batch_size: batch_size.unwrap_or(0),
+                    index_params,
                 };
 
                 match metric {
-                    GqlMetric::DotProduct => eo.set_metric(Metric::DotProduct),
-                    GqlMetric::Manhattan => eo.set_metric(Metric::Manhattan),
-                    GqlMetric::Euclidean => eo.set_metric(Metric::Euclidean),
-                    GqlMetric::CosineSimilarity => eo.set_metric(Metric::CosineSimilarity),
-                    GqlMetric::Angular => eo.set_metric(Metric::Angular),
+                    GqlMetric::InnerProduct => eo.set_metric(Metric::InnerProduct),
+                    GqlMetric::L2 => eo.set_metric(Metric::L2),
                 }
 
                 field.option = Some(field::Option::Embedding(eo));
@@ -84,11 +79,8 @@ impl TryInto<Field> for GqlField {
 #[derive(Default, Enum, Copy, Clone, Eq, PartialEq, Serialize)]
 pub enum GqlMetric {
     #[default]
-    DotProduct,
-    Manhattan,
-    Euclidean,
-    CosineSimilarity,
-    Angular,
+    InnerProduct,
+    L2,
 }
 
 #[derive(InputObject, Serialize, Default)]
@@ -133,8 +125,7 @@ impl From<GqlDict> for Dict {
 pub struct GqlEmbeddingOption {
     pub dimension: i32,
     pub metric: GqlMetric,
-    pub embedding: Option<String>,
-    pub batch_size: Option<i32>,
+    pub index_params: String,
 }
 
 #[derive(InputObject, Serialize)]

@@ -19,6 +19,7 @@ use crate::{
 use super::{
     index_fulltext::reader::FulltextIndexReader,
     index_term::{reader::TermIndexReader, TermIndex},
+    store::VectorIndexReader,
 };
 
 pub struct DiskSegment {
@@ -30,6 +31,7 @@ pub struct DiskSegment {
     source_store: BlockReader,
     index_terms: HashMap<String, TermIndexReader>,
     index_fulltext: HashMap<String, Arc<FulltextIndexReader>>,
+    index_vector: HashMap<String, Arc<VectorIndexReader>>,
     marker: Option<String>,
     usage_bytes: u64,
 }
@@ -86,8 +88,8 @@ impl DiskSegment {
         let marker = crate::persist::read_version(&path)?.marker;
 
         let mut index_terms = HashMap::new();
-
         let mut index_fulltext = HashMap::new();
+        let mut index_vector = HashMap::new();
 
         for (name, field) in fields.iter() {
             let field_path = path.join(name);
@@ -117,7 +119,17 @@ impl DiskSegment {
                     };
                 }
                 proto::core::field::Type::Geo => todo!(),
-                proto::core::field::Type::Vector => todo!(),
+                proto::core::field::Type::Vector => {
+                    match VectorIndexReader::new_disk(start, field.clone(), field_path) {
+                        Ok(vr) => {
+                            index_vector.insert(name.clone(), Arc::new(vr));
+                        }
+                        Err(e) => {
+                            log::error!("load vector:{:?} index error:{:?}", name, e);
+                            return Err(e);
+                        }
+                    };
+                }
             }
         }
 
@@ -130,6 +142,7 @@ impl DiskSegment {
             source_store,
             index_terms,
             index_fulltext,
+            index_vector,
             marker,
             usage_bytes,
         })
@@ -142,6 +155,12 @@ impl DiskSegment {
             .ok_or_else(|| {
                 CoreError::InvalidParam(format!("field:{:?} not found in text index", field.name))
             })
+    }
+
+    pub(crate) fn get_vector_reader(&self, field: &Field) -> CoreResult<Arc<VectorIndexReader>> {
+        self.index_vector.get(&field.name).cloned().ok_or_else(|| {
+            CoreError::InvalidParam(format!("field:{:?} not found in vector index", field.name))
+        })
     }
 
     pub fn mark_delete(&self, del: u64) {

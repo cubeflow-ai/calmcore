@@ -9,28 +9,30 @@ use std::{
 };
 
 use disk_invert::DiskInvertIndex;
+use faiss::MetricType;
 use mem_btree::{
     persist::{KVDeserializer, KVSerializer},
     BTree,
 };
 use memory_invert::MemoryInvertIndex;
 
-use crate::util::CoreResult;
+use crate::util::{CoreError, CoreResult};
 
 pub(crate) enum VectorIndexReader {
-    Memory(memory_vector::MemoryVectorIndex),
+    Memory(memory_vector::MemoryVectorIndexReader),
     Disk(Arc<disk_vector::DiskVectorIndex>),
 }
 
 impl VectorIndexReader {
     pub fn new_memory(
         start: u64,
-        _inner: Arc<proto::core::Field>,
+        metric: MetricType,
+        dimension: usize,
         index: BTree<u64, Vec<f32>>,
-    ) -> CoreResult<Self> {
-        Ok(Self::Memory(memory_vector::MemoryVectorIndexReader::new(
-            start, inner, index,
-        )))
+    ) -> Self {
+        Self::Memory(memory_vector::MemoryVectorIndexReader::new(
+            start, metric, dimension, index,
+        ))
     }
 
     pub fn new_disk(start: u64, inner: Arc<proto::core::Field>, path: PathBuf) -> CoreResult<Self> {
@@ -41,7 +43,7 @@ impl VectorIndexReader {
 }
 
 fn check_vector_size(i: &[f32], q: &[f32]) -> CoreResult<()> {
-    if a.len() != b.len() {
+    if i.len() != q.len() {
         return Err(CoreError::InvalidParam(format!(
             "vectory query and index vector must have the same dimension index:{} query:{}",
             i.len(),

@@ -7,7 +7,7 @@ use crate::util::CoreResult;
 
 use super::{
     index_fulltext::reader::FulltextIndexReader, segment_disk::DiskSegment,
-    segment_mem::MemSegmentReader,
+    segment_mem::MemSegmentReader, store::VectorIndexReader,
 };
 
 #[derive(Clone)]
@@ -70,6 +70,13 @@ impl SegmentReader {
         match self {
             SegmentReader::Hot(h) => h.get_text_reader(field),
             SegmentReader::Warm(w) => w.get_text_reader(field),
+        }
+    }
+
+    pub(crate) fn get_vector_reader(&self, field: &Field) -> CoreResult<Arc<VectorIndexReader>> {
+        match self {
+            SegmentReader::Hot(h) => h.get_vector_reader(field),
+            SegmentReader::Warm(w) => w.get_vector_reader(field),
         }
     }
 
