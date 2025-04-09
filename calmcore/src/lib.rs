@@ -48,6 +48,7 @@ pub mod util;
 
 pub type Engine = engine::Engine;
 pub type CalmCore = calm_core::CalmCore;
+pub type Config = calm_core::Config;
 
 #[derive(Debug, Serialize)]
 pub struct Scope {
