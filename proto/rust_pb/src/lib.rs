@@ -1,8 +1,46 @@
-use core::{value::Kind, ObjectValue, Value};
+use core::{
+    field::{FulltextOption, TermOption, VectorOption},
+    value::Kind,
+    Field, ObjectValue, Value,
+};
 use std::cmp::Ordering;
 
 pub mod calmserver;
 pub mod core;
+
+impl Field {
+    pub fn vector_option(&self) -> Result<VectorOption, String> {
+        match self.option.as_ref() {
+            Some(core::field::Option::Vector(e)) => Ok(e.clone()),
+            _ => Err(format!(
+                "Field:{:?} option is not set or not vector option: {:?}",
+                self.name, self.option
+            )),
+        }
+    }
+
+    pub fn fulltext_option(&self) -> Result<FulltextOption, String> {
+        match self.option.as_ref() {
+            Some(core::field::Option::Fulltext(f)) => Ok(f.clone()),
+            None => Ok(FulltextOption::default()),
+            _ => Err(format!(
+                "Field:{:?} option is not set or not fulltext option: {:?}",
+                self.name, self.option
+            )),
+        }
+    }
+
+    pub fn term_option(&self) -> Result<TermOption, String> {
+        match self.option.as_ref() {
+            Some(core::field::Option::Term(t)) => Ok(t.clone()),
+            None => Ok(TermOption::default()),
+            _ => Err(format!(
+                "Field:{:?} option is not set or not term option: {:?}",
+                self.name, self.option
+            )),
+        }
+    }
+}
 
 impl Value {
     pub fn obj(&self) -> &ObjectValue {

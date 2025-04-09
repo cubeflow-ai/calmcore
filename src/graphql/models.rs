@@ -1,7 +1,7 @@
 use async_graphql::*;
 use calmcore::util::{CoreError, CoreResult};
 use proto::core::{
-    field::{self, embedding_option::Metric, fulltext_option::Tokenizer, FulltextOption, Type},
+    field::{self, fulltext_option::Tokenizer, vector_option::Metric, FulltextOption, Type},
     Dict, Field,
 };
 use serde::Serialize;
@@ -57,18 +57,21 @@ impl TryInto<Field> for GqlField {
                     index_params,
                 } = o;
 
-                let mut eo = field::EmbeddingOption {
+                let mut eo = field::VectorOption {
                     dimension,
                     metric: 0,
                     index_params,
                 };
 
                 match metric {
-                    GqlMetric::InnerProduct => eo.set_metric(Metric::InnerProduct),
-                    GqlMetric::L2 => eo.set_metric(Metric::L2),
+                    GqlMetric::DotProduct => eo.set_metric(Metric::DotProduct),
+                    GqlMetric::Euclidean => eo.set_metric(Metric::Euclidean),
+                    GqlMetric::Manhattan => eo.set_metric(Metric::Manhattan),
+                    GqlMetric::CosineSimilarity => eo.set_metric(Metric::CosineSimilarity),
+                    GqlMetric::Angular => eo.set_metric(Metric::Angular),
                 }
 
-                field.option = Some(field::Option::Embedding(eo));
+                field.option = Some(field::Option::Vector(eo));
             }
         };
 
@@ -79,8 +82,11 @@ impl TryInto<Field> for GqlField {
 #[derive(Default, Enum, Copy, Clone, Eq, PartialEq, Serialize)]
 pub enum GqlMetric {
     #[default]
-    InnerProduct,
-    L2,
+    DotProduct,
+    Euclidean,
+    Manhattan,
+    CosineSimilarity,
+    Angular,
 }
 
 #[derive(InputObject, Serialize, Default)]

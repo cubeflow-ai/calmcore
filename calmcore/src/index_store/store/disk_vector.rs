@@ -4,36 +4,44 @@ use std::{
 };
 
 use croaring::Bitmap;
-use faiss::{
-    index::{io, IndexImpl, TryClone},
-    ConcurrentIndex, Index,
-};
-use itertools::Itertools;
 
-use crate::util::{CoreError, CoreResult};
+use itertools::Itertools;
+use serde::Serialize;
+
+use crate::{
+    index_store::index_fulltext::serializer::VECTOR_INDEX,
+    util::{CoreError, CoreResult},
+};
+
+use hora::{
+    core::{
+        ann_index::{ANNIndex, SerializableIndex},
+        metrics::Metric,
+    },
+    index::hnsw_idx::HNSWIndex,
+};
 
 pub struct DiskVectorIndex {
     start: u64,
     path: PathBuf,
-    index: RwLock<IndexImpl>,
+    index: RwLock<HNSWIndex<f32, u64>>,
     inner: Arc<proto::core::Field>,
+    dimension: usize,
 }
 
 impl DiskVectorIndex {
     pub fn new(start: u64, inner: Arc<proto::core::Field>, path: PathBuf) -> CoreResult<Self> {
-        let index = faiss::index::io::read_index(path.to_str().unwrap()).map_err(|e| {
-            CoreError::Internal(format!(
-                "Failed to read index from file {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
+        let index = HNSWIndex::load(path.join(VECTOR_INDEX).as_os_str().to_str().unwrap())
+            .map_err(|s| CoreError::Internal(s.to_string()))?;
+
+        let dimension = index.dimension();
 
         Ok(Self {
             start,
             path,
             index: RwLock::new(index),
             inner,
+            dimension,
         })
     }
 
@@ -42,15 +50,12 @@ impl DiskVectorIndex {
             .index
             .read()
             .unwrap()
-            .try_clone()?
-            .search(query, size)?;
+            .search_with_filter(query, size, ids);
 
         Ok(result
-            .labels
             .iter()
-            .zip(result.distances.iter())
-            .filter(|(id, _)| id.is_some())
-            .map(|(id, d)| (*d, id.get().unwrap()))
+            .filter(|(id, _)| id.idx().is_some())
+            .map(|(id, d)| (*d, id.idx().unwrap()))
             .collect_vec())
     }
 }

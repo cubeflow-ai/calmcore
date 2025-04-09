@@ -1,14 +1,6 @@
-use std::process::Child;
-
 use crate::persist::num_ser::{i64_coder, u16_coder};
 
 use super::*;
-
-struct Lazy {
-    items: Vec<u8>,
-    node_length: Vec<u16>,
-    offset_values: Vec<i64>,
-}
 
 pub struct TreeWriter<K, V> {
     tree: BTree<K, V>,

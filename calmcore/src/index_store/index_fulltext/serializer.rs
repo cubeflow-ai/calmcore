@@ -6,6 +6,7 @@ use mem_btree::persist;
 use crate::util::CoreError;
 
 pub const TERM_INDEX: &str = "term_index";
+pub const VECTOR_INDEX: &str = "vector_index";
 pub const DOC_INDEX: &str = "doc_index";
 pub const INDEX_INFO: &str = "index_info";
 

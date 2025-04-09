@@ -9,40 +9,51 @@ use arrow::{
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
-use itertools::Itertools;
 use proto::core::{value::Kind, ObjectValue, Value};
 
-use crate::{index_store::segment_mem::MemSegmentReader, util::CoreResult};
+use crate::{
+    index_store::segment_mem::MemSegmentReader,
+    util::{CoreError, CoreResult},
+};
 
-pub fn make_arrow_schema(reader: &MemSegmentReader) -> Schema {
+pub fn make_arrow_schema(reader: &MemSegmentReader) -> CoreResult<Schema> {
     let fields = reader
         .index_term
         .iter()
         .map(|(_, t)| t.field())
         .chain(reader.index_fulltext.iter().map(|(_, t)| &t.inner))
         .map(|f| match f.r#type() {
-            proto::core::field::Type::Bool => Field::new(f.name.clone(), DataType::Boolean, true),
-            proto::core::field::Type::Int => Field::new(f.name.clone(), DataType::Int64, true),
-            proto::core::field::Type::Float => Field::new(f.name.clone(), DataType::Float64, true),
-            proto::core::field::Type::String => Field::new(f.name.clone(), DataType::Utf8, true),
-            proto::core::field::Type::Text => Field::new(f.name.clone(), DataType::LargeUtf8, true),
-            proto::core::field::Type::Vector => Field::new(
-                f.name.clone(),
-                DataType::FixedSizeList(
-                    Arc::new(Field::new(f.name.clone(), DataType::Float32, true)),
-                    if let Some(proto::core::field::Option::Embedding(o)) = f.option.as_ref() {
-                        o.dimension as i32
-                    } else {
-                        unreachable!()
-                    },
-                ),
-                true,
-            ),
+            proto::core::field::Type::Bool => {
+                Ok(Field::new(f.name.clone(), DataType::Boolean, true))
+            }
+            proto::core::field::Type::Int => Ok(Field::new(f.name.clone(), DataType::Int64, true)),
+            proto::core::field::Type::Float => {
+                Ok(Field::new(f.name.clone(), DataType::Float64, true))
+            }
+            proto::core::field::Type::String => {
+                Ok(Field::new(f.name.clone(), DataType::Utf8, true))
+            }
+            proto::core::field::Type::Text => {
+                Ok(Field::new(f.name.clone(), DataType::LargeUtf8, true))
+            }
+            proto::core::field::Type::Vector => f
+                .vector_option()
+                .map_err(|s| CoreError::InvalidParam(s))
+                .and_then(|o| {
+                    Ok(Field::new(
+                        f.name.clone(),
+                        DataType::FixedSizeList(
+                            Arc::new(Field::new(f.name.clone(), DataType::Float32, true)),
+                            o.dimension,
+                        ),
+                        true,
+                    ))
+                }),
             proto::core::field::Type::Geo => todo!(),
         })
-        .collect_vec();
+        .collect::<CoreResult<Vec<Field>>>()?;
 
-    Schema::new(fields)
+    Ok(Schema::new(fields))
 }
 
 pub fn write_none(schema: &Schema, struct_builder: &mut StructBuilder) {

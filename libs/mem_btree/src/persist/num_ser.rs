@@ -232,8 +232,6 @@ where
 
 mod test {
 
-    use crate::persist::num_ser::{i64_coder, u16_coder};
-
     #[test]
     fn test_guess_type() {
         let same = vec![1, 1, 1, 1, 1];

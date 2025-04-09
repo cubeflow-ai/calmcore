@@ -21,16 +21,18 @@
 pub mod arrow_util;
 pub mod block_reader;
 pub mod schema;
-pub mod skip_list;
 
 use crate::{
     index_store::{
         index_fulltext::{
             reader::FulltextIndexReader,
-            serializer::{DocSerializer, TokenSerializer, DOC_INDEX, INDEX_INFO, TERM_INDEX},
+            serializer::{
+                DocSerializer, TokenSerializer, DOC_INDEX, INDEX_INFO, TERM_INDEX, VECTOR_INDEX,
+            },
         },
         index_term::{reader::TermIndexReader, serializer::TermSerializer},
         segment_mem::MemSegmentReader,
+        store::VectorIndexReader,
     },
     store::Store,
     util::{CoreError, CoreResult},
@@ -38,6 +40,7 @@ use crate::{
 use arrow::array::{RecordBatch, StructArray, StructBuilder};
 use arrow_util::{write_none, write_object_to_arrow};
 use croaring::{Bitmap, Bitmap64, Portable};
+use hora::core::ann_index::SerializableIndex;
 use itertools::Itertools;
 use mem_btree::{
     persist::{self, KVSerializer, TreeWriter},
@@ -104,37 +107,6 @@ pub fn write_segment(store: &Store, reader: Arc<MemSegmentReader>) -> CoreResult
 
     write_del(&data_path, &reader)?;
 
-    // let mut features = Vec::with_capacity(4);
-
-    // features.push({
-    //     let reader = reader.clone();
-    //     let data_path = data_path.clone();
-    //     spawn(move || write_name(&data_path, &reader))
-    // });
-
-    // features.push({
-    //     let reader = reader.clone();
-    //     let data_path = data_path.clone();
-    //     spawn(move || write_source(&data_path, &reader))
-    // });
-
-    // features.push({
-    //     let reader = reader.clone();
-    //     let data_path = data_path.clone();
-    //     spawn(move || write_terms(&data_path, &reader))
-    // });
-
-    // features.push({
-    //     let reader = reader.clone();
-    //     let data_path = data_path.clone();
-    //     spawn(move || wrrite_fulltext(&data_path, &reader))
-    // });
-
-    // for f in features {
-    //     f.join()
-    //         .map_err(|e| CoreError::Internal(format!("{:?}", e)))??;
-    // }
-
     let start = std::time::Instant::now();
     write_name(&data_path, &reader)?;
     println!("write_name cost:{:?}", start.elapsed());
@@ -143,13 +115,11 @@ pub fn write_segment(store: &Store, reader: Arc<MemSegmentReader>) -> CoreResult
     write_source(&data_path, &reader)?;
     println!("write_source cost:{:?}", start.elapsed());
 
-    let start = std::time::Instant::now();
     write_terms(&data_path, &reader)?;
-    println!("write_terms cost:{:?}", start.elapsed());
 
-    let start = std::time::Instant::now();
-    wrrite_fulltext(&data_path, &reader)?;
-    println!("wrrite_fulltext cost:{:?}", start.elapsed());
+    write_fulltext(&data_path, &reader)?;
+
+    write_vector(&data_path, &reader)?;
 
     std::fs::rename(&data_path, active_path)?;
 
@@ -205,7 +175,7 @@ pub fn merge_del_history(data_path: &Path, dels: &Bitmap) -> CoreResult<()> {
     pos_write(data_path.join("_dels"), &buffer)
 }
 
-fn wrrite_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
+fn write_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
     let write_fulltext = |path: PathBuf, ft: &FulltextIndexReader| -> std::io::Result<()> {
         let tser: Box<dyn KVSerializer<String, Bitmap>> = Box::new(TokenSerializer);
         let mut persist_tree = BTree::new(1024);
@@ -237,6 +207,22 @@ fn wrrite_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
 
     for (field, ft) in reader.index_fulltext.iter() {
         write_fulltext(path.join(field), ft)?;
+    }
+
+    Ok(())
+}
+
+fn write_vector(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
+    let writer = |path: PathBuf, ft: &VectorIndexReader| -> CoreResult<()> {
+        let mut index = ft.build_index()?;
+        index
+            .dump(path.join(VECTOR_INDEX).as_os_str().to_str().unwrap())
+            .map_err(|s| CoreError::Internal(s.to_string()))?;
+        Ok(())
+    };
+
+    for (field, ft) in reader.index_vector.iter() {
+        writer(path.join(field), ft)?;
     }
 
     Ok(())
@@ -309,7 +295,7 @@ fn write_source(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
 
     let dels = &reader.dels;
 
-    let schema = arrow_util::make_arrow_schema(reader);
+    let schema = arrow_util::make_arrow_schema(reader)?;
 
     let mut builder = StructBuilder::from_fields(schema.fields.clone(), 1024);
 

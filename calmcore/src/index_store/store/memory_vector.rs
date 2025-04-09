@@ -1,26 +1,32 @@
-use std::{cmp::Ordering, collections::BinaryHeap};
+use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
 
-use faiss::MetricType;
+use hora::{
+    core::{ann_index::ANNIndex, metrics::*},
+    index::{hnsw_idx::HNSWIndex, hnsw_params::HNSWParams},
+};
 use itertools::Itertools;
-use mem_btree::{BTree, BatchWrite};
+use mem_btree::BTree;
 
 use crate::util::{CoreError, CoreResult};
 
 pub struct MemoryVectorIndexReader {
+    inner: Arc<proto::core::Field>,
     start: u64,
-    metric: MetricType,
+    metric: Metric,
     dimension: usize,
     index: BTree<u64, Vec<f32>>,
 }
 
 impl MemoryVectorIndexReader {
     pub fn new(
+        inner: Arc<proto::core::Field>,
         start: u64,
-        metric: MetricType,
+        metric: Metric,
         dimension: usize,
         index: BTree<u64, Vec<f32>>,
     ) -> Self {
         Self {
+            inner,
             start,
             metric,
             dimension,
@@ -29,12 +35,23 @@ impl MemoryVectorIndexReader {
     }
 
     pub fn search(&self, query: &[f32], size: usize) -> CoreResult<Vec<(f32, u64)>> {
+        let fn_err = |e| {
+            CoreError::Internal(format!(
+                "field:{:?}  metric:{:?} has err:{}",
+                self.inner.name, self.metric, e
+            ))
+        };
         let mut heap = BinaryHeap::new();
         for item in self.index.iter() {
             let distance = match self.metric {
-                MetricType::InnerProduct => dot_product(&item.1, query)?,
-                MetricType::L2 => euclidean_distance(&item.1, query)?,
+                Metric::Euclidean => euclidean_distance(&item.1, query).map_err(fn_err)?,
+                Metric::Manhattan => manhattan_distance(&item.1, query).map_err(fn_err)?,
+                Metric::DotProduct => dot_product(&item.1, query).map_err(fn_err)?,
+                Metric::CosineSimilarity => cosine_similarity(&item.1, query).map_err(fn_err)?,
+                Metric::Angular => angular_distance(&item.1, query).map_err(fn_err)?,
+                Metric::Unknown => unreachable!(),
             };
+
             heap.push((ComparableF32(distance), item.0));
 
             if heap.len() > size {
@@ -43,6 +60,33 @@ impl MemoryVectorIndexReader {
         }
 
         Ok(heap.into_iter().map(|(s, i)| (s.0, i)).collect_vec())
+    }
+
+    pub(crate) fn build_index(&self) -> CoreResult<HNSWIndex<f32, u64>> {
+        let mut index = HNSWIndex::new(
+            self.dimension,
+            &HNSWParams::default().max_item(self.index.len()),
+        );
+
+        for v in self.index.iter() {
+            let id = v.0;
+            let vector = &v.1;
+            index.add(vector, id).map_err(|e| {
+                CoreError::Internal(format!(
+                    "add vector index field:{:?}  metric:{:?} has err:{}",
+                    self.inner.name, self.metric, e
+                ))
+            })?;
+        }
+
+        index.build(self.metric.clone()).map_err(|e| {
+            CoreError::Internal(format!(
+                "build vector index field:{:?}  metric:{:?} has err:{}",
+                self.inner.name, self.metric, e
+            ))
+        })?;
+
+        Ok(index)
     }
 }
 
@@ -54,59 +98,5 @@ impl Eq for ComparableF32 {} // 需要同时实现 Eq
 impl Ord for ComparableF32 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other).unwrap_or(Ordering::Less)
-    }
-}
-
-fn dot_product(a: &[f32], b: &[f32]) -> CoreResult<f32> {
-    super::check_vector_size(a, b)?;
-
-    #[cfg(feature = "simd")]
-    {
-        use packed_simd::f32x16;
-        let size = a.len() - (a.len() % 16);
-        let c = a
-            .chunks_exact(16)
-            .map(f32x16::from_slice_unaligned)
-            .zip(b.chunks_exact(16).map(f32x16::from_slice_unaligned))
-            .map(|(a, b)| a * b)
-            .sum::<f32x16>()
-            .sum();
-        let d = a[size..].iter().zip(&b[size..]).map(|(p, q)| p * q).sum();
-        Ok(-(c + d))
-    }
-    #[cfg(not(feature = "simd"))]
-    {
-        Ok(-(a.iter().zip(b).map(|(p, q)| p * q).sum::<f32>()))
-    }
-}
-
-fn euclidean_distance(a: &[f32], b: &[f32]) -> CoreResult<f32> {
-    super::check_vector_size(a, b)?;
-
-    #[cfg(feature = "simd")]
-    {
-        use packed_simd::f32x16;
-        let size = a.len() - (a.len() % 16);
-        let c = a
-            .chunks_exact(16)
-            .map(f32x16::from_slice_unaligned)
-            .zip(b.chunks_exact(16).map(f32x16::from_slice_unaligned))
-            .map(|(a, b)| {
-                let c = (a - b);
-                c * c
-            })
-            .sum::<f32x16>()
-            .sum();
-
-        let d = a[size..]
-            .iter()
-            .zip(&b[size..])
-            .map(|(p, q)| (p - q).powi(2))
-            .sum();
-        Ok((d + c))
-    }
-    #[cfg(not(feature = "simd"))]
-    {
-        Ok(a.iter().zip(b).map(|(p, q)| (p - q).powi(2)).sum())
     }
 }

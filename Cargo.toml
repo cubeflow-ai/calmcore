@@ -39,3 +39,15 @@ rand = "0.9.0"
 sys-info = "0.9.1"
 croaring = "2.2.0"
 mem_btree = { path = "libs/mem_btree" }
+
+
+[profile.opt]
+inherits = "dev"
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = true

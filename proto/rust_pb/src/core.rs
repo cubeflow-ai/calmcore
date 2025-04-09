@@ -100,16 +100,16 @@ pub mod field {
     }
     #[derive(serde::Serialize, serde::Deserialize)]
     #[derive(Clone, PartialEq, ::prost::Message)]
-    pub struct EmbeddingOption {
+    pub struct VectorOption {
         #[prost(int32, tag = "1")]
         pub dimension: i32,
-        #[prost(enumeration = "embedding_option::Metric", tag = "2")]
+        #[prost(enumeration = "vector_option::Metric", tag = "2")]
         pub metric: i32,
         #[prost(string, tag = "3")]
         pub index_params: ::prost::alloc::string::String,
     }
-    /// Nested message and enum types in `EmbeddingOption`.
-    pub mod embedding_option {
+    /// Nested message and enum types in `VectorOption`.
+    pub mod vector_option {
         #[derive(serde::Serialize, serde::Deserialize)]
         #[derive(
             Clone,
@@ -124,8 +124,11 @@ pub mod field {
         )]
         #[repr(i32)]
         pub enum Metric {
-            InnerProduct = 0,
-            L2 = 1,
+            DotProduct = 0,
+            Euclidean = 1,
+            Manhattan = 2,
+            CosineSimilarity = 3,
+            Angular = 4,
         }
         impl Metric {
             /// String value of the enum field names used in the ProtoBuf definition.
@@ -134,15 +137,21 @@ pub mod field {
             /// (if the ProtoBuf definition does not change) and safe for programmatic use.
             pub fn as_str_name(&self) -> &'static str {
                 match self {
-                    Self::InnerProduct => "InnerProduct",
-                    Self::L2 => "L2",
+                    Self::DotProduct => "DotProduct",
+                    Self::Euclidean => "Euclidean",
+                    Self::Manhattan => "Manhattan",
+                    Self::CosineSimilarity => "CosineSimilarity",
+                    Self::Angular => "Angular",
                 }
             }
             /// Creates an enum from field names used in the ProtoBuf definition.
             pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
                 match value {
-                    "InnerProduct" => Some(Self::InnerProduct),
-                    "L2" => Some(Self::L2),
+                    "DotProduct" => Some(Self::DotProduct),
+                    "Euclidean" => Some(Self::Euclidean),
+                    "Manhattan" => Some(Self::Manhattan),
+                    "CosineSimilarity" => Some(Self::CosineSimilarity),
+                    "Angular" => Some(Self::Angular),
                     _ => None,
                 }
             }
@@ -297,7 +306,7 @@ pub mod field {
         #[prost(message, tag = "3")]
         Term(TermOption),
         #[prost(message, tag = "4")]
-        Embedding(EmbeddingOption),
+        Vector(VectorOption),
         #[prost(message, tag = "5")]
         Fulltext(FulltextOption),
     }

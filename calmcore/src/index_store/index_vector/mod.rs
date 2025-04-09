@@ -4,7 +4,6 @@ use crate::{
     RecordWrapper,
 };
 use croaring::Bitmap;
-use faiss::{index_factory, MetricType};
 use hora::{
     core::{ann_index::ANNIndex, metrics::Metric},
     index::hnsw_idx::HNSWIndex,
@@ -27,29 +26,23 @@ pub struct VectorIndex {
     inner: Arc<proto::core::Field>,
     start: u64,
     dimension: usize,
-    metric: MetricType,
+    metric: Metric,
     index: RwLock<BTree<u64, Vec<f32>>>,
 }
 
 impl VectorIndex {
     pub fn new(start: u64, inner: Arc<proto::core::Field>) -> CoreResult<Self> {
-        let embedding = if let Some(field::Option::Embedding(e)) = &inner.option {
-            e
-        } else {
-            return Err(CoreError::Internal(format!(
-                "field:{:?} not set embedding",
-                inner
-            )));
+        let option = inner.vector_option().map_err(CoreError::InvalidParam)?;
+
+        let dimension = option.dimension as usize;
+
+        let metric = match option.metric() {
+            field::vector_option::Metric::DotProduct => Metric::DotProduct,
+            field::vector_option::Metric::Euclidean => Metric::Euclidean,
+            field::vector_option::Metric::Manhattan => Metric::Manhattan,
+            field::vector_option::Metric::CosineSimilarity => Metric::CosineSimilarity,
+            field::vector_option::Metric::Angular => Metric::Angular,
         };
-
-        let dimension = embedding.dimension as usize;
-
-        let metric = match embedding.metric() {
-            field::embedding_option::Metric::InnerProduct => MetricType::InnerProduct,
-            field::embedding_option::Metric::L2 => MetricType::L2,
-        };
-
-        // let index = index_factory(dimension, &embedding.index_params, metric)?;
 
         Ok(VectorIndex {
             inner,
@@ -62,6 +55,7 @@ impl VectorIndex {
 
     pub fn reader(&self) -> VectorIndexReader {
         VectorIndexReader::new_memory(
+            self.inner.clone(),
             self.start,
             self.metric,
             self.dimension,

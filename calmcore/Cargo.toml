@@ -39,5 +39,4 @@ arrow = "54.2.0"
 parquet = "54.2.0"
 flate2 = "1.1.0"
 tempfile = "3.18.0"
-"faiss" = "0.12.1"
 packed_simd = { version = "0.3.6", package = "packed_simd_2", optional = true }

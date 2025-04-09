@@ -1,5 +1,3 @@
-use core::panic;
-
 use crate::persist::num_ser::{i64_coder, u16_coder};
 
 use super::*;

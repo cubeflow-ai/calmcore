@@ -146,13 +146,6 @@ impl From<bincode::Error> for CoreError {
     }
 }
 
-impl From<faiss::error::Error> for CoreError {
-    fn from(value: faiss::error::Error) -> Self {
-        log_error_with_backtrace(&value);
-        CoreError::Internal(value.to_string())
-    }
-}
-
 pub fn value_to_json(value: Value) -> serde_json::Value {
     if value.kind.is_none() {
         return serde_json::Value::Null;

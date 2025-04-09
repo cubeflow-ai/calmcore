@@ -5,7 +5,7 @@ pub mod seacher;
 pub mod segment;
 mod segment_disk;
 pub mod segment_mem;
-mod store;
+pub(crate) mod store;
 pub mod stream;
 
 use croaring::{Bitmap, Bitmap64};

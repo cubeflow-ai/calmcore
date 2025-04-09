@@ -65,10 +65,13 @@ message Field {
         bool no_store = 2;
     }
 
-    message EmbeddingOption {
+    message VectorOption {
         enum Metric {
-            InnerProduct = 0;
-            L2 = 1;
+            DotProduct = 0;
+            Euclidean = 1;
+            Manhattan = 2;
+            CosineSimilarity = 3;
+            Angular = 4;
         }
         int32 dimension = 1;
         Metric metric = 2;
@@ -97,7 +100,7 @@ message Field {
     Type type = 2;
     oneof option {
         TermOption term = 3;
-        EmbeddingOption embedding =4;
+        VectorOption vector = 4;
         FulltextOption fulltext =5;
     }
 }

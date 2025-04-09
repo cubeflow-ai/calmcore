@@ -1,7 +1,7 @@
 mod disk_invert;
 mod disk_vector;
 pub(crate) mod memory_invert;
-mod memory_vector;
+pub(crate) mod memory_vector;
 use std::{
     hash::Hash,
     path::PathBuf,
@@ -9,7 +9,7 @@ use std::{
 };
 
 use disk_invert::DiskInvertIndex;
-use faiss::MetricType;
+use hora::{core::metrics::Metric, index::hnsw_idx::HNSWIndex};
 use mem_btree::{
     persist::{KVDeserializer, KVSerializer},
     BTree,
@@ -25,13 +25,14 @@ pub(crate) enum VectorIndexReader {
 
 impl VectorIndexReader {
     pub fn new_memory(
+        inner: Arc<proto::core::Field>,
         start: u64,
-        metric: MetricType,
+        metric: Metric,
         dimension: usize,
         index: BTree<u64, Vec<f32>>,
     ) -> Self {
         Self::Memory(memory_vector::MemoryVectorIndexReader::new(
-            start, metric, dimension, index,
+            inner, start, metric, dimension, index,
         ))
     }
 
@@ -39,6 +40,17 @@ impl VectorIndexReader {
         Ok(Self::Disk(Arc::new(disk_vector::DiskVectorIndex::new(
             start, inner, path,
         )?)))
+    }
+
+    pub fn build_index(&self) -> CoreResult<HNSWIndex<f32, u64>> {
+        match self {
+            Self::Memory(m) => m.build_index(),
+            Self::Disk(_) => {
+                return Err(CoreError::Internal(format!(
+                    "disk index not support build_index"
+                )))
+            }
+        }
     }
 }
 
