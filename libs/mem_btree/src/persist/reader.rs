@@ -191,21 +191,8 @@ impl<K, V> TreeReader<K, V> {
     }
 }
 
-fn read_u16(data: &memmap2::Mmap, offset: &mut usize) -> u16 {
-    zigzag::read_u16(data, offset)
-}
-
 fn read_u32(data: &memmap2::Mmap, offset: &mut usize) -> u32 {
     zigzag::read_u32(data, offset)
-}
-
-fn read_i64(data: &memmap2::Mmap, offset: &mut usize) -> i64 {
-    zigzag::read_i64(data, offset)
-}
-
-fn read_data<'a>(node: &'a memmap2::Mmap, offset: &mut usize, len: usize) -> &'a [u8] {
-    *offset += len;
-    &node[*offset - len..*offset]
 }
 
 struct NextLevel {

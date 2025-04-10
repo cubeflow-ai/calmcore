@@ -55,7 +55,6 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    thread::spawn,
 };
 
 use serde::{Deserialize, Serialize};

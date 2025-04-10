@@ -1,6 +1,6 @@
 use calmcore::{util::CoreResult, *};
 use proto::core::{
-    field::{self, embedding_option::Metric, fulltext_option, EmbeddingOption, FulltextOption},
+    field::{self, fulltext_option, vector_option::Metric, FulltextOption, VectorOption},
     QueryResult, Schema,
 };
 fn main() -> CoreResult<()> {
@@ -21,19 +21,19 @@ fn main() -> CoreResult<()> {
     space.mutate_json(
         ActionType::Upsert,
         "1".to_string(),
-        br#"{"name":"hello" , "age":32 , "sex":true, "content":"java golang rust", "skill":[1.0, 2.1,2.2]}"#,
+        br#"{"name":"hello" , "age":32 , "sex":true, "content":"java golang rust", "skill":[1.0, 2.1,2.2]}"#,None,
     )?;
 
     space.mutate_json(
         ActionType::Upsert,
         "2".to_string(),
-        br#"{"name":"hello1" , "age":22 , "sex":false, "content":"asp c++ php", "skill":[1.0, 5.1,2.2]}"#,
+        br#"{"name":"hello1" , "age":22 , "sex":false, "content":"asp c++ php", "skill":[1.0, 5.1,2.2]}"#,None,
     )?;
 
     space.mutate_json(
         ActionType::Upsert,
         "3".to_string(),
-        br#"{"name":"hello2" , "age":12 , "sex":true, "content":"java c++ php", "skill":[1.0, 5.1,2.2]}"#,
+        br#"{"name":"hello2" , "age":12 , "sex":true, "content":"java c++ php", "skill":[1.0, 5.1,2.2]}"#,None,
     )?;
 
     let _resp = space.sql("select * FROM test WHERE content = phrase('java golang')")?;
@@ -50,11 +50,7 @@ fn main() -> CoreResult<()> {
 }
 
 fn result_print(result: QueryResult) {
-    println!("total: {}", result.total_hits);
-    for hit in result.hits {
-        let value = serde_json::from_slice::<serde_json::Value>(&hit.record.unwrap().data).unwrap();
-        println!("{:?}-----{}", hit.id, value.to_string());
-    }
+    println!("result: {:?}", result.to_wrapper());
 }
 
 fn make_schema(schema_name: &str) -> Schema {
@@ -86,11 +82,10 @@ fn make_schema(schema_name: &str) -> Schema {
         proto::core::Field {
             name,
             r#type: proto::core::field::Type::Vector as i32,
-            option: Some(field::Option::Embedding(EmbeddingOption {
-                embedding: String::from("no"),
+            option: Some(field::Option::Vector(VectorOption {
                 dimension: 3,
                 metric: Metric::Euclidean as i32,
-                batch_size: 1000,
+                index_params: String::new(),
             })),
         },
     );
@@ -106,13 +101,13 @@ fn make_schema(schema_name: &str) -> Schema {
                 filters: Vec::new(),
                 stopwords: None,
                 synonyms: None,
+                no_store: false,
             })),
         },
     );
 
     Schema {
         name: String::from(schema_name),
-        id: 1,
         fields,
         metadata: None,
         schemaless: false,

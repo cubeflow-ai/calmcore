@@ -136,6 +136,7 @@ pub mod result_wrapper {
                             Kind::IntValue(i) => serde_json::json!(i),
                             Kind::FloatValue(f) => serde_json::json!(f),
                             Kind::StringValue(s) => serde_json::json!(s),
+                            Kind::VectorValue(v) => serde_json::json!(v.vector),
                             _ => unreachable!("unsupported value type"),
                         },
                     )

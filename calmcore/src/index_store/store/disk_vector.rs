@@ -6,7 +6,6 @@ use std::{
 use croaring::Bitmap;
 
 use itertools::Itertools;
-use serde::Serialize;
 
 use crate::{
     index_store::index_fulltext::serializer::VECTOR_INDEX,
@@ -14,10 +13,7 @@ use crate::{
 };
 
 use hora::{
-    core::{
-        ann_index::{ANNIndex, SerializableIndex},
-        metrics::Metric,
-    },
+    core::ann_index::{ANNIndex, SerializableIndex},
     index::hnsw_idx::HNSWIndex,
 };
 

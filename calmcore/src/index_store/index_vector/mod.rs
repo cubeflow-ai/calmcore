@@ -3,22 +3,10 @@ use crate::{
     util::{CoreError, CoreResult},
     RecordWrapper,
 };
-use croaring::Bitmap;
-use hora::{
-    core::{ann_index::ANNIndex, metrics::Metric},
-    index::hnsw_idx::HNSWIndex,
-};
-use itertools::Itertools;
+use hora::core::metrics::Metric;
 use mem_btree::{BTree, BatchWrite};
-use parquet::file::page_index::index;
-use proto::core::{field, value::Kind, Hit, Value};
-use rayon::iter::IntoParallelRefIterator;
-use rayon::prelude::*;
-use std::{
-    collections::BinaryHeap,
-    path::PathBuf,
-    sync::{Arc, Mutex, RwLock},
-};
+use proto::core::{field, value::Kind, Value};
+use std::sync::{Arc, RwLock};
 
 use super::store::VectorIndexReader;
 

@@ -141,7 +141,7 @@ impl RecordWrapper {
     /// * `action_type` - ActionType
     /// # Returns
     /// * RecordWrapper if error result set CoreError
-    fn new(scope: &Scope, mut record: Record, action_type: ActionType) -> Self {
+    fn new(scope: &Scope, record: Record, action_type: ActionType) -> Self {
         let result = if record.data.is_empty() {
             None
         } else {
