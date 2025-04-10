@@ -4,7 +4,7 @@ use sqlparser::ast::{BinaryOperator, Expr, FunctionArg, FunctionArgExpr, SelectI
 use statement::parse_where;
 
 use crate::{
-    index_store::seacher::plan::{ComparisonOperator, LogicOperator, Query},
+    seacher::plan::{ComparisonOperator, LogicOperator, Query},
     util::{str_to_vec_fix_type, string_to_vec_fix_type, CoreError, CoreResult},
     Scope,
 };

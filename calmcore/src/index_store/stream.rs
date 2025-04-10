@@ -7,9 +7,9 @@ use std::{
 
 use croaring::bitmap::BitmapIterator;
 
-use crate::analyzer::Token;
+use crate::{analyzer::Token, seacher::plan};
 
-use super::{index_fulltext::reader::FulltextIndexReader, seacher::plan};
+use super::index_fulltext::reader::FulltextIndexReader;
 
 pub trait HitStream: Send + Debug {
     fn next(&mut self);

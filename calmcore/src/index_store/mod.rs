@@ -1,7 +1,6 @@
 pub(crate) mod index_fulltext;
 pub(crate) mod index_term;
 mod index_vector;
-pub mod seacher;
 pub mod segment;
 mod segment_disk;
 pub mod segment_mem;

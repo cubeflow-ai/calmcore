@@ -43,6 +43,7 @@ mod index_store;
 mod job;
 pub mod persist;
 mod protocols;
+pub mod seacher;
 mod store;
 pub mod util;
 

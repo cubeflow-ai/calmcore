@@ -1,6 +1,3 @@
-pub mod row;
-pub mod schema;
-
 /// Extract a column from RecordBatch and convert it to a specific Arrow array type by index
 ///
 /// # Parameters

@@ -20,9 +20,10 @@ use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
 
-use crate::util::{self, kind_to_vec, CoreError, CoreResult};
-
-use super::{segment::SegmentReader, stream::HitStream};
+use crate::{
+    index_store::{segment::SegmentReader, stream::HitStream},
+    util::{self, kind_to_vec, CoreError, CoreResult},
+};
 
 static SCORE_FIELD: LazyLock<Arc<Field>> = LazyLock::new(|| {
     Arc::new(Field {
