@@ -8,7 +8,7 @@ use std::{
 
 use croaring::Bitmap;
 use mem_btree::persist::{self};
-use proto::core::{Field, ObjectValue};
+use proto::core::{field, Field, ObjectValue};
 
 use crate::{
     index_store::index_fulltext::FulltextIndex,
@@ -91,7 +91,13 @@ impl DiskSegment {
         let mut index_fulltext = HashMap::new();
         let mut index_vector = HashMap::new();
 
-        for (name, field) in fields.iter() {
+        for (name, field) in fields.iter().filter(|(_, field)| {
+            if let Some(field::Option::Term(t)) = field.option {
+                !t.no_index
+            } else {
+                true
+            }
+        }) {
             let field_path = path.join(name);
 
             use proto::core::field::Type::*;

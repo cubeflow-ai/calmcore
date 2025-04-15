@@ -62,11 +62,16 @@ impl CoreError {
 // 添加一个辅助函数来处理backtrace
 fn log_error_with_backtrace<E: std::fmt::Debug>(e: &E) {
     // 检查环境变量是否启用backtrace
-    if std::env::var("RUST_BACKTRACE").unwrap_or_default() == "1" {
+    if std::env::var("RUST_BACKTRACE").unwrap_or_default() == "1"
+        || log::max_level() == log::LevelFilter::Debug
+    {
         let backtrace = std::backtrace::Backtrace::force_capture();
-        log::error!("{:?}\nBacktrace:\n{:?}", e, backtrace);
-    } else {
-        log::error!("{:?} (no set RUST_BACKTRACE=1)", e);
+        println!(
+            "{:?}====================================================={:#?}",
+            log::max_level(),
+            backtrace
+        );
+        log::error!("{:?}\nBacktrace:\n{:#?}", e, backtrace);
     }
 }
 
