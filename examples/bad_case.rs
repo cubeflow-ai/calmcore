@@ -33,14 +33,14 @@ pub fn main() -> CoreResult<()> {
 
     let space = core.create_engine(schema)?;
 
-    space.mutate(
-        vec![Action::new(
-            ActionType::Append,
-            "1",
-            br#"{"id":"hello1" , "text":"abc bowel obstruction"}"#,
-        )],
-        None,
-    )?;
+    // space.mutate(
+    //     vec![Action::new(
+    //         ActionType::Append,
+    //         "1",
+    //         br#"{"id":"hello1" , "text":"abc bowel obstruction"}"#,
+    //     )],
+    //     None,
+    // )?;
 
     space.mutate(
         vec![Action::new(
@@ -51,7 +51,7 @@ pub fn main() -> CoreResult<()> {
         None,
     )?;
 
-    let result = space.sql("select * from test where text='obstruction' limit 10")?;
+    let result = space.sql("select id, text from test")?;
     println!("sql result:{:?}", result.to_wrapper());
 
     space.persist().unwrap();
@@ -59,7 +59,7 @@ pub fn main() -> CoreResult<()> {
     let core = CalmCore::new(data_path)?;
 
     let space = core.load_engine(schema_name)?;
-    let result = space.sql("select * from test where text='obstruction' limit 10")?;
+    let result = space.sql("select id, text from test")?;
     println!("sql result:{:?}", result.to_wrapper());
 
     Ok(())

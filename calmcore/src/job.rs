@@ -152,7 +152,7 @@ impl Job {
                     let start_time = std::time::Instant::now();
                     let (start, end) = (reader.start, reader.end);
 
-                    if start == end {
+                    if reader.is_empty() {
                         log::warn!("engine:{} segment:{}-{} is empty", engine_name, start, end);
                         continue;
                     }

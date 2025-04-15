@@ -310,7 +310,7 @@ impl MemSegmentReader {
     }
 
     pub fn all_record(&self) -> Bitmap {
-        if self.end <= self.start {
+        if self.is_empty() {
             return Bitmap::new();
         }
         let all_records = Bitmap::from_iter((0..self.end - self.start + 1).map(|v| v as u32));
@@ -341,6 +341,10 @@ impl MemSegmentReader {
 
     pub(crate) fn doc(&self, id: u64) -> Option<Cow<ObjectValue>> {
         self.source_store.get(&self.abs_id(id)).map(Cow::Borrowed)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.start >= self.end && self.source_store.is_empty()
     }
 
     pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Cow<ObjectValue>> {
