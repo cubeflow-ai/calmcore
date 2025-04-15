@@ -18,10 +18,8 @@ use crate::{
 
 pub fn make_arrow_schema(reader: &MemSegmentReader) -> CoreResult<Schema> {
     let fields = reader
-        .index_term
+        .fields
         .iter()
-        .map(|(_, t)| t.field())
-        .chain(reader.index_fulltext.iter().map(|(_, t)| &t.inner))
         .map(|f| match f.r#type() {
             proto::core::field::Type::Bool => {
                 Ok(Field::new(f.name.clone(), DataType::Boolean, true))
@@ -112,6 +110,7 @@ pub fn write_object_to_arrow(
     obj: &ObjectValue,
 ) -> CoreResult<()> {
     // Fill the builder with data from ObjectValue
+
     for (name, field) in schema.fields().iter().enumerate() {
         let value = obj.fields.get(field.name());
         add_field_value(struct_builder, name, field.data_type(), value);
