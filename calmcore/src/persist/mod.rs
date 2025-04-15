@@ -175,7 +175,7 @@ pub fn merge_del_history(data_path: &Path, dels: &Bitmap) -> CoreResult<()> {
 }
 
 fn write_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
-    let write_fulltext = |path: PathBuf, ft: &FulltextIndexReader| -> std::io::Result<()> {
+    let write_fulltext = |path: PathBuf, ft: &FulltextIndexReader| -> CoreResult<()> {
         let tser: Box<dyn KVSerializer<String, Bitmap>> = Box::new(TokenSerializer);
         let mut persist_tree = BTree::new(1024);
         persist_tree.merge(ft.token_index.clone_map());
@@ -189,7 +189,7 @@ fn write_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
         ft.doc_index.range(None, |k, v| {
             batch_write.put(k.mem_value().clone(), v.clone());
             true
-        });
+        })?;
         persist_tree.write(batch_write);
         TreeWriter::new(persist_tree, 0, dser).persist(&path.join(DOC_INDEX))?;
 
@@ -198,8 +198,7 @@ fn write_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
             "total_term":ft.total_term,
         });
 
-        pos_write(path.join(INDEX_INFO), info.to_string().as_bytes())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        pos_write(path.join(INDEX_INFO), info.to_string().as_bytes())?;
 
         Ok(())
     };
@@ -228,33 +227,32 @@ fn write_vector(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
 }
 
 fn write_terms(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
-    let write_term =
-        |path: PathBuf, term: &TermIndexReader, dels: &Bitmap| -> std::io::Result<()> {
-            let ser: Box<dyn KVSerializer<Vec<u8>, Bitmap>> = Box::new(TermSerializer {});
+    let write_term = |path: PathBuf, term: &TermIndexReader, dels: &Bitmap| -> CoreResult<()> {
+        let ser: Box<dyn KVSerializer<Vec<u8>, Bitmap>> = Box::new(TermSerializer {});
 
-            let mut persist_tree = BTree::new(1024);
+        let mut persist_tree = BTree::new(1024);
 
-            let mut batch_write = BatchWrite::default();
+        let mut batch_write = BatchWrite::default();
 
-            term.range(None, |k, v| {
-                let v = v - dels;
-                batch_write.put(k.to_vec(ser.as_ref()), v);
+        term.range(None, |k, v| {
+            let v = v - dels;
+            batch_write.put(k.to_vec(ser.as_ref()), v);
 
-                true
-            });
-            persist_tree.write(batch_write);
+            true
+        })?;
+        persist_tree.write(batch_write);
 
-            let len = match term.field().r#type() {
-                proto::core::field::Type::Bool => 1,
-                proto::core::field::Type::Int => 8,
-                proto::core::field::Type::Float => 8,
-                proto::core::field::Type::String => 0,
-                proto::core::field::Type::Text => 0,
-                _ => unreachable!(),
-            };
-
-            TreeWriter::new(persist_tree, len, ser).persist(&path)
+        let len = match term.field().r#type() {
+            proto::core::field::Type::Bool => 1,
+            proto::core::field::Type::Int => 8,
+            proto::core::field::Type::Float => 8,
+            proto::core::field::Type::String => 0,
+            proto::core::field::Type::Text => 0,
+            _ => unreachable!(),
         };
+
+        Ok(TreeWriter::new(persist_tree, len, ser).persist(&path)?)
+    };
 
     for r in reader
         .index_term

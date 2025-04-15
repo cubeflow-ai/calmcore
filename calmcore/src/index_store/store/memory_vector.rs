@@ -1,5 +1,6 @@
 use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
 
+use croaring::Bitmap;
 use hora::{
     core::{ann_index::ANNIndex, metrics::*},
     index::{hnsw_idx::HNSWIndex, hnsw_params::HNSWParams},
@@ -34,7 +35,12 @@ impl MemoryVectorIndexReader {
         }
     }
 
-    pub fn search(&self, query: &[f32], size: usize) -> CoreResult<Vec<(f32, u64)>> {
+    pub fn search(
+        &self,
+        query: &[f32],
+        size: usize,
+        filter: &Bitmap,
+    ) -> CoreResult<Vec<(f32, u64)>> {
         let fn_err = |e| {
             CoreError::Internal(format!(
                 "field:{:?}  metric:{:?} has err:{}",
@@ -43,6 +49,10 @@ impl MemoryVectorIndexReader {
         };
         let mut heap = BinaryHeap::new();
         for item in self.index.iter() {
+            if !filter.contains((item.0 - self.start) as u32) {
+                continue;
+            }
+
             let distance = match self.metric {
                 Metric::Euclidean => euclidean_distance(&item.1, query).map_err(fn_err)?,
                 Metric::Manhattan => manhattan_distance(&item.1, query).map_err(fn_err)?,

@@ -43,7 +43,7 @@ mod index_store;
 mod job;
 pub mod persist;
 mod protocols;
-pub mod seacher;
+pub mod searcher;
 mod store;
 pub mod util;
 
@@ -203,9 +203,6 @@ impl RecordWrapper {
     }
 
     pub fn abs_id(&self, start: u64) -> u32 {
-        if self.record.id < start {
-            println!("abs_id: {}---------------{}", self.record.id, start);
-        }
         (self.record.id - start) as u32
     }
 }

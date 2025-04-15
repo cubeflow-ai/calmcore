@@ -1,5 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, sync::RwLock};
 
+use croaring::Bitmap;
 use proto::core::{field, value::Kind, ListValue, ObjectValue, Value, VectorValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -465,6 +466,29 @@ where
     }
 
     result
+}
+
+pub fn merge_bitmap(and: bool, bits: Vec<Option<Bitmap>>) -> Option<Bitmap> {
+    if bits.is_empty() {
+        return None;
+    }
+    if and {
+        let mut iter = bits.into_iter();
+        let mut first = iter.next()??;
+
+        loop {
+            if let Some(next) = iter.next() {
+                first.and_inplace(&next?);
+            } else {
+                break;
+            }
+        }
+        Some(first)
+    } else {
+        Some(Bitmap::fast_or(
+            &bits.iter().filter_map(|b| b.as_ref()).collect::<Vec<_>>(),
+        ))
+    }
 }
 
 #[cfg(test)]

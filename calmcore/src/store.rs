@@ -36,8 +36,6 @@ impl Store {
             .max()
             .unwrap();
 
-        println!("max_start:{:?}", max_start);
-
         let store = Store {
             scope,
             increment_id: AtomicU64::new(max_start - 1),

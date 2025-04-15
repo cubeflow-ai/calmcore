@@ -1,13 +1,14 @@
 mod disk_invert;
 mod disk_vector;
-pub(crate) mod memory_invert;
-pub(crate) mod memory_vector;
+mod memory_invert;
+mod memory_vector;
 use std::{
     hash::Hash,
     path::PathBuf,
     sync::{Arc, RwLock},
 };
 
+use croaring::Bitmap;
 use disk_invert::DiskInvertIndex;
 use hora::{core::metrics::Metric, index::hnsw_idx::HNSWIndex};
 use mem_btree::{
@@ -52,17 +53,13 @@ impl VectorIndexReader {
             }
         }
     }
-}
 
-fn check_vector_size(i: &[f32], q: &[f32]) -> CoreResult<()> {
-    if i.len() != q.len() {
-        return Err(CoreError::InvalidParam(format!(
-            "vectory query and index vector must have the same dimension index:{} query:{}",
-            i.len(),
-            q.len()
-        )));
+    pub fn search(&self, query: &[f32], k: usize, filter: &Bitmap) -> CoreResult<Vec<(f32, u64)>> {
+        match self {
+            Self::Memory(m) => m.search(query, k, filter),
+            Self::Disk(d) => d.search(query, k, filter),
+        }
     }
-    Ok(())
 }
 
 pub(crate) enum InvertIndex<K, V> {

@@ -63,7 +63,7 @@ impl TermIndex {
         }
 
         let mut handler = self.handler();
-        for r in records {
+        for r in records.iter().filter(|r| r.result.is_ok()) {
             if let Some(val) = &r.value {
                 if let Some(value) = val.obj().fields.get(&self.inner.name) {
                     if let Some(kind) = value.kind.as_ref() {

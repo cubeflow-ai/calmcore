@@ -22,21 +22,22 @@ impl FulltextIndexReader {
         Ok(self.analyzer.analyzer_query(value))
     }
 
-    pub(crate) fn tokens(&self, tokens: &[&String]) -> CoreResult<Vec<Bitmap>> {
+    pub(crate) fn tokens(&self, tokens: &[&String]) -> CoreResult<Vec<Option<Bitmap>>> {
         Ok(tokens
             .iter()
-            .map(|token| self.token_index.get(token).unwrap_or_default())
+            .map(|token| self.token_index.get(token))
             .collect())
     }
 
     pub(crate) fn score(
         &self,
-        doc_id: u32,
+        doc_id: u64,
         tokens: &[Token],
         token_doc_len: &HashMap<String, usize>,
         operator: bool,
         slop: i32,
     ) -> Option<f32> {
+        let doc_id = (doc_id - self.start) as u32;
         let offset_map = token_doc_len
             .iter()
             .map(|(token, _)| {

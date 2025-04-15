@@ -11,7 +11,7 @@ use crate::index_store::StoreInfo;
 use crate::job::Job;
 use crate::persist::schema::SchemaStore;
 use crate::protocols::sql;
-use crate::seacher::Searcher;
+use crate::searcher::Searcher;
 use crate::store::Store;
 use crate::util::{CoreError, CoreResult};
 use crate::{Action, ActionType, RecordWrapper, Scope};

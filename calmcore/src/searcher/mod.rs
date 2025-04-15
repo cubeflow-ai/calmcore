@@ -34,38 +34,12 @@ static SCORE_FIELD: LazyLock<Arc<Field>> = LazyLock::new(|| {
 });
 
 pub struct SegmentSearcher<'a> {
-    stream: Box<dyn HitStream>,
+    filter: Bitmap,
+    stream: Option<Box<dyn HitStream>>,
     segment: &'a SegmentReader,
 }
 
 impl SegmentSearcher<'_> {
-    pub fn next(&mut self) -> Option<Hit> {
-        self.stream.next();
-
-        self.stream.value().map(|id| Hit {
-            id,
-            score: self.stream.score(),
-            value: None,
-            sort: vec![],
-        })
-    }
-
-    pub fn batch_next(&mut self, size: usize) -> Vec<Hit> {
-        let mut hits = Vec::with_capacity(size);
-        loop {
-            if hits.len() >= size {
-                break;
-            }
-
-            if let Some(hit) = self.next() {
-                hits.push(hit);
-            } else {
-                break;
-            }
-        }
-        hits
-    }
-
     fn batch_doc(
         &self,
         columns: Option<&[String]>,
@@ -118,7 +92,7 @@ impl Searcher {
         order_by: Vec<(String, bool)>,
         limit: (usize, usize),
     ) -> CoreResult<QueryResult> {
-        let sc = SearchContext::new(&self.segments);
+        let sc = SearchContext::new();
 
         let result = {
             let (streams, filters) = self.query_execute(query, &sc)?;
@@ -134,13 +108,21 @@ impl Searcher {
                 Some(projection.as_slice())
             };
 
-            let (hits, realcount) =
-                if (streams.is_empty() && order_by.is_empty()) || limit.0 + limit.1 == 0 {
-                    (self.topn_with_filter(projection, filters, limit)?, None)
-                } else {
-                    self.topn(projection, streams, &order_by, limit)?
-                };
+            let mut streams = streams.into_iter();
 
+            let searchers: Vec<SegmentSearcher<'_>> = filters
+                .into_iter()
+                .enumerate()
+                .map(|(index, filter)| SegmentSearcher {
+                    stream: streams.next(),
+                    segment: &self.segments[index],
+                    filter,
+                })
+                .collect_vec();
+
+            let need_realcount = query.map(|q| q.need_realcount()).unwrap_or_default();
+            let (hits, realcount) =
+                self.topn(projection, searchers, &order_by, limit, need_realcount)?;
             if let Some(realcount) = realcount {
                 total_hits = realcount;
             }
@@ -164,7 +146,7 @@ impl Searcher {
                     .segments
                     .par_iter()
                     .map(|s| {
-                        let mut guard = sc.get(s.start()).unwrap().lock().unwrap();
+                        let mut guard = sc.get(s.start());
                         PhysicsPlan::new(s, query, &mut guard)
                     })
                     .collect::<CoreResult<Vec<PhysicsPlan>>>()?;
@@ -172,7 +154,7 @@ impl Searcher {
                     .par_iter()
                     .zip(&self.segments)
                     .map(|(p, s)| {
-                        let guard = sc.get(s.start()).unwrap().lock().unwrap();
+                        let guard = sc.get(s.start());
                         p.as_filter(&guard)
                     })
                     .collect::<Vec<_>>();
@@ -183,10 +165,10 @@ impl Searcher {
                     .map(|(p, s)| (p, s))
                     .zip(filters.par_iter())
                     .map(|((p, s), f)| {
-                        let mut guard = sc.get(s.start()).unwrap().lock().unwrap();
+                        let mut guard = sc.get(s.start());
                         p.into_stream(s.start(), &mut guard, f)
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<CoreResult<Vec<_>>>()?;
                 (streams, filters)
             }
             None => {
@@ -240,55 +222,6 @@ impl Searcher {
             })
             .collect::<CoreResult<Vec<(Arc<Field>, bool)>>>()
     }
-
-    fn topn_with_filter(
-        &self,
-        projection: Option<&[String]>,
-        filters: Vec<Bitmap>,
-        limit: (usize, usize),
-    ) -> CoreResult<Vec<SortedHit>> {
-        let skip = limit.0 as i32;
-        let size = limit.1 as usize;
-
-        let mut results = Vec::with_capacity(size);
-
-        'outer: for (b, s) in filters.into_iter().zip(self.segments.iter()) {
-            let mut iter = b.iter();
-
-            if skip > 0 {
-                for _ in 0..skip {
-                    if iter.next().is_none() {
-                        break 'outer;
-                    }
-                }
-            }
-
-            loop {
-                let ids = iter
-                    .by_ref()
-                    .take(size)
-                    .map(|id| id as u64 + s.start())
-                    .collect_vec();
-
-                let objects = s.batch_doc(projection, &ids)?;
-
-                for (v, record) in ids.into_iter().zip(objects) {
-                    results.push(SortedHit {
-                        id: v,
-                        score: 0.0,
-                        value: record.into_owned(),
-                        sort: Vec::new(),
-                    });
-
-                    if results.len() >= size {
-                        break 'outer;
-                    }
-                }
-            }
-        }
-
-        Ok(results)
-    }
 }
 
 #[derive(Debug)]
@@ -300,10 +233,10 @@ struct SortedHit {
 }
 
 impl SortedHit {
-    fn new(hit: Hit, value: ObjectValue, sort: Vec<Vec<u8>>) -> Self {
+    fn new(id: u64, score: f32, value: ObjectValue, sort: Vec<Vec<u8>>) -> Self {
         Self {
-            id: hit.id,
-            score: hit.score,
+            id,
+            score,
             value,
             sort,
         }
@@ -383,76 +316,96 @@ impl Searcher {
     fn topn(
         &self,
         projection: Option<&[String]>,
-        streams: Vec<Box<dyn HitStream>>,
+        searches: Vec<SegmentSearcher<'_>>,
         order_by: &Vec<(Arc<Field>, bool)>,
         limit: (usize, usize),
+        need_realcount: bool,
     ) -> CoreResult<(Vec<SortedHit>, Option<u64>)> {
-        let streams = self
-            .segments
-            .par_iter()
-            .zip(streams)
-            .map(|(segment, stream)| SegmentSearcher { stream, segment })
-            .collect::<Vec<SegmentSearcher>>();
-
         let size = limit.0 + limit.1;
 
+        if size == 0 {
+            return Ok((vec![], None));
+        }
+
         let mut heap = BTreeSet::new();
+        let mut list = vec![];
 
         let mut real_count = 0;
 
-        for mut stream in streams {
+        let need_all = !order_by.is_empty() || need_realcount;
+        let need_score = order_by
+            .iter()
+            .any(|(f, _)| f.name.eq_ignore_ascii_case("_score"));
+
+        for search in searches {
+            let stream = &search.stream;
+            let filter = &search.filter;
+            let start = search.segment.start();
             let mut min: Option<SortedHit> = None;
 
-            loop {
-                let hits = stream.batch_next(size);
-                let hit_size = hits.len();
-                let ids = hits.iter().map(|h| h.id).collect_vec();
+            for ids in &filter.iter().chunks(size) {
+                let ids = ids.into_iter().map(|id| id as u64 + start).collect_vec();
 
-                if ids.is_empty() {
-                    break;
-                }
+                let records = search.batch_doc(projection, &ids)?;
 
-                let records = stream.batch_doc(projection, &ids)?;
+                if need_all {
+                    for (value, id) in records.into_iter().map(Cow::into_owned).zip(ids) {
+                        real_count += 1;
 
-                real_count += hits.len();
+                        let score = if need_score {
+                            match stream.as_ref().and_then(|s| s.score(id)) {
+                                Some(s) => s,
+                                None => continue,
+                            }
+                        } else {
+                            0.0
+                        };
+                        let sort = SortedHit::make_sort(id, 0.0, &value, order_by)?;
 
-                for (value, hit) in records.into_iter().map(Cow::into_owned).zip(hits) {
-                    real_count += 1;
+                        let sort_hit = if min.is_none()
+                            || min.as_ref().unwrap().cmp_record(&sort) == Ordering::Greater
+                        {
+                            SortedHit::new(id, score, value, sort)
+                        } else {
+                            continue;
+                        };
 
-                    let sort = SortedHit::make_sort(hit.id, hit.score, &value, order_by)?;
+                        heap.insert(sort_hit);
 
-                    let sort_hit = if min.is_none()
-                        || min.as_ref().unwrap().cmp_record(&sort) == Ordering::Greater
-                    {
-                        SortedHit::new(hit, value, sort)
-                    } else {
-                        continue;
-                    };
-
-                    heap.insert(sort_hit);
-
-                    if order_by.is_empty() && heap.len() == size {
-                        return Ok((
-                            heap.into_iter().skip(limit.0).take(limit.1).collect_vec(),
-                            None,
-                        ));
+                        if heap.len() > size {
+                            min = heap.pop_last();
+                            //if order by only one field, it is id ,so we can return early
+                            if order_by.is_empty() {
+                                return Ok((
+                                    heap.into_iter().skip(limit.0).take(limit.1).collect_vec(),
+                                    None,
+                                ));
+                            }
+                        }
                     }
+                } else {
+                    for (value, id) in records.into_iter().map(Cow::into_owned).zip(ids) {
+                        let sort_hit = SortedHit::new(id, 0.0, value, vec![]);
 
-                    if heap.len() > size {
-                        min = heap.pop_last();
-                        //if order by only one field, it is id ,so we can return early
-                        if order_by.is_empty() {
-                            return Ok((
-                                heap.into_iter().skip(limit.0).take(limit.1).collect_vec(),
-                                None,
-                            ));
+                        list.push(sort_hit);
+
+                        if list.len() >= size {
+                            break;
                         }
                     }
                 }
-                if hit_size < size {
-                    break;
-                }
             }
+        }
+
+        if !list.is_empty() {
+            return Ok((
+                if limit.0 == 0 && list.len() == size {
+                    list
+                } else {
+                    list.into_iter().skip(limit.0).take(limit.1).collect_vec()
+                },
+                None,
+            ));
         }
 
         Ok((

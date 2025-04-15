@@ -179,6 +179,7 @@ impl MemSegment {
 
         let results = records
             .into_iter()
+            .filter(|r| r.result.is_ok())
             .map(|r| {
                 let id = r.abs_id(self.start);
                 if !r.record.name.is_empty() {
@@ -295,7 +296,7 @@ pub struct MemSegmentReader {
     pub name_store: BTree<String, u32>,
     pub index_term: HashMap<String, TermIndexReader>,
     pub index_fulltext: HashMap<String, Arc<FulltextIndexReader>>,
-    pub index_vector: HashMap<String, Arc<VectorIndexReader>>,
+    pub(crate) index_vector: HashMap<String, Arc<VectorIndexReader>>,
     pub live_time: Duration,
     pub marker: Option<String>,
 }

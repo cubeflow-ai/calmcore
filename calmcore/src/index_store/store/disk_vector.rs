@@ -17,6 +17,7 @@ use hora::{
     index::hnsw_idx::HNSWIndex,
 };
 
+#[allow(dead_code)]
 pub struct DiskVectorIndex {
     start: u64,
     path: PathBuf,
@@ -41,7 +42,7 @@ impl DiskVectorIndex {
         })
     }
 
-    pub fn search(&self, size: usize, query: &[f32], ids: &Bitmap) -> CoreResult<Vec<(f32, u64)>> {
+    pub fn search(&self, query: &[f32], size: usize, ids: &Bitmap) -> CoreResult<Vec<(f32, u64)>> {
         let result = self
             .index
             .read()

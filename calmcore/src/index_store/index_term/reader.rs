@@ -25,11 +25,11 @@ impl TermIndexReader {
         &self.inner
     }
 
-    pub fn range<F>(&self, start: Option<&Vec<u8>>, f: F)
+    pub fn range<F>(&self, start: Option<&Vec<u8>>, f: F) -> CoreResult<()>
     where
         F: FnMut(IterKey<Vec<u8>>, &Bitmap) -> bool,
     {
-        self.term_record_index.range(start, f);
+        self.term_record_index.range(start, f)
     }
 
     pub fn in_terms(&self, list: &[Vec<u8>]) -> Bitmap {
@@ -69,7 +69,7 @@ impl TermIndexReader {
             }
             results.push(v.clone());
             true
-        });
+        })?;
 
         Ok(Bitmap::fast_or(&results.iter().collect_vec()))
     }

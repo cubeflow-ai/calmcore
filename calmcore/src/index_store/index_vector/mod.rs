@@ -50,10 +50,6 @@ impl VectorIndex {
             self.index.read().unwrap().clone(),
         )
     }
-
-    pub fn field_type(&self) -> proto::core::field::Type {
-        self.inner.r#type()
-    }
 }
 
 impl VectorIndex {
@@ -64,7 +60,7 @@ impl VectorIndex {
 
         let mut bw = BatchWrite::default();
 
-        for r in records {
+        for r in records.iter().filter(|r| r.result.is_ok()) {
             if let Some(val) = &r.value {
                 if let Some(value) = val.obj().fields.get(&self.inner.name) {
                     match value {
