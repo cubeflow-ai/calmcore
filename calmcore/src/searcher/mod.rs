@@ -337,7 +337,7 @@ impl Searcher {
             .iter()
             .any(|(f, _)| f.name.eq_ignore_ascii_case("_score"));
 
-        for search in searches {
+        'outer: for search in searches {
             let stream = &search.stream;
             let filter = &search.filter;
             let start = search.segment.start();
@@ -390,7 +390,7 @@ impl Searcher {
                         list.push(sort_hit);
 
                         if list.len() >= size {
-                            break;
+                            break 'outer;
                         }
                     }
                 }
