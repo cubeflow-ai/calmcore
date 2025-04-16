@@ -124,18 +124,12 @@ impl TextStream {
 
 impl HitStream for TextStream {
     fn score(&self, id: u64) -> Option<f32> {
-        if self.bitmap.contains((id - self.reader.start) as u32) {
+        if !self.bitmap.contains((id - self.reader.start) as u32) {
             return None;
         }
 
         self.reader
-            .score(
-                id,
-                &self.tokens,
-                &self.token_doc_len,
-                self.operator,
-                self.slop,
-            )
+            .score(id, &self.tokens, &self.token_doc_len, self.slop)
             .map(|s| s * self.boost)
     }
 }

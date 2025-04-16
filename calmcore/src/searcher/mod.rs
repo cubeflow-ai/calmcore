@@ -321,7 +321,7 @@ impl Searcher {
         limit: (usize, usize),
         need_realcount: bool,
     ) -> CoreResult<(Vec<SortedHit>, Option<u64>)> {
-        let size = limit.0 + limit.1;
+        let mut size = limit.0 + limit.1;
 
         if size == 0 {
             return Ok((vec![], None));
@@ -336,6 +336,17 @@ impl Searcher {
         let need_score = order_by
             .iter()
             .any(|(f, _)| f.name.eq_ignore_ascii_case("_score"));
+
+        log::debug!(
+            "topn: need_all:{:?}, need_score:{:?}, order_by:{:?}",
+            need_all,
+            need_score,
+            order_by
+        );
+
+        if need_all {
+            size = usize::max(size, 1000);
+        }
 
         'outer: for search in searches {
             let stream = &search.stream;

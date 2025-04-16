@@ -34,7 +34,6 @@ impl FulltextIndexReader {
         doc_id: u64,
         tokens: &[Token],
         token_doc_len: &HashMap<String, usize>,
-        operator: bool,
         slop: i32,
     ) -> Option<f32> {
         let doc_id = (doc_id - self.start) as u32;
@@ -55,7 +54,7 @@ impl FulltextIndexReader {
             .unwrap_or(1);
 
         //phrase query filter, if not match return None
-        if operator && !pharse_filter(tokens, &offset_map, slop) {
+        if slop > 0 && !pharse_filter(tokens, &offset_map, slop) {
             return None;
         }
 
