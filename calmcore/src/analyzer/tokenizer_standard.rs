@@ -14,7 +14,7 @@ impl StandardTokenizer {
 impl Tokenizer for StandardTokenizer {
     fn tokenize(&self, text: &str) -> Vec<Token> {
         text.split_word_bounds()
-            .filter(|s| s.len() > 1 || !s.chars().next().unwrap().is_whitespace())
+            .filter(|s| s.len() > 1 || !s.trim().is_empty())
             .map(Token::new)
             .collect()
     }
