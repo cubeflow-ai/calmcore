@@ -13,13 +13,16 @@ impl StandardTokenizer {
 
 impl Tokenizer for StandardTokenizer {
     fn tokenize(&self, text: &str) -> Vec<Token> {
-        text.split_word_bounds().map(Token::new).collect()
+        text.split_word_bounds()
+            .filter(|s| s.len() > 1 || !s.chars().next().unwrap().is_whitespace())
+            .map(Token::new)
+            .collect()
     }
 }
 
 #[test]
 fn test_standard_tokenizer() {
-    let text = "你好rust，こんにちはろくでなしバガ456.3123 12.3℃ 3℃ abc@abc.com hello. .hello .123 !@#$%^&*()_" ;
+    let text = "你好rust，こんにちはろくでなしバガ456.3123 12.3℃ 3℃ abc@abc.com hello. test space line \t .hello .123 !@#$%^&*()_" ;
 
     print!("{:?}", "你".len());
 

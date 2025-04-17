@@ -282,7 +282,6 @@ mod tests {
             id: 1,
             name: "test".to_string(),
             data: r#"{"name":"test"}"#.as_bytes().to_vec(),
-            vectors: vec![],
         };
 
         let record_wrapper = crate::RecordWrapper::new(&scope, record, crate::ActionType::Insert);
@@ -314,7 +313,6 @@ mod tests {
             id: 1,
             name: "test".to_string(),
             data: r#"{"name":"test"}"#.as_bytes().to_vec(),
-            vectors: vec![],
         };
 
         let record_wrapper = crate::RecordWrapper::new(&scope, record, crate::ActionType::Insert);

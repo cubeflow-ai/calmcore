@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_block_reader() {
-        let reader = BlockReader::new(Path::new(
+        let reader = crate::persist::block_reader::BlockReader::new(std::path::Path::new(
             "/Users/sunjian/rustworkspace/calmcore/big_data/big_test/segments/1-3955000/_source",
         ))
         .unwrap();

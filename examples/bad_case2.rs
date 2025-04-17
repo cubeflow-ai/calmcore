@@ -10,8 +10,8 @@ fn main() -> CoreResult<()> {
     let core = CalmCore::new(data_path)?;
 
     let space = core.load_engine(schema_name)?;
-    let result =
-        space.sql("select id, text from test where text=text('he was elected under indian national', operator='and') order by _score asc ")?;
+    let result = space
+        .sql("select * from abc where text=text('italian translation',operator='or') limit 10")?;
     println!("sql result:{:?}", result.to_wrapper());
 
     Ok(())
