@@ -113,6 +113,7 @@ impl Searcher {
             let searchers: Vec<SegmentSearcher<'_>> = filters
                 .into_iter()
                 .enumerate()
+                .filter(|(_, f)| f.cardinality() > 0)
                 .map(|(index, filter)| SegmentSearcher {
                     stream: streams.next(),
                     segment: &self.segments[index],
@@ -145,6 +146,7 @@ impl Searcher {
                 let plans = self
                     .segments
                     .par_iter()
+                    .filter(|s| !s.is_empty())
                     .map(|s| {
                         let mut guard = sc.get(s.start());
                         PhysicsPlan::new(s, query, &mut guard)

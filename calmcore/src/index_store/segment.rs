@@ -141,4 +141,11 @@ impl SegmentReader {
             SegmentReader::Warm(w) => w.find_by_name(name),
         }
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            SegmentReader::Hot(h) => h.is_empty(),
+            SegmentReader::Warm(_) => false,
+        }
+    }
 }
