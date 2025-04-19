@@ -51,7 +51,7 @@ pub fn main() -> CoreResult<()> {
         None,
     )?;
 
-    let result = space.sql("select id, text from test")?;
+    let result = space.sql("select id, text from test where text='bcd'")?;
     println!("sql result:{:?}", result.to_wrapper());
 
     space.persist().unwrap();
@@ -59,7 +59,10 @@ pub fn main() -> CoreResult<()> {
     let core = CalmCore::new(data_path)?;
 
     let space = core.load_engine(schema_name)?;
-    let result = space.sql("select id, text from test")?;
+    let result = space.sql(
+        "select id, text from test where text='bcd'
+    ",
+    )?;
     println!("sql result:{:?}", result.to_wrapper());
 
     Ok(())

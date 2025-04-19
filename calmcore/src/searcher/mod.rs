@@ -58,6 +58,7 @@ pub struct Searcher {
 
 impl Searcher {
     pub fn new(mut segments: Vec<SegmentReader>) -> Self {
+        segments.retain(|s| !s.is_empty());
         segments.sort_by_key(|r| std::cmp::Reverse(r.start()));
         Self { segments }
     }
@@ -95,7 +96,7 @@ impl Searcher {
         let sc = SearchContext::new();
 
         let result = {
-            let (streams, filters) = self.query_execute(query, &sc)?;
+            let (streams, filters) = self.query_execute(query, &sc, order_by.is_empty())?;
 
             // statistics total hits
             let mut total_hits = filters.iter().map(|f| f.cardinality()).sum::<u64>();
@@ -140,13 +141,13 @@ impl Searcher {
         &self,
         query: Option<&Query>,
         sc: &SearchContext,
+        no_sort: bool,
     ) -> CoreResult<(Streams, Filters)> {
         let value = match query {
             Some(query) => {
                 let plans = self
                     .segments
                     .par_iter()
-                    .filter(|s| !s.is_empty())
                     .map(|s| {
                         let mut guard = sc.get(s.start());
                         PhysicsPlan::new(s, query, &mut guard)
@@ -161,17 +162,21 @@ impl Searcher {
                     })
                     .collect::<Vec<_>>();
 
-                let streams = plans
-                    .into_par_iter()
-                    .zip(self.segments.par_iter())
-                    .map(|(p, s)| (p, s))
-                    .zip(filters.par_iter())
-                    .map(|((p, s), f)| {
-                        let mut guard = sc.get(s.start());
-                        p.into_stream(s.start(), &mut guard, f)
-                    })
-                    .collect::<CoreResult<Vec<_>>>()?;
-                (streams, filters)
+                if no_sort {
+                    let streams = plans
+                        .into_par_iter()
+                        .zip(self.segments.par_iter())
+                        .map(|(p, s)| (p, s))
+                        .zip(filters.par_iter())
+                        .map(|((p, s), f)| {
+                            let mut guard = sc.get(s.start());
+                            p.into_stream(s.start(), &mut guard, f)
+                        })
+                        .collect::<CoreResult<Vec<_>>>()?;
+                    (streams, filters)
+                } else {
+                    (vec![], filters)
+                }
             }
             None => {
                 let filters = self.segments.par_iter().map(|s| s.all_record()).collect();
