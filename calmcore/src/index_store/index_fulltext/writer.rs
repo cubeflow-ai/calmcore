@@ -34,6 +34,7 @@ impl Handler {
             (id, "".to_string()),
             Action::Put(vec![tokens.len() as u32], None),
         );
+
         for (term, tokens) in tokens.iter().into_group_map_by(|t| &t.name) {
             self.doc_index_buffer.insert(
                 (id, term.to_string()),
@@ -42,7 +43,7 @@ impl Handler {
 
             if let Some(bi) = self.token_index_buffer.get_mut(term) {
                 bi.mut_value().add(id);
-                return;
+                continue;
             }
 
             let mut bi = self
@@ -51,6 +52,7 @@ impl Handler {
                 .cloned()
                 .unwrap_or_else(Bitmap::new);
             bi.add(id);
+
             self.token_index_buffer
                 .insert(term.to_string(), Action::Put(bi, None));
         }
