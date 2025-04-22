@@ -3,10 +3,11 @@ pub(crate) mod serializer;
 mod writer;
 
 use croaring::Bitmap;
+use mem_btree::BTree;
 use proto::core::{
     field::{self},
     value::Kind,
-    Field,
+    Field, ObjectValue,
 };
 use reader::FulltextIndexReader;
 use serializer::{DocDeserializer, TokenDeserializer, DOC_INDEX, INDEX_INFO, TERM_INDEX};
@@ -111,27 +112,26 @@ impl FulltextIndex {
 }
 
 impl FulltextIndex {
-    pub fn write(&self, records: &[RecordWrapper]) {
-        if records.is_empty() {
+    pub fn write(&self, source: &BTree<u32, ObjectValue>) {
+        if source.is_empty() {
             return;
         }
 
         let mut handler = self.handler();
-        for r in records.iter().filter(|r| r.result.is_ok()) {
-            if let Some(val) = &r.value {
-                if let Some(value) = val.obj().fields.get(&self.inner.name) {
-                    if let Some(Kind::StringValue(text)) = value.kind.as_ref() {
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let tokens = self.analyzer.analyzer_index(text);
-                        self.doc_count.fetch_add(1, Ordering::Relaxed);
-                        self.total_term
-                            .fetch_add(tokens.len() as u64, Ordering::Relaxed);
-                        handler.push_index(tokens, self.abs_id(r.id()));
-                    } else {
-                        log::trace!("field value:{:?} is not text, ignore it", value);
+        for r in source.iter() {
+            let (id, obj) = (r.0, &r.1);
+            if let Some(value) = obj.fields.get(&self.inner.name) {
+                if let Some(Kind::StringValue(text)) = value.kind.as_ref() {
+                    if text.is_empty() {
+                        continue;
                     }
+                    let tokens = self.analyzer.analyzer_index(text);
+                    self.doc_count.fetch_add(1, Ordering::Relaxed);
+                    self.total_term
+                        .fetch_add(tokens.len() as u64, Ordering::Relaxed);
+                    handler.push_index(tokens, id);
+                } else {
+                    log::trace!("field value:{:?} is not text, ignore it", value);
                 }
             }
         }

@@ -1,7 +1,10 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
-    sync::{atomic::AtomicU64, Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        mpsc, Arc, RwLock,
+    },
     time::Duration,
 };
 
@@ -24,18 +27,68 @@ use super::{
     store::VectorIndexReader,
 };
 
+struct Index {
+    indexed: u32,
+    index_term: RwLock<HashMap<String, Arc<TermIndex>>>,
+    index_fulltext: RwLock<HashMap<String, Arc<FulltextIndex>>>,
+    index_vector: RwLock<HashMap<String, Arc<VectorIndex>>>,
+    finish: AtomicBool,
+}
+impl Index {
+    fn new(indexed: u32) -> Self {
+        Self {
+            indexed,
+            index_term: RwLock::new(HashMap::new()),
+            index_fulltext: RwLock::new(HashMap::new()),
+            index_vector: RwLock::new(HashMap::new()),
+            finish: AtomicBool::new(false),
+        }
+    }
+
+    fn make_index(&self, mut source: BTree<u32, ObjectValue>) {
+        let source = source.split_off(&self.indexed);
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                self.index_term
+                    .read()
+                    .unwrap()
+                    .par_iter()
+                    .for_each(|(_, i)| i.write(&source));
+            });
+
+            s.spawn(|| {
+                self.index_fulltext
+                    .read()
+                    .unwrap()
+                    .par_iter()
+                    .for_each(|(_, i)| i.write(&source));
+            });
+
+            s.spawn(|| {
+                self.index_vector
+                    .read()
+                    .unwrap()
+                    .par_iter()
+                    .for_each(|(_, i)| {
+                        i.write(&source);
+                    });
+            });
+        });
+    }
+}
+
 pub struct MemSegment {
     start: u64,
     end: AtomicU64,
     fields: Arc<Vec<Field>>,
     dels: RwLock<Bitmap>,
     dels_history: RwLock<Bitmap64>,
-    source_store: RwLock<BTree<u32, ObjectValue>>,
+    source_store: Arc<RwLock<BTree<u32, ObjectValue>>>,
     name_store: RwLock<BTree<String, u32>>,
-    index_term: RwLock<HashMap<String, Arc<TermIndex>>>,
-    index_fulltext: RwLock<HashMap<String, Arc<FulltextIndex>>>,
-    index_vector: RwLock<HashMap<String, Arc<VectorIndex>>>,
+    index: Arc<Index>,
     marker: RwLock<Option<String>>,
+    tx: mpsc::Sender<Option<()>>,
     created_at: std::time::Instant,
 }
 
@@ -72,22 +125,32 @@ impl MemSegment {
             )));
         }
 
+        let (tx, rx) = std::sync::mpsc::channel();
+
         let mut segment = MemSegment {
             start,
             end: AtomicU64::new(start),
             fields: Arc::new(fields),
             dels: RwLock::new(Default::default()),
             dels_history: RwLock::new(Default::default()),
-            source_store: RwLock::new(BTree::new(32)),
+            source_store: Arc::new(RwLock::new(BTree::new(32))),
             name_store: RwLock::new(BTree::new(32)),
-            index_term: RwLock::new(HashMap::new()),
-            index_fulltext: RwLock::new(HashMap::new()),
-            index_vector: RwLock::new(HashMap::new()),
+            index: Arc::new(Index::new(0)),
             marker: RwLock::new(None),
             created_at: std::time::Instant::now(),
+            tx,
         };
 
         segment.index_field()?;
+
+        let source_store = segment.source_store.clone();
+        let index = segment.index.clone();
+
+        std::thread::spawn(move || {
+            log::debug!("index start:{}", start);
+            let index = MemSegment::index_job(rx, source_store, index);
+            log::debug!("index:{} end indexed:{}", start, index.indexed);
+        });
 
         Ok(segment)
     }
@@ -115,21 +178,24 @@ impl MemSegment {
                         }
                         None => true,
                     } {
-                        self.index_term
+                        self.index
+                            .index_term
                             .write()
                             .unwrap()
                             .insert(name, Arc::new(TermIndex::new_mem(start, field)?));
                     }
                 }
                 proto::core::field::Type::Text => {
-                    self.index_fulltext
+                    self.index
+                        .index_fulltext
                         .write()
                         .unwrap()
                         .insert(name, Arc::new(FulltextIndex::new_mem(start, field)?));
                 }
                 proto::core::field::Type::Geo => todo!(),
                 proto::core::field::Type::Vector => {
-                    self.index_vector
+                    self.index
+                        .index_vector
                         .write()
                         .unwrap()
                         .insert(name, Arc::new(VectorIndex::new(start, field.clone())?));
@@ -145,26 +211,6 @@ impl MemSegment {
         max: u64,
         marker: Option<String>,
     ) -> Vec<CoreError> {
-        self.index_term
-            .read()
-            .unwrap()
-            .par_iter()
-            .for_each(|(_, i)| i.write(&records));
-
-        self.index_fulltext
-            .read()
-            .unwrap()
-            .par_iter()
-            .for_each(|(_, i)| i.write(&records));
-
-        self.index_vector
-            .read()
-            .unwrap()
-            .par_iter()
-            .for_each(|(_, i)| {
-                i.write(&records);
-            });
-
         let to_value = |value| {
             let value: Value = value?;
             if let Some(Kind::ObjectValue(obj)) = value.kind {
@@ -213,6 +259,9 @@ impl MemSegment {
             *self.marker.write().unwrap() = marker;
         }
         self.end.store(max, std::sync::atomic::Ordering::SeqCst);
+
+        let _ = self.tx.send(Some(()));
+
         results
     }
 
@@ -248,6 +297,25 @@ impl MemSegment {
             .get(name)
             .map(|v| (*v as u64) + self.start)
     }
+
+    fn index_job(
+        rx: mpsc::Receiver<Option<()>>,
+        source: Arc<RwLock<BTree<u32, ObjectValue>>>,
+        index: Arc<Index>,
+    ) -> Arc<Index> {
+        while let Ok(Some(_)) = rx.recv() {
+            let tree = source.read().unwrap().clone().split_off(&index.indexed);
+            index.make_index(tree);
+        }
+        index
+    }
+
+    pub fn finish(&self) {
+        self.index
+            .finish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.tx.send(None).unwrap();
+    }
 }
 
 // read segment
@@ -257,15 +325,15 @@ impl MemSegment {
         let mut index_fulltext = HashMap::new();
         let mut index_vector = HashMap::new();
 
-        for (n, i) in self.index_term.read().unwrap().iter() {
+        for (n, i) in self.index.index_term.read().unwrap().iter() {
             index_term.insert(n.to_string(), i.reader());
         }
 
-        for (n, i) in self.index_fulltext.read().unwrap().iter() {
+        for (n, i) in self.index.index_fulltext.read().unwrap().iter() {
             index_fulltext.insert(n.to_string(), Arc::new(i.reader()));
         }
 
-        for (n, i) in self.index_vector.read().unwrap().iter() {
+        for (n, i) in self.index.index_vector.read().unwrap().iter() {
             index_vector.insert(n.to_string(), Arc::new(i.reader()));
         }
 

@@ -5,7 +5,7 @@ use crate::{
 };
 use hora::core::metrics::Metric;
 use mem_btree::{BTree, BatchWrite};
-use proto::core::{field, value::Kind, Value};
+use proto::core::{field, value::Kind, ObjectValue, Value};
 use std::sync::{Arc, RwLock};
 
 use super::store::VectorIndexReader;
@@ -53,38 +53,37 @@ impl VectorIndex {
 }
 
 impl VectorIndex {
-    pub fn write(&self, records: &[RecordWrapper]) {
-        if records.is_empty() {
+    pub fn write(&self, source: &BTree<u32, ObjectValue>) {
+        if source.is_empty() {
             return;
         }
 
         let mut bw = BatchWrite::default();
 
-        for r in records.iter().filter(|r| r.result.is_ok()) {
-            if let Some(val) = &r.value {
-                if let Some(value) = val.obj().fields.get(&self.inner.name) {
-                    match value {
-                        Value {
-                            kind: Some(Kind::VectorValue(v)),
-                            ..
-                        } => {
-                            if v.vector.len() != self.dimension {
-                                log::error!(
+        for r in source.iter() {
+            let (id, obj) = (r.0, &r.1);
+            if let Some(value) = obj.fields.get(&self.inner.name) {
+                match value {
+                    Value {
+                        kind: Some(Kind::VectorValue(v)),
+                        ..
+                    } => {
+                        if v.vector.len() != self.dimension {
+                            log::error!(
                                     "field value:{:?} embedding has err:dimension not match expected:{} actual:{}",
                                     v.vector,
                                     self.dimension,
                                     v.vector.len()
                                 );
-                                continue;
-                            }
-                            bw.put(r.id(), v.vector.clone());
+                            continue;
                         }
-                        _ => {
-                            log::error!(
+                        bw.put(id as u64 + self.start, v.vector.clone());
+                    }
+                    _ => {
+                        log::error!(
                                 "field value:{:?} embedding has err:kind not match expected:VectorValue",
                                 value
                             );
-                        }
                     }
                 }
             }

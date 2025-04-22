@@ -6,6 +6,8 @@ use crate::{
     RecordWrapper,
 };
 use croaring::Bitmap;
+use mem_btree::BTree;
+use proto::core::ObjectValue;
 use reader::TermIndexReader;
 use serializer::TermDeserializer;
 use std::{path::PathBuf, sync::Arc};
@@ -57,28 +59,27 @@ impl TermIndex {
 }
 
 impl TermIndex {
-    pub fn write(&self, records: &[RecordWrapper]) {
-        if records.is_empty() {
+    pub fn write(&self, source: &BTree<u32, ObjectValue>) {
+        if source.is_empty() {
             return;
         }
 
         let mut handler = self.handler();
-        for r in records.iter().filter(|r| r.result.is_ok()) {
-            if let Some(val) = &r.value {
-                if let Some(value) = val.obj().fields.get(&self.inner.name) {
-                    if let Some(kind) = value.kind.as_ref() {
-                        match kind_to_vec_fix_type(kind, &self.field_type()) {
-                            Ok(KindType::Single(v)) => handler.push_index(v, r.abs_id(self.start)),
-                            Ok(KindType::Array(arr)) => {
-                                for v in arr {
-                                    handler.push_index(v, r.abs_id(self.start))
-                                }
+        for r in source.iter() {
+            let (id, obj) = (r.0, &r.1);
+            if let Some(value) = obj.fields.get(&self.inner.name) {
+                if let Some(kind) = value.kind.as_ref() {
+                    match kind_to_vec_fix_type(kind, &self.field_type()) {
+                        Ok(KindType::Single(v)) => handler.push_index(v, id),
+                        Ok(KindType::Array(arr)) => {
+                            for v in arr {
+                                handler.push_index(v, id)
                             }
-                            Err(e) => log::trace!("err:{:?}, ignore it", e),
                         }
-                    } else {
-                        log::trace!("field value:{:?} is not text, ignore it", value);
+                        Err(e) => log::trace!("err:{:?}, ignore it", e),
                     }
+                } else {
+                    log::trace!("field value:{:?} is not text, ignore it", value);
                 }
             }
         }
