@@ -9,6 +9,8 @@ fn main() -> CoreResult<()> {
     let schema_name = "big_test";
     let data_path = "big_data";
 
+    std::fs::remove_dir_all(data_path).ok();
+
     if std::fs::exists(data_path)? {
         query(schema_name, data_path)
     } else {

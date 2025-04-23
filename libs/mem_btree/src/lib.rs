@@ -658,12 +658,12 @@ where
     }
 
     /// Get the minimum key in the B-tree
-    pub fn min(&mut self) -> Option<&Item<K, V>> {
+    pub fn min(&self) -> Option<&Item<K, V>> {
         self.root.key()
     }
 
     /// Get the maximum key in the B-tree                             d
-    pub fn max(&mut self) -> Option<&Item<K, V>> {
+    pub fn max(&self) -> Option<&Item<K, V>> {
         self.root.max()
     }
 

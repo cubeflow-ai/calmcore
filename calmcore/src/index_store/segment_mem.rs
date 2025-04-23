@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU64},
+        atomic::{AtomicBool, AtomicI32, AtomicU64},
         mpsc, Arc, RwLock,
     },
     time::Duration,
@@ -13,6 +13,8 @@ use itertools::Itertools;
 use mem_btree::{BTree, BatchWrite};
 use proto::core::{field::TermOption, value::Kind, Field, ObjectValue, Value};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+
+use std::sync::atomic::Ordering::SeqCst;
 
 use crate::{
     index_store::index_term::TermIndex,
@@ -28,7 +30,7 @@ use super::{
 };
 
 pub(self) struct Index {
-    indexed: u32,
+    indexed: AtomicI32,
     source_store: Arc<RwLock<BTree<u32, ObjectValue>>>,
     name_store: RwLock<BTree<String, u32>>,
     index_term: RwLock<HashMap<String, Arc<TermIndex>>>,
@@ -40,7 +42,7 @@ pub(self) struct Index {
 impl Index {
     fn new() -> Self {
         Self {
-            indexed: 1,
+            indexed: AtomicI32::new(-1),
             source_store: Arc::new(RwLock::new(BTree::new(32))),
             name_store: RwLock::new(BTree::new(32)),
             index_term: RwLock::new(HashMap::new()),
@@ -51,9 +53,7 @@ impl Index {
         }
     }
 
-    fn make_index(&self, mut source: BTree<u32, ObjectValue>) {
-        let source = source.split_off(&self.indexed);
-
+    fn make_index(&self, source: BTree<u32, ObjectValue>) {
         std::thread::scope(|s| {
             s.spawn(|| {
                 self.index_term
@@ -81,19 +81,24 @@ impl Index {
                     });
             });
         });
+
+        if let Some(v) = source.max() {
+            self.indexed.store(v.0 as i32, SeqCst);
+        }
     }
 
     fn index_job(&self, rx: mpsc::Receiver<Option<()>>) {
         while let Ok(Some(_)) = rx.recv() {
+            let split_index = (self.indexed.load(SeqCst) + 1) as u32;
             let tree = self
                 .source_store
                 .read()
                 .unwrap()
                 .clone()
-                .split_off(&(self.indexed - 1));
+                .split_off(&split_index);
             self.make_index(tree);
         }
-        self.finish.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.finish.store(true, SeqCst);
     }
 }
 
@@ -160,7 +165,7 @@ impl MemSegment {
         std::thread::spawn(move || {
             log::debug!("index start:{}", start);
             index.index_job(rx);
-            log::debug!("index:{} end indexed:{}", start, index.indexed);
+            log::debug!("index:{} end indexed:{}", start, index.indexed.load(SeqCst));
         });
 
         Ok(segment)
@@ -277,7 +282,8 @@ impl MemSegment {
         if marker.is_some() {
             *self.index.marker.write().unwrap() = marker;
         }
-        self.end.store(max, std::sync::atomic::Ordering::SeqCst);
+
+        self.end.store(max, SeqCst);
 
         if let Err(e) = self.tx.send(Some(())) {
             log::error!("write send error: {:?}", e);
@@ -291,7 +297,7 @@ impl MemSegment {
     }
 
     pub fn end(&self) -> u64 {
-        self.end.load(std::sync::atomic::Ordering::SeqCst)
+        self.end.load(SeqCst)
     }
 
     pub(crate) fn mark_delete(&self, del: u64) {
@@ -481,6 +487,6 @@ impl MemSegmentReader {
     }
 
     pub fn is_finish(&self) -> bool {
-        self.index.finish.load(std::sync::atomic::Ordering::SeqCst)
+        self.index.finish.load(SeqCst)
     }
 }
