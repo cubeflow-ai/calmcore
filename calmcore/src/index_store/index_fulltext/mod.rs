@@ -20,7 +20,7 @@ use std::{
 };
 use writer::Handler;
 
-use crate::{analyzer::Analyzer, util::CoreResult, RecordWrapper};
+use crate::{analyzer::Analyzer, util::CoreResult};
 
 use super::store::InvertIndex;
 
@@ -92,10 +92,6 @@ impl FulltextIndex {
             doc_count,
             total_term,
         }
-    }
-
-    fn abs_id(&self, id: u64) -> u32 {
-        (id - self.start) as u32
     }
 
     fn make_analyzer(field: &Arc<Field>) -> CoreResult<Arc<Analyzer>> {

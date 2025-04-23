@@ -33,14 +33,14 @@ pub fn main() -> CoreResult<()> {
 
     let space = core.create_engine(schema)?;
 
-    // space.mutate(
-    //     vec![Action::new(
-    //         ActionType::Append,
-    //         "1",
-    //         br#"{"id":"hello1" , "text":"abc bowel obstruction"}"#,
-    //     )],
-    //     None,
-    // )?;
+    space.mutate(
+        vec![Action::new(
+            ActionType::Append,
+            "1",
+            br#"{"id":"hello1" , "text":"abc bowel obstruction"}"#,
+        )],
+        None,
+    )?;
 
     space.mutate(
         vec![Action::new(
@@ -51,10 +51,14 @@ pub fn main() -> CoreResult<()> {
         None,
     )?;
 
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
     let result = space.sql("select id, text from test where text='bcd'")?;
     println!("sql result:{:?}", result.to_wrapper());
 
     space.persist().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(3));
 
     let core = CalmCore::new(data_path)?;
 

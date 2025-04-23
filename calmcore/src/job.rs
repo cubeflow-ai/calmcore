@@ -91,7 +91,7 @@ impl Job {
         }
     }
 
-    pub(crate) fn segment(engine: Arc<Engine>, max: u64, ttl: u64) -> CoreResult<bool> {
+    pub(crate) fn segment(engine: Arc<Engine>, max: u64, ttl: u64) -> CoreResult<()> {
         let segments = engine.segment_readers();
 
         let engine_name = &engine.scope().schema.name;
@@ -113,8 +113,6 @@ impl Job {
         let mut iter = segments.into_iter();
         let current = iter.next().unwrap(); // remove current
 
-        let mut persist = false;
-
         if current.end() - current.start() > max || current.live_time().as_secs() > ttl {
             log::info!(
                 "engine:{} active current segment:{}-{} freeze it",
@@ -123,9 +121,8 @@ impl Job {
                 current.end()
             );
             engine.store.new_current_segment()?;
-            persist = true;
         }
-        Ok(persist)
+        Ok(())
     }
 
     pub(crate) fn persist(engine: Arc<Engine>, force: bool) -> CoreResult<bool> {
@@ -140,6 +137,16 @@ impl Job {
 
         for segment in iter {
             if let SegmentReader::Hot(reader) = segment {
+                if !reader.is_finish() {
+                    log::info!(
+                        "engine:{} segment:{}-{} not finish so break",
+                        engine_name,
+                        reader.start,
+                        reader.end
+                    );
+                    break;
+                }
+
                 log::info!(
                     "engine:{} segment:{}-{} to persist",
                     engine_name,

@@ -129,6 +129,8 @@ impl IndexStore {
     }
 
     pub fn new_current_segment(&mut self, fields: HashMap<String, Arc<Field>>) -> CoreResult<()> {
+        self.current.write_records(vec![], 0, None);
+
         let start = self.current.end();
 
         let mut segment = MemSegment::new(start, fields)?;

@@ -47,9 +47,10 @@ impl Store {
     }
 
     pub fn write(&self, mut records: Vec<RecordWrapper>, marker: Option<String>) -> Vec<CoreError> {
+        let _lock = self.write_lock.lock().unwrap();
+
         let mut dels = Vec::new();
 
-        let _lock = self.write_lock.lock().unwrap();
         let index_store = self.index_store.read().unwrap();
 
         for r in records.iter_mut() {
@@ -127,6 +128,7 @@ impl Store {
     }
 
     pub(crate) fn new_current_segment(&self) -> CoreResult<()> {
+        let _lock = self.write_lock.lock().unwrap();
         self.index_store
             .write()
             .unwrap()

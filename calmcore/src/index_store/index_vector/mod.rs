@@ -1,8 +1,5 @@
 pub mod reader;
-use crate::{
-    util::{CoreError, CoreResult},
-    RecordWrapper,
-};
+use crate::util::{CoreError, CoreResult};
 use hora::core::metrics::Metric;
 use mem_btree::{BTree, BatchWrite};
 use proto::core::{field, value::Kind, ObjectValue, Value};

@@ -1,10 +1,7 @@
 pub(crate) mod reader;
 pub(crate) mod serializer;
 mod writer;
-use crate::{
-    util::{kind_to_vec_fix_type, CoreResult, KindType},
-    RecordWrapper,
-};
+use crate::util::{kind_to_vec_fix_type, CoreResult, KindType};
 use croaring::Bitmap;
 use mem_btree::BTree;
 use proto::core::ObjectValue;

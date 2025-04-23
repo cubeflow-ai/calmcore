@@ -100,7 +100,7 @@ pub fn write_segment(store: &Store, reader: Arc<MemSegmentReader>) -> CoreResult
     }
     std::fs::create_dir_all(&data_path)?;
 
-    let version = serde_json::to_vec_pretty(&Version::new(reader.marker.clone()))?;
+    let version = serde_json::to_vec_pretty(&Version::new(reader.marker()))?;
 
     pos_write(data_path.join("version"), &version)?;
 

@@ -208,6 +208,9 @@ struct ItemGroup {
 
 impl ItemGroup {
     fn is_leaf(&self) -> bool {
+        if self.data_offsets.is_empty() {
+            return true;
+        }
         self.data_offsets[0] < 0
     }
 

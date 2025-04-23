@@ -27,20 +27,26 @@ use super::{
     store::VectorIndexReader,
 };
 
-struct Index {
+pub(self) struct Index {
     indexed: u32,
+    source_store: Arc<RwLock<BTree<u32, ObjectValue>>>,
+    name_store: RwLock<BTree<String, u32>>,
     index_term: RwLock<HashMap<String, Arc<TermIndex>>>,
     index_fulltext: RwLock<HashMap<String, Arc<FulltextIndex>>>,
     index_vector: RwLock<HashMap<String, Arc<VectorIndex>>>,
+    marker: RwLock<Option<String>>,
     finish: AtomicBool,
 }
 impl Index {
-    fn new(indexed: u32) -> Self {
+    fn new() -> Self {
         Self {
-            indexed,
+            indexed: 1,
+            source_store: Arc::new(RwLock::new(BTree::new(32))),
+            name_store: RwLock::new(BTree::new(32)),
             index_term: RwLock::new(HashMap::new()),
             index_fulltext: RwLock::new(HashMap::new()),
             index_vector: RwLock::new(HashMap::new()),
+            marker: RwLock::new(None),
             finish: AtomicBool::new(false),
         }
     }
@@ -76,6 +82,19 @@ impl Index {
             });
         });
     }
+
+    fn index_job(&self, rx: mpsc::Receiver<Option<()>>) {
+        while let Ok(Some(_)) = rx.recv() {
+            let tree = self
+                .source_store
+                .read()
+                .unwrap()
+                .clone()
+                .split_off(&(self.indexed - 1));
+            self.make_index(tree);
+        }
+        self.finish.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 pub struct MemSegment {
@@ -84,10 +103,7 @@ pub struct MemSegment {
     fields: Arc<Vec<Field>>,
     dels: RwLock<Bitmap>,
     dels_history: RwLock<Bitmap64>,
-    source_store: Arc<RwLock<BTree<u32, ObjectValue>>>,
-    name_store: RwLock<BTree<String, u32>>,
     index: Arc<Index>,
-    marker: RwLock<Option<String>>,
     tx: mpsc::Sender<Option<()>>,
     created_at: std::time::Instant,
 }
@@ -133,22 +149,17 @@ impl MemSegment {
             fields: Arc::new(fields),
             dels: RwLock::new(Default::default()),
             dels_history: RwLock::new(Default::default()),
-            source_store: Arc::new(RwLock::new(BTree::new(32))),
-            name_store: RwLock::new(BTree::new(32)),
-            index: Arc::new(Index::new(0)),
-            marker: RwLock::new(None),
+            index: Arc::new(Index::new()),
             created_at: std::time::Instant::now(),
             tx,
         };
 
         segment.index_field()?;
 
-        let source_store = segment.source_store.clone();
         let index = segment.index.clone();
-
         std::thread::spawn(move || {
             log::debug!("index start:{}", start);
-            let index = MemSegment::index_job(rx, source_store, index);
+            index.index_job(rx);
             log::debug!("index:{} end indexed:{}", start, index.indexed);
         });
 
@@ -211,6 +222,13 @@ impl MemSegment {
         max: u64,
         marker: Option<String>,
     ) -> Vec<CoreError> {
+        if records.is_empty() && max == 0 && marker.is_none() {
+            // no need to write the segment is end
+            if let Err(e) = self.tx.send(None) {
+                log::error!("end send error: {:?}", e);
+            }
+        }
+
         let to_value = |value| {
             let value: Value = value?;
             if let Some(Kind::ObjectValue(obj)) = value.kind {
@@ -223,6 +241,7 @@ impl MemSegment {
         let mut source_bw = BatchWrite::default();
         let mut name_bw = BatchWrite::default();
 
+        // here may be has concurrency problem
         let results = records
             .into_iter()
             .filter(|r| r.result.is_ok())
@@ -239,10 +258,10 @@ impl MemSegment {
             .collect();
 
         //write name -> id mapping
-        let mut name_store = { self.name_store.write().unwrap().clone() };
+        let mut name_store = { self.index.name_store.write().unwrap().clone() };
         name_store.write(name_bw);
         {
-            *self.name_store.write().unwrap() = name_store;
+            *self.index.name_store.write().unwrap() = name_store;
         }
 
         let map = source_bw.into_map();
@@ -250,17 +269,19 @@ impl MemSegment {
         let source_bw = BatchWrite::from(map);
 
         //write id -> source mapping
-        let mut source_store = { self.source_store.write().unwrap().clone() };
+        let mut source_store = { self.index.source_store.write().unwrap().clone() };
         source_store.write(source_bw);
         {
-            *self.source_store.write().unwrap() = source_store;
+            *self.index.source_store.write().unwrap() = source_store;
         }
         if marker.is_some() {
-            *self.marker.write().unwrap() = marker;
+            *self.index.marker.write().unwrap() = marker;
         }
         self.end.store(max, std::sync::atomic::Ordering::SeqCst);
 
-        let _ = self.tx.send(Some(()));
+        if let Err(e) = self.tx.send(Some(())) {
+            log::error!("write send error: {:?}", e);
+        }
 
         results
     }
@@ -282,7 +303,8 @@ impl MemSegment {
     }
 
     pub fn find_by_id(&self, id: u64) -> Option<Cow<ObjectValue>> {
-        self.source_store
+        self.index
+            .source_store
             .read()
             .unwrap()
             .get(&((id - self.start) as u32))
@@ -291,30 +313,12 @@ impl MemSegment {
     }
 
     pub(crate) fn find_by_name(&self, name: &String) -> Option<u64> {
-        self.name_store
+        self.index
+            .name_store
             .read()
             .unwrap()
             .get(name)
             .map(|v| (*v as u64) + self.start)
-    }
-
-    fn index_job(
-        rx: mpsc::Receiver<Option<()>>,
-        source: Arc<RwLock<BTree<u32, ObjectValue>>>,
-        index: Arc<Index>,
-    ) -> Arc<Index> {
-        while let Ok(Some(_)) = rx.recv() {
-            let tree = source.read().unwrap().clone().split_off(&index.indexed);
-            index.make_index(tree);
-        }
-        index
-    }
-
-    pub fn finish(&self) {
-        self.index
-            .finish
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.tx.send(None).unwrap();
     }
 }
 
@@ -341,15 +345,15 @@ impl MemSegment {
             start: self.start(),
             end: self.end(),
             fields: self.fields.clone(),
+            index: self.index.clone(),
             dels: RwLock::new(self.dels.read().unwrap().clone()),
             dels_history: self.dels_history.read().unwrap().clone(),
-            source_store: self.source_store.read().unwrap().clone(),
-            name_store: self.name_store.read().unwrap().clone(),
+            source_store: self.index.source_store.read().unwrap().clone(),
+            name_store: self.index.name_store.read().unwrap().clone(),
             index_term,
             index_fulltext,
             index_vector,
             live_time: self.created_at.elapsed(),
-            marker: self.marker.read().unwrap().clone(),
         }
     }
 }
@@ -360,13 +364,13 @@ pub struct MemSegmentReader {
     pub fields: Arc<Vec<Field>>,
     pub dels: RwLock<Bitmap>,
     pub dels_history: Bitmap64,
+    index: Arc<Index>,
     pub source_store: BTree<u32, ObjectValue>,
     pub name_store: BTree<String, u32>,
     pub index_term: HashMap<String, TermIndexReader>,
     pub index_fulltext: HashMap<String, Arc<FulltextIndexReader>>,
     pub(crate) index_vector: HashMap<String, Arc<VectorIndexReader>>,
     pub live_time: Duration,
-    pub marker: Option<String>,
 }
 
 impl MemSegmentReader {
@@ -468,7 +472,15 @@ impl MemSegmentReader {
             size_bytes: 0, //TODO impl me
             doc_count: self.source_store.len() as u32,
             del_count: self.dels.read().unwrap().cardinality() as u32,
-            marker: self.marker.clone(),
+            marker: self.marker(),
         })
+    }
+
+    pub fn marker(&self) -> Option<String> {
+        self.index.marker.read().unwrap().clone()
+    }
+
+    pub fn is_finish(&self) -> bool {
+        self.index.finish.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
