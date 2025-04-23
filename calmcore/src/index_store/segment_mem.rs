@@ -232,6 +232,7 @@ impl MemSegment {
             if let Err(e) = self.tx.send(None) {
                 log::error!("end send error: {:?}", e);
             }
+            return vec![];
         }
 
         let to_value = |value| {
