@@ -376,7 +376,7 @@ impl Searcher {
                         };
 
                         real_count += 1;
-                        let sort = SortedHit::make_sort(id, 0.0, &value, order_by)?;
+                        let sort = SortedHit::make_sort(id, score, &value, order_by)?;
 
                         let sort_hit = if min.is_none()
                             || min.as_ref().unwrap().cmp_record(&sort) == Ordering::Less
