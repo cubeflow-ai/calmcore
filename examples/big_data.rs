@@ -52,7 +52,11 @@ fn query(schema_name: &str, data_path: &str) -> CoreResult<()> {
 
 fn insert(schema_name: &str, data_path: &str) -> CoreResult<()> {
     // 创建schema和space
-    let core = CalmCore::new(data_path)?;
+    let core = CalmCore::new_with_conf(Config {
+        data_path: data_path.to_string(),
+        segment_max_size: 10_000,
+        flush_interval_secs: 3600,
+    })?;
     let schema = calmcore::easy_schema(
         schema_name,
         vec![
@@ -69,7 +73,7 @@ fn insert(schema_name: &str, data_path: &str) -> CoreResult<()> {
     println!("Starting data insertion...");
     let start = Instant::now();
     let batch_size = 1000;
-    let total = 100_000_000;
+    let total = 10_000_000;
 
     let cities = ["北京", "上海", "广州", "深圳", "杭州"];
 

@@ -328,7 +328,7 @@ impl Searcher {
         limit: (usize, usize),
         need_realcount: bool,
     ) -> CoreResult<(Vec<SortedHit>, Option<u64>)> {
-        let mut size = limit.0 + limit.1;
+        let size = limit.0 + limit.1;
 
         if size == 0 {
             return Ok((vec![], None));
@@ -351,9 +351,11 @@ impl Searcher {
             order_by
         );
 
-        if need_all {
-            size = usize::max(size, 1000);
-        }
+        let fetch_size = if need_all {
+            usize::max(size, 1000)
+        } else {
+            size
+        };
 
         'outer: for search in searches {
             let stream = &search.stream;
@@ -361,7 +363,7 @@ impl Searcher {
             let start = search.segment.start();
             let mut min: Option<SortedHit> = None;
 
-            for ids in &filter.iter().chunks(size) {
+            for ids in &filter.iter().chunks(fetch_size) {
                 let ids = ids.into_iter().map(|id| id as u64 + start).collect_vec();
 
                 let records = search.batch_doc(projection, &ids)?;
@@ -370,35 +372,24 @@ impl Searcher {
                     for (value, id) in records.into_iter().map(Cow::into_owned).zip(ids) {
                         real_count += 1;
 
-                        let score = if need_score {
-                            match stream.as_ref().and_then(|s| s.score(id)) {
-                                Some(s) => s,
-                                None => continue,
-                            }
-                        } else {
-                            0.0
+                        let score = match stream.as_ref().and_then(|s| s.score(id)) {
+                            Some(s) => s,
+                            None => continue,
                         };
                         let sort = SortedHit::make_sort(id, 0.0, &value, order_by)?;
 
                         let sort_hit = if min.is_none()
-                            || min.as_ref().unwrap().cmp_record(&sort) == Ordering::Greater
+                            || min.as_ref().unwrap().cmp_record(&sort) == Ordering::Less
                         {
-                            SortedHit::new(id, score, value, sort)
-                        } else {
                             continue;
+                        } else {
+                            SortedHit::new(id, score, value, sort)
                         };
 
                         heap.insert(sort_hit);
 
                         if heap.len() > size {
                             min = heap.pop_last();
-                            //if order by only one field, it is id ,so we can return early
-                            if order_by.is_empty() {
-                                return Ok((
-                                    heap.into_iter().skip(limit.0).take(limit.1).collect_vec(),
-                                    None,
-                                ));
-                            }
                         }
                     }
                 } else {
