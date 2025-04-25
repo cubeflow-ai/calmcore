@@ -370,12 +370,12 @@ impl Searcher {
 
                 if need_all {
                     for (value, id) in records.into_iter().map(Cow::into_owned).zip(ids) {
-                        real_count += 1;
-
                         let score = match stream.as_ref().and_then(|s| s.score(id)) {
                             Some(s) => s,
                             None => continue,
                         };
+
+                        real_count += 1;
                         let sort = SortedHit::make_sort(id, 0.0, &value, order_by)?;
 
                         let sort_hit = if min.is_none()
