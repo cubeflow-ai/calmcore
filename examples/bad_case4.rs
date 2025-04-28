@@ -1,6 +1,7 @@
 use std::{sync::Mutex, time::Duration};
 
-use croaring::{bitmap, Bitmap};
+// use croaring::{bitmap, Bitmap};
+use roaring::bitmap::RoaringBitmap as Bitmap;
 
 struct Test {
     lock: Mutex<()>,
@@ -12,13 +13,14 @@ pub fn main() {
 
     for i in 0..4_000_000 {
         if i % 2 == 0 {
-            b1.add(i);
+            // b1.add(i);
+            b1.insert(i);
         }
     }
 
-    for i in 5_000_000..5_000_000 {
+    for i in 1_000_000..5_000_000 {
         if i % 2 == 0 {
-            b2.add(i);
+            b2.insert(i);
         }
     }
 
@@ -29,6 +31,7 @@ pub fn main() {
             sum += b;
         }
     }
+
     for b in b2.iter() {
         if b == 0 {
             sum += b;
@@ -38,6 +41,7 @@ pub fn main() {
 
     let start = std::time::Instant::now();
     let b3 = b1 & b2;
+    println!("bs{}", b3.len());
     let mut sum = 0;
     for b in b3.iter() {
         if b == 0 {
