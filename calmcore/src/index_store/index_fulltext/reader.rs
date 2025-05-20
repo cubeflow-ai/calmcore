@@ -45,7 +45,7 @@ pub enum PositionList {
 }
 
 impl PositionList {
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             PositionList::Memory(arc) => arc.read().unwrap().ids.len(),
             PositionList::Disk(archived) => archived.ids.len(),
@@ -66,10 +66,7 @@ struct PositionListIter<'a> {
 
 impl<'a> PositionListIter<'a> {
     fn new(inner: &'a PositionList) -> Self {
-        let len = match inner {
-            PositionList::Memory(arc) => arc.read().unwrap().ids.len(),
-            PositionList::Disk(archived) => archived.ids.len(),
-        };
+        let len = inner.len();
         Self {
             inner,
             index: 0,
@@ -195,7 +192,11 @@ impl FulltextIndexReader {
         Ok(self.analyzer.analyzer_query(value))
     }
 
-    pub(crate) fn phrase_tokens(&self, tokens: &[Token], slop: i32) -> CoreResult<Vec<Hit>> {
+    pub(crate) fn phrase_tokens(
+        &self,
+        tokens: &[Token],
+        slop: i32,
+    ) -> CoreResult<(Vec<u64>, HashMap<String, PositionList>)> {
         let mut result = HashMap::new();
 
         for token in tokens.iter() {
@@ -207,40 +208,28 @@ impl FulltextIndexReader {
             let value = self.term_position.get(token);
 
             if value.is_none() {
-                return Ok(vec![]);
+                return Ok((vec![], result));
             }
 
             if self.token_index.get(token).is_none() {
-                return Ok(vec![]);
+                return Ok((vec![], result));
             }
 
             result.insert(token.to_string(), value.unwrap());
         }
 
-        self.phrase_hits(self.start, tokens, result, slop)
-    }
+        let hits = self.phrase_hits(self.start, tokens, &result, slop)?;
 
-    pub fn avgdl(&self) -> f32 {
-        self.total_term as f32 / (self.doc_count + 1) as f32
-    }
-
-    pub(crate) fn tokens(
-        &self,
-        tokens: &[Token],
-    ) -> CoreResult<HashMap<String, Option<PositionList>>> {
-        Ok(tokens
-            .iter()
-            .map(|token| (token.name.clone(), self.term_position.get(&token.name)))
-            .collect())
+        Ok((hits, result))
     }
 
     fn phrase_hits(
         &self,
         start: u64,
         tokens: &[Token],
-        term_position: HashMap<String, PositionList>,
+        term_position: &HashMap<String, PositionList>,
         slop: i32,
-    ) -> CoreResult<Vec<Hit>> {
+    ) -> CoreResult<Vec<u64>> {
         assert!(tokens.len() > 1 && slop > 1);
 
         let mut iters = tokens
@@ -253,8 +242,6 @@ impl FulltextIndexReader {
         let mut max = 0;
 
         let mut hits = vec![];
-
-        let avgdl = self.avgdl();
 
         loop {
             for i in 0..len {
@@ -272,17 +259,24 @@ impl FulltextIndexReader {
                 }
             }
 
-            if let Some(count) = self.pharse_filter(&iters, slop) {
-                let id = max as u64 + start;
-
-                let score = self.score(id, tokens, &term_position, avgdl);
-
-                let mut hit = Hit::default();
-                hit.score = score * count as f32;
-                hit.id = id;
-                hits.push(hit);
+            if let Some(_count) = self.pharse_filter(&iters, slop) {
+                hits.push(max as u64 + start);
             }
         }
+    }
+
+    pub fn avgdl(&self) -> f32 {
+        self.total_term as f32 / (self.doc_count + 1) as f32
+    }
+
+    pub(crate) fn tokens(
+        &self,
+        tokens: &[Token],
+    ) -> CoreResult<HashMap<String, Option<PositionList>>> {
+        Ok(tokens
+            .iter()
+            .map(|token| (token.name.clone(), self.term_position.get(&token.name)))
+            .collect())
     }
 
     fn pharse_filter<'a>(&self, iters: &[PositionListIter<'a>], slop: i32) -> Option<usize> {
@@ -301,21 +295,46 @@ impl FulltextIndexReader {
         Some(pre.len())
     }
 
-    pub fn score_count(
+    // pub fn score_count(
+    //     &self,
+    //     doc_id: u64,
+    //     tokens: &[Token],
+    //     term_doc: &HashMap<String, usize>,
+    //     avgdl: f32,
+    // ) -> f32 {
+    //     let doc_len = 200; //TODO: get doc len by doc_id
+
+    //     let mut score = 0.0;
+    //     for token in tokens {
+    //         if let Some(td) = term_doc.get(token.name.as_str()) {
+    //             score += self.bm25(
+    //                 p.tf((doc_id - self.start) as u32),
+    //                 *td,
+    //                 self.doc_count,
+    //                 doc_len,
+    //                 avgdl,
+    //             );
+    //         }
+    //     }
+
+    //     score
+    // }
+
+    pub fn score_text(
         &self,
         doc_id: u64,
         tokens: &[Token],
-        term_doc: &HashMap<String, usize>,
+        term_position: &HashMap<String, Option<Arc<PositionList>>>,
         avgdl: f32,
     ) -> f32 {
         let doc_len = 200; //TODO: get doc len by doc_id
 
         let mut score = 0.0;
         for token in tokens {
-            if let Some(td) = term_doc.get(token.name.as_str()) {
+            if let Some(Some(p)) = term_position.get(token.name.as_str()) {
                 score += self.bm25(
                     p.tf((doc_id - self.start) as u32),
-                    *td,
+                    p.len(),
                     self.doc_count,
                     doc_len,
                     avgdl,
@@ -326,7 +345,7 @@ impl FulltextIndexReader {
         score
     }
 
-    pub fn score(
+    pub fn score_phrase(
         &self,
         doc_id: u64,
         tokens: &[Token],
@@ -337,7 +356,7 @@ impl FulltextIndexReader {
 
         let mut score = 0.0;
         for token in tokens {
-            if let Some(p) = term_position.get(token.name.as_str()) {
+            if let Some(p) = term_position.get(&token.name) {
                 score += self.bm25(
                     p.tf((doc_id - self.start) as u32),
                     p.len(),
@@ -365,7 +384,7 @@ impl FulltextIndexReader {
         return idf * tf_norm;
     }
 
-    fn tn_idf(&self, tf: usize, term_doc: usize, doc_count: u32) -> f32 {
+    fn tf_idf(&self, tf: usize, term_doc: usize, doc_count: u32) -> f32 {
         let tf = tf as f32;
         let n = term_doc as f32;
         let N = doc_count as f32;

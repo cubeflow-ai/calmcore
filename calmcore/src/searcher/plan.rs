@@ -115,10 +115,17 @@ pub enum PhysicsPlan {
     Text(
         Arc<FulltextIndexReader>,
         f32,                                   //boost
+        Vec<Token>,                            // tokens
         HashMap<String, Option<PositionList>>, // term_position
         bool,                                  // operator(true is and/ false is or)
     ),
-    Phrase(f32, u64, Vec<Hit>),
+    Phrase(
+        Arc<FulltextIndexReader>,
+        f32,                           //boost
+        Vec<u64>,                      // hits
+        Vec<Token>,                    // tokens
+        HashMap<String, PositionList>, // term_position
+    ),
     Combin(Vec<PhysicsPlan>, LogicOperator),
 }
 
@@ -177,10 +184,22 @@ impl PhysicsPlan {
             } => {
                 let reader = segment.get_text_reader(field)?;
                 let tokens = reader.analyzer(value)?;
+
+                // Arc<FulltextIndexReader>,
+                // f32,                           //boost
+                // Vec<u64>,                      // hits
+                // Vec<Token>,                    // tokens
+                // HashMap<String, PositionList>, // term_position
+
+                let (hits, term_position) = reader.phrase_tokens(&tokens, *slop)?;
+
                 Ok(Self::Phrase(
+                    reader,
                     *boost,
+                    hits,
+                    tokens,
                     reader.start,
-                    reader.phrase_tokens(&tokens, *slop)?,
+                    term_position,
                 ))
             }
             Query::Text {
@@ -222,7 +241,7 @@ impl PhysicsPlan {
         filter: &Bitmap,
     ) -> CoreResult<Box<dyn HitStream>> {
         let result: Box<dyn HitStream> = match self {
-            PhysicsPlan::Map(boost, bitmap) => Box::new(BitmapStream::new(start, bitmap, boost)),
+            PhysicsPlan::Map(boost, bitmap) => Box::new(BitmapStream::new(start, boost, bitmap)),
             PhysicsPlan::Combin(vec, logic_operator) => {
                 let mut cs = CombHitStream::new(vec.len(), logic_operator);
                 for v in vec.into_iter() {
@@ -230,22 +249,16 @@ impl PhysicsPlan {
                 }
                 Box::new(cs)
             }
-            PhysicsPlan::Text(reader, boost, term_count_map, operator) => {
-                Box::new(TextStream::new(
-                    reader,
-                    boost,
-                    tokens,
-                    total_bitmap,
-                    term_count_map,
-                    operator,
-                    slop,
-                ))
-            }
+            PhysicsPlan::Text(reader, boost, tokens, term_position, operator) => Box::new(
+                TextStream::new(reader, boost, tokens, term_position, operator),
+            ),
+            PhysicsPlan::Phrase(reader, boosts, hits, tokens, term_position) => Box::new(
+                PhraseStream::new(reader, boosts, hits, tokens, term_position),
+            ),
             PhysicsPlan::Vector(vector_index_reader, boost, value, _) => {
                 let result = vector_index_reader.search(&value, 2000, &filter)?;
                 Box::new(VectorStream::new(boost, result))
             }
-            PhysicsPlan::Phrase(boost, hits) => Box::new(PhraseStream::new(boost, hits)),
         };
 
         Ok(result)
