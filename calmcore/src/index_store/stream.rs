@@ -1,18 +1,26 @@
-use std::{collections::HashMap, fmt::Debug, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    sync::{atomic::AtomicUsize, Arc},
+};
 
 use croaring::Bitmap;
+use itertools::Position;
+use proto::core::Hit;
 
 use crate::{analyzer::Token, searcher::plan};
 
-use super::index_fulltext::reader::FulltextIndexReader;
+use super::index_fulltext::reader::{FulltextIndexReader, PositionList};
 
 pub trait HitStream: Send {
     fn score(&self, id: u64) -> Option<f32>;
+    fn next_value(&mut self, value: u64) -> Option<u64>;
 }
 
 pub struct CombHitStream {
     streams: Vec<Box<dyn HitStream>>,
     operator: plan::LogicOperator,
+    score: f32,
 }
 
 impl CombHitStream {
@@ -20,6 +28,7 @@ impl CombHitStream {
         Self {
             streams: Vec::with_capacity(capacity),
             operator,
+            score: 0.0,
         }
     }
 
@@ -71,11 +80,8 @@ impl HitStream for BitmapStream {
 pub struct TextStream {
     reader: Arc<FulltextIndexReader>,
     boost: f32,
-    tokens: Vec<Token>,
-    bitmap: Bitmap,
-    token_doc_len: HashMap<String, usize>,
+    term_position: HashMap<String, Option<PositionList>>,
     operator: bool,
-    slop: i32,
     value: Option<u32>,
     score: f32,
     end: bool,
@@ -86,10 +92,7 @@ impl Debug for TextStream {
         f.debug_struct("TextStream")
             .field("reader", &self.reader.doc_count)
             .field("boost", &self.boost)
-            .field("tokens", &self.tokens)
-            .field("token_doc_len", &self.token_doc_len)
             .field("operator", &self.operator)
-            .field("slop", &self.slop)
             .field("value", &self.value)
             .field("score", &self.score)
             .field("end", &self.end)
@@ -101,20 +104,14 @@ impl TextStream {
     pub(crate) fn new(
         reader: Arc<FulltextIndexReader>,
         boost: f32,
-        tokens: Vec<Token>,
-        bitmap: Bitmap,
-        token_doc_len: HashMap<String, usize>,
+        term_position: HashMap<String, Option<PositionList>>,
         operator: bool,
-        slop: i32,
     ) -> Self {
         Self {
             reader,
             boost,
-            tokens,
-            bitmap,
-            token_doc_len,
+            term_position,
             operator,
-            slop,
             value: None,
             score: 0.0,
             end: false,
@@ -128,9 +125,59 @@ impl HitStream for TextStream {
             return None;
         }
 
-        self.reader
-            .score(id, &self.tokens, &self.token_doc_len, self.slop)
-            .map(|s| s * self.boost)
+        let avgdl = self.reader.avgdl();
+
+        Some(
+            self.reader
+                .score(id, &self.tokens, &self.token_doc_len, avgdl)
+                * self.boost,
+        )
+    }
+}
+
+pub struct PhraseStream {
+    boost: f32,
+    hits: Vec<Hit>,
+    index: AtomicUsize,
+}
+
+impl PhraseStream {
+    pub(crate) fn new(boost: f32, hits: Vec<Hit>) -> Self {
+        Self {
+            boost,
+            hits,
+            index: AtomicUsize::new(0),
+        }
+    }
+}
+impl HitStream for PhraseStream {
+    fn score(&self, id: u64) -> Option<f32> {
+        //binary search hits
+        // if  not found return None and set index to pre
+        // if found return score and set index to next
+
+        let index = self.index.load(std::sync::atomic::Ordering::Relaxed);
+
+        if index >= self.hits.len() {
+            return None;
+        }
+
+        match self.hits[index..].binary_search_by(|h| h.id.cmp(&id)) {
+            Ok(v) => {
+                let hit = &self.hits[v];
+                if hit.id == id {
+                    self.index
+                        .fetch_add(v + 1, std::sync::atomic::Ordering::Relaxed);
+                    Some(hit.score * self.boost)
+                } else {
+                    None
+                }
+            }
+            Err(v) => {
+                self.index.store(v, std::sync::atomic::Ordering::Relaxed);
+                None
+            }
+        }
     }
 }
 

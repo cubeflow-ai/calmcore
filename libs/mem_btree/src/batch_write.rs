@@ -21,6 +21,13 @@ impl<V> Action<V> {
             Self::Delete => unreachable!(),
         }
     }
+
+    pub fn value_ref(&self) -> &V {
+        match self {
+            Self::Put(v, _) => v,
+            Self::Delete => unreachable!(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]

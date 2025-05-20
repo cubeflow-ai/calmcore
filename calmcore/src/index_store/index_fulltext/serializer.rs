@@ -1,13 +1,17 @@
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    sync::{Arc, Mutex, RwLock},
+};
 
 use croaring::{Bitmap, Portable};
 use mem_btree::persist;
+use rkyv::ser::allocator::Arena;
 
-use crate::util::CoreError;
+use crate::{entity::TermPosition, util::CoreError};
 
 pub const TERM_INDEX: &str = "term_index";
 pub const VECTOR_INDEX: &str = "vector_index";
-pub const DOC_INDEX: &str = "doc_index";
+pub const TERM_POSITION: &str = "term_position";
 pub const INDEX_INFO: &str = "index_info";
 
 pub struct TokenSerializer;
@@ -42,61 +46,59 @@ impl persist::KVDeserializer<String, Bitmap> for TokenDeserializer {
     }
 }
 
-pub struct DocSerializer;
+pub struct PositionSerializer {
+    arena: Mutex<Arena>,
+}
 
-impl persist::KVSerializer<(u32, String), Vec<u32>> for DocSerializer {
-    fn serialize_key<'a>(&self, k: &'a (u32, String)) -> Cow<'a, [u8]> {
-        let mut bytes = vec![0; 4 + k.1.len()];
-        bytes[..4].copy_from_slice(&k.0.to_be_bytes());
-        bytes[4..].copy_from_slice(k.1.as_bytes());
-        Cow::Owned(bytes)
+impl PositionSerializer {
+    pub fn new() -> Self {
+        Self {
+            arena: Mutex::new(Arena::new()),
+        }
+    }
+}
+
+impl persist::KVSerializer<String, Arc<RwLock<TermPosition>>> for PositionSerializer {
+    fn serialize_key<'a>(&self, k: &'a String) -> Cow<'a, [u8]> {
+        Cow::Borrowed(k.as_bytes())
     }
 
-    fn serialize_value<'a>(&self, v: &'a Vec<u32>) -> Cow<'a, [u8]> {
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                v.as_ptr() as *const u8,
-                v.len() * std::mem::size_of::<u32>(),
-            )
-        };
-        Cow::Borrowed(bytes)
+    fn serialize_value<'a>(&self, v: &'a Arc<RwLock<TermPosition>>) -> Cow<'a, [u8]> {
+        let arena = &mut *self.arena.lock().unwrap();
+        let bytes = v.read().unwrap().serializer(arena).unwrap();
+        Cow::Owned(bytes.to_vec()) //TODO use ref
     }
 }
 
 pub struct DocDeserializer;
 
-impl persist::KVDeserializer<(u32, String), Vec<u32>> for DocDeserializer {
+impl persist::KVDeserializer<String, Arc<RwLock<TermPosition>>> for DocDeserializer {
     fn deserialize_value(
         &self,
         v: &[u8],
-    ) -> std::result::Result<Vec<u32>, Box<dyn std::error::Error>> {
-        let len = v.len() / std::mem::size_of::<u32>();
-        let mut vec = Vec::with_capacity(len);
-        for chunk in v.chunks_exact(4) {
-            if let Ok(bytes) = chunk.try_into() {
-                // 根据系统字节序选择适当的转换方法
-                #[cfg(target_endian = "big")]
-                let value = u32::from_be_bytes(bytes);
-                #[cfg(target_endian = "little")]
-                let value = u32::from_le_bytes(bytes);
-
-                vec.push(value);
-            }
-        }
-        Ok(vec)
+    ) -> std::result::Result<Arc<RwLock<TermPosition>>, Box<dyn std::error::Error>> {
+        // let info = rkyv::access(v).map_err(|e| {
+        //     CoreError::DecodeError("decode doc index err".to_string(), v.to_vec()).into()
+        // })?;
+        // Ok(vec)
+        todo!()
     }
 
-    fn serialize_key<'a>(&self, k: &'a (u32, String)) -> Cow<'a, [u8]> {
-        let mut bytes = vec![0; 4 + k.1.len()];
-        bytes[..4].copy_from_slice(&k.0.to_be_bytes());
-        bytes[4..].copy_from_slice(k.1.as_bytes());
-        Cow::Owned(bytes)
+    fn serialize_key<'a>(&self, k: &'a String) -> Cow<'a, [u8]> {
+        // let mut bytes = vec![0; 4 + k.1.len()];
+        // bytes[..4].copy_from_slice(&k.0.to_be_bytes());
+        // bytes[4..].copy_from_slice(k.1.as_bytes());
+        // Cow::Owned(bytes)
+        todo!()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use mem_btree::persist::{KVDeserializer, KVSerializer};
+    use rkyv::ser::allocator::Arena;
+
+    use crate::entity::TermPosting;
 
     use super::*;
     #[test]
@@ -148,34 +150,36 @@ mod tests {
 
     #[test]
     fn test_doc_deserializer() {
-        let deserializer = DocDeserializer;
-        let key = (123u32, String::from("test_doc"));
-        let original_value = vec![1u32, 2u32, 3u32];
+        todo!()
+        // let deserializer = DocDeserializer;
+        // let key = (123u32, String::from("test_doc"));
+        // let original_value = vec![1u32, 2u32, 3u32];
 
-        let serialized_key = deserializer.serialize_key(&key);
-        assert_eq!(serialized_key[0..4], 123u32.to_be_bytes());
-        assert_eq!(&serialized_key[4..], b"test_doc");
+        // let serialized_key = deserializer.serialize_key(&key);
+        // assert_eq!(serialized_key[0..4], 123u32.to_be_bytes());
+        // assert_eq!(&serialized_key[4..], b"test_doc");
 
-        // 修改测试中的序列化方式，使用正确的字节序
-        let mut value_bytes = Vec::with_capacity(original_value.len() * 4);
-        for &value in &original_value {
-            value_bytes.extend_from_slice(&value.to_ne_bytes());
-        }
+        // // 修改测试中的序列化方式，使用正确的字节序
+        // let mut value_bytes = Vec::with_capacity(original_value.len() * 4);
+        // for &value in &original_value {
+        //     value_bytes.extend_from_slice(&value.to_ne_bytes());
+        // }
 
-        let deserialized_value = deserializer.deserialize_value(&value_bytes).unwrap();
-        assert_eq!(deserialized_value, original_value);
+        // let deserialized_value = deserializer.deserialize_value(&value_bytes).unwrap();
+        // assert_eq!(deserialized_value, original_value);
     }
 
     #[test]
     fn test_value() {
-        let deserializer = DocDeserializer;
-        let serializer = DocSerializer;
-        let value = vec![1u32, 2u32, 3u32];
+        todo!()
+        // let deserializer = DocDeserializer;
+        // let serializer = DocSerializer;
+        // let value = vec![1u32, 2u32, 3u32];
 
-        let bvalue = serializer.serialize_value(&value);
-        let dvalue = deserializer.deserialize_value(&bvalue.as_ref()).unwrap();
+        // let bvalue = serializer.serialize_value(&value);
+        // let dvalue = deserializer.deserialize_value(&bvalue.as_ref()).unwrap();
 
-        assert_eq!(dvalue, value);
+        // assert_eq!(dvalue, value);
     }
 
     #[test]
@@ -190,5 +194,28 @@ mod tests {
         );
 
         // 可以添加更多的字节序相关测试...
+    }
+
+    #[test]
+    fn test_doc_index_info() {
+        let value = TermPosting {
+            name: "example_term".to_string(),
+            ids: vec![1, 2, 3, 10, 20],
+            offsets: vec![
+                vec![0, 5],
+                vec![10, 15, 20],
+                vec![25],
+                vec![100],
+                vec![200, 201],
+            ],
+        };
+
+        let mut arena = Arena::new();
+
+        let data = value.serializer(&mut arena).unwrap();
+        println!("Serialized data: {:?}", data);
+
+        let data_ref = TermPosting::deserializer(&data).unwrap();
+        println!("Deserialized data: {:?}", data_ref.name.as_str());
     }
 }

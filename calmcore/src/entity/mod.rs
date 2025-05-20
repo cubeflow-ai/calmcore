@@ -1,3 +1,12 @@
+use croaring::Bitmap;
+use proto::core::Hit;
+use rkyv::{
+    api::high::to_bytes_with_alloc, ser::allocator::Arena, util::AlignedVec, Archive, Deserialize,
+    Serialize,
+};
+
+use crate::util::{CoreError, CoreResult};
+
 /// Extract a column from RecordBatch and convert it to a specific Arrow array type by index
 ///
 /// # Parameters
@@ -58,4 +67,35 @@ macro_rules! data_column_name {
             ))),
         }
     }};
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct TermPosition {
+    pub name: String,
+    pub ids: Vec<u32>,
+    pub index: Vec<u32>,
+    pub length: Vec<u16>,
+    pub offsets: Vec<u32>,
+}
+
+impl TermPosition {
+    pub fn serializer(&self, arena: &mut Arena) -> CoreResult<AlignedVec> {
+        to_bytes_with_alloc::<_, rkyv::rancor::Error>(self, arena.acquire()).map_err(|e| {
+            CoreError::EcodeError(format!(
+                "Failed to serialize TermPosition: {:?} err:{:?}",
+                self, e
+            ))
+        })
+    }
+
+    pub fn deserializer(bytes: &[u8]) -> CoreResult<&ArchivedTermPosition> {
+        rkyv::access::<ArchivedTermPosition, rkyv::rancor::Error>(&bytes[..]).map_err(|e| {
+            CoreError::DecodeError(format!("Failed to deserialize err:{:?}", e), bytes.to_vec())
+        })
+    }
+}
+
+pub enum IdList {
+    BitMap(Bitmap),
+    Hits(Vec<Hit>),
 }

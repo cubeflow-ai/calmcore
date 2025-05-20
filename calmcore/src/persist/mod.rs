@@ -23,11 +23,12 @@ pub mod block_reader;
 pub mod schema;
 
 use crate::{
+    entity::TermPosition,
     index_store::{
         index_fulltext::{
             reader::FulltextIndexReader,
             serializer::{
-                DocSerializer, TokenSerializer, DOC_INDEX, INDEX_INFO, TERM_INDEX, VECTOR_INDEX,
+                PositionSerializer, TokenSerializer, TERM_INDEX, TERM_POSITION, VECTOR_INDEX,
             },
         },
         index_term::{reader::TermIndexReader, serializer::TermSerializer},
@@ -54,7 +55,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -181,24 +182,20 @@ fn write_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
         persist_tree.merge(ft.token_index.clone_map());
         TreeWriter::new(persist_tree, 0, tser).persist(&path.join(TERM_INDEX))?;
 
-        let dser: Box<dyn KVSerializer<(u32, String), Vec<u32>>> = Box::new(DocSerializer);
+        let dser: Box<dyn KVSerializer<String, Arc<RwLock<TermPosition>>>> =
+            Box::new(PositionSerializer::new());
         let mut persist_tree = BTree::new(1024);
-        let mut batch_write = BatchWrite::default();
 
-        persist_tree.merge(ft.doc_index.clone_map());
-        ft.doc_index.range(None, |k, v| {
-            batch_write.put(k.mem_value().clone(), v.clone());
-            true
-        })?;
-        persist_tree.write(batch_write);
-        TreeWriter::new(persist_tree, 0, dser).persist(&path.join(DOC_INDEX))?;
+        persist_tree.merge(ft.term_position.clone_map());
+
+        TreeWriter::new(persist_tree, 0, dser).persist(&path.join(TERM_POSITION))?;
 
         let info = json!({
             "doc_count":ft.doc_count,
             "total_term":ft.total_term,
         });
 
-        pos_write(path.join(INDEX_INFO), info.to_string().as_bytes())?;
+        pos_write(path.join(TERM_POSITION), info.to_string().as_bytes())?;
 
         Ok(())
     };

@@ -29,6 +29,9 @@ pub enum CoreError {
     #[error("decode error:'{0}' data:{1:?}")]
     DecodeError(String, Vec<u8>),
 
+    #[error("decode error:'{0}'")]
+    EcodeError(String),
+
     #[error("no support:{0}")]
     Notsupport(String),
 
@@ -51,6 +54,7 @@ impl CoreError {
             CoreError::Notsupport(_) => 6,
             CoreError::InvalidParam(_) => 7,
             CoreError::Existed(_) => 8,
+            CoreError::EcodeError(_) => 9,
         }
     }
 

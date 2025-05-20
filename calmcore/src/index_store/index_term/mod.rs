@@ -149,115 +149,118 @@ mod tests {
     fn write_test() {
         let term_index = init_field();
         let records = init_records();
-        term_index.write(&records);
+        // term_index.write(&records);
+        todo!("write test");
     }
 
     #[test]
     fn term_write_test() {
-        let term_index = init_field();
-        let records = init_records();
-        term_index.write(&records);
-        for i in 0..10 {
-            let result = term_index
-                .reader()
-                .term(&format!("test{}", i).as_bytes().to_vec());
-            assert_eq!(result.unwrap().cardinality(), 1);
-        }
+        todo!("write test");
+        // let term_index = init_field();
+        // let records = init_records();
+        // term_index.write(&records);
+        // for i in 0..10 {
+        //     let result = term_index
+        //         .reader()
+        //         .term(&format!("test{}", i).as_bytes().to_vec());
+        //     assert_eq!(result.unwrap().cardinality(), 1);
+        // }
     }
 
     #[test]
     fn term_range_test() {
-        let term_index = init_field();
-        let records = init_records();
-        term_index.write(&records);
+        todo!("write test");
+        // let term_index = init_field();
+        // let records = init_records();
+        // term_index.write(&records);
 
-        // [3,8]
-        let result = term_index
-            .reader()
-            .between(
-                Some(&format!("test{}", 3).as_bytes().to_vec()),
-                true,
-                Some(&format!("test{}", 8).as_bytes().to_vec()),
-                true,
-            )
-            .unwrap();
-        assert_eq!(result.iter().collect_vec(), vec![3, 4, 5, 6, 7, 8]);
+        // // [3,8]
+        // let result = term_index
+        //     .reader()
+        //     .between(
+        //         Some(&format!("test{}", 3).as_bytes().to_vec()),
+        //         true,
+        //         Some(&format!("test{}", 8).as_bytes().to_vec()),
+        //         true,
+        //     )
+        //     .unwrap();
+        // assert_eq!(result.iter().collect_vec(), vec![3, 4, 5, 6, 7, 8]);
 
-        // [3,8)
-        let result = term_index
-            .reader()
-            .between(
-                Some(&format!("test{}", 3).as_bytes().to_vec()),
-                true,
-                Some(&format!("test{}", 8).as_bytes().to_vec()),
-                false,
-            )
-            .unwrap();
-        assert_eq!(result.iter().collect_vec(), vec![3, 4, 5, 6, 7]);
+        // // [3,8)
+        // let result = term_index
+        //     .reader()
+        //     .between(
+        //         Some(&format!("test{}", 3).as_bytes().to_vec()),
+        //         true,
+        //         Some(&format!("test{}", 8).as_bytes().to_vec()),
+        //         false,
+        //     )
+        //     .unwrap();
+        // assert_eq!(result.iter().collect_vec(), vec![3, 4, 5, 6, 7]);
 
-        // (3,8]
-        let result = term_index
-            .reader()
-            .between(
-                Some(&format!("test{}", 3).as_bytes().to_vec()),
-                false,
-                Some(&format!("test{}", 8).as_bytes().to_vec()),
-                true,
-            )
-            .unwrap();
-        assert_eq!(result.iter().collect_vec(), vec![4, 5, 6, 7, 8]);
+        // // (3,8]
+        // let result = term_index
+        //     .reader()
+        //     .between(
+        //         Some(&format!("test{}", 3).as_bytes().to_vec()),
+        //         false,
+        //         Some(&format!("test{}", 8).as_bytes().to_vec()),
+        //         true,
+        //     )
+        //     .unwrap();
+        // assert_eq!(result.iter().collect_vec(), vec![4, 5, 6, 7, 8]);
 
-        // (3,8)
-        let result = term_index
-            .reader()
-            .between(
-                Some(&format!("test{}", 3).as_bytes().to_vec()),
-                false,
-                Some(&format!("test{}", 8).as_bytes().to_vec()),
-                false,
-            )
-            .unwrap();
-        assert_eq!(result.iter().collect_vec(), vec![4, 5, 6, 7]);
+        // // (3,8)
+        // let result = term_index
+        //     .reader()
+        //     .between(
+        //         Some(&format!("test{}", 3).as_bytes().to_vec()),
+        //         false,
+        //         Some(&format!("test{}", 8).as_bytes().to_vec()),
+        //         false,
+        //     )
+        //     .unwrap();
+        // assert_eq!(result.iter().collect_vec(), vec![4, 5, 6, 7]);
 
-        // (None,8)
-        let result = term_index
-            .reader()
-            .between(
-                None,
-                false,
-                Some(&format!("test{}", 8).as_bytes().to_vec()),
-                false,
-            )
-            .unwrap();
-        assert_eq!(result.iter().collect_vec(), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        // // (None,8)
+        // let result = term_index
+        //     .reader()
+        //     .between(
+        //         None,
+        //         false,
+        //         Some(&format!("test{}", 8).as_bytes().to_vec()),
+        //         false,
+        //     )
+        //     .unwrap();
+        // assert_eq!(result.iter().collect_vec(), vec![0, 1, 2, 3, 4, 5, 6, 7]);
 
-        // (3,None)
-        let result = term_index
-            .reader()
-            .between(
-                Some(&format!("test{}", 3).as_bytes().to_vec()),
-                false,
-                None,
-                false,
-            )
-            .unwrap();
-        assert_eq!(result.iter().collect_vec(), vec![4, 5, 6, 7, 8, 9]);
+        // // (3,None)
+        // let result = term_index
+        //     .reader()
+        //     .between(
+        //         Some(&format!("test{}", 3).as_bytes().to_vec()),
+        //         false,
+        //         None,
+        //         false,
+        //     )
+        //     .unwrap();
+        // assert_eq!(result.iter().collect_vec(), vec![4, 5, 6, 7, 8, 9]);
 
-        // (None,None)
-        let result = term_index
-            .reader()
-            .between(None, false, None, false)
-            .unwrap();
-        assert_eq!(
-            result.iter().collect_vec(),
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        );
+        // // (None,None)
+        // let result = term_index
+        //     .reader()
+        //     .between(None, false, None, false)
+        //     .unwrap();
+        // assert_eq!(
+        //     result.iter().collect_vec(),
+        //     vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        // );
 
-        // [None,None]
-        let result = term_index.reader().between(None, true, None, true).unwrap();
-        assert_eq!(
-            result.iter().collect_vec(),
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        );
+        // // [None,None]
+        // let result = term_index.reader().between(None, true, None, true).unwrap();
+        // assert_eq!(
+        //     result.iter().collect_vec(),
+        //     vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        // );
     }
 }

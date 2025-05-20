@@ -3,15 +3,15 @@ use itertools::Itertools;
 
 use std::{collections::HashMap, sync::Arc};
 
-use proto::core::Field;
+use proto::core::{Field, Hit};
 
 use crate::{
     analyzer::Token,
     index_store::{
-        index_fulltext::reader::FulltextIndexReader,
+        index_fulltext::reader::{FulltextIndexReader, PositionList},
         segment::SegmentReader,
         store::VectorIndexReader,
-        stream::{BitmapStream, CombHitStream, HitStream, TextStream, VectorStream},
+        stream::{BitmapStream, CombHitStream, HitStream, PhraseStream, TextStream, VectorStream},
     },
     util::{merge_bitmap, CoreResult},
 };
@@ -114,13 +114,11 @@ pub enum PhysicsPlan {
     // reader ,boost, terms, total_bitmap, token_bitmap, operator(true is and/ false is or), phrase_len(zero means no phrase)
     Text(
         Arc<FulltextIndexReader>,
-        f32,                    //boost
-        Vec<Token>,             //terms
-        Bitmap,                 // total_bitmap
-        HashMap<String, usize>, // token_count
-        bool,                   // operator(true is and/ false is or)
-        i32,                    // phrase_len(zero means no phrase)
+        f32,                                   //boost
+        HashMap<String, Option<PositionList>>, // term_position
+        bool,                                  // operator(true is and/ false is or)
     ),
+    Phrase(f32, u64, Vec<Hit>),
     Combin(Vec<PhysicsPlan>, LogicOperator),
 }
 
@@ -178,34 +176,11 @@ impl PhysicsPlan {
                 field,
             } => {
                 let reader = segment.get_text_reader(field)?;
-
                 let tokens = reader.analyzer(value)?;
-
-                let names = tokens.iter().map(|t| &t.name).collect_vec();
-
-                let bitmaps = reader.tokens(&names)?;
-
-                let mut token_doc_len = HashMap::new();
-                for (b, n) in bitmaps.iter().zip(&names) {
-                    token_doc_len.insert(
-                        n.to_string(),
-                        match b {
-                            Some(b) => b.cardinality() as usize,
-                            None => 0,
-                        },
-                    );
-                }
-
-                let total_map = merge_bitmap(true, bitmaps).unwrap_or_default();
-
-                Ok(Self::Text(
-                    reader,
+                Ok(Self::Phrase(
                     *boost,
-                    tokens,
-                    total_map,
-                    token_doc_len,
-                    true,
-                    *slop,
+                    reader.start,
+                    reader.phrase_tokens(&tokens, *slop)?,
                 ))
             }
             Query::Text {
@@ -220,32 +195,9 @@ impl PhysicsPlan {
 
                 let tokens = reader.analyzer(value)?;
 
-                let names = tokens.iter().map(|t| &t.name).collect_vec();
+                let term_position = reader.tokens(&tokens)?;
 
-                let bitmaps = reader.tokens(&names)?;
-
-                let mut token_doc_len = HashMap::new();
-                for (b, n) in bitmaps.iter().zip(&names) {
-                    token_doc_len.insert(
-                        n.to_string(),
-                        match b {
-                            Some(b) => b.cardinality() as usize,
-                            None => 0,
-                        },
-                    );
-                }
-
-                let total_map = merge_bitmap(operator, bitmaps).unwrap_or_default();
-
-                Ok(Self::Text(
-                    reader,
-                    *boost,
-                    tokens,
-                    total_map,
-                    token_doc_len,
-                    true,
-                    0,
-                ))
+                Ok(Self::Text(reader, *boost, term_position, operator))
             }
             Query::Logical {
                 left,
@@ -278,27 +230,22 @@ impl PhysicsPlan {
                 }
                 Box::new(cs)
             }
-            PhysicsPlan::Text(
-                reader,
-                boost,
-                tokens,
-                total_bitmap,
-                token_doc_len,
-                operator,
-                slop,
-            ) => Box::new(TextStream::new(
-                reader,
-                boost,
-                tokens,
-                total_bitmap,
-                token_doc_len,
-                operator,
-                slop,
-            )),
+            PhysicsPlan::Text(reader, boost, term_count_map, operator) => {
+                Box::new(TextStream::new(
+                    reader,
+                    boost,
+                    tokens,
+                    total_bitmap,
+                    term_count_map,
+                    operator,
+                    slop,
+                ))
+            }
             PhysicsPlan::Vector(vector_index_reader, boost, value, _) => {
                 let result = vector_index_reader.search(&value, 2000, &filter)?;
                 Box::new(VectorStream::new(boost, result))
             }
+            PhysicsPlan::Phrase(boost, hits) => Box::new(PhraseStream::new(boost, hits)),
         };
 
         Ok(result)
@@ -320,6 +267,9 @@ impl PhysicsPlan {
                 .unwrap_or_default(),
             PhysicsPlan::Text(_, _, _, total_bitmap, _, _, _) => total_bitmap.clone(),
             PhysicsPlan::Vector(_, _, _, total_bitmap) => total_bitmap.clone(),
+            PhysicsPlan::Phrase(_, start, hits) => {
+                Bitmap::from_iter(hits.iter().map(|h| (h.id - start) as u32))
+            }
         }
     }
 
@@ -329,6 +279,7 @@ impl PhysicsPlan {
             PhysicsPlan::Text(..) => false,
             PhysicsPlan::Combin(..) => true,
             PhysicsPlan::Vector(..) => false,
+            PhysicsPlan::Phrase(..) => false,
         }
     }
 }

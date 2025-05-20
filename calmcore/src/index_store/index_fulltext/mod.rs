@@ -9,30 +9,30 @@ use proto::core::{
     value::Kind,
     Field, ObjectValue,
 };
-use reader::FulltextIndexReader;
-use serializer::{DocDeserializer, TokenDeserializer, DOC_INDEX, INDEX_INFO, TERM_INDEX};
+use reader::{FulltextIndexReader, TermPositionReader};
+use serializer::{DocDeserializer, TokenDeserializer, INDEX_INFO, TERM_INDEX, TERM_POSITION};
 use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
-        Arc,
+        Arc, RwLock,
     },
 };
 use writer::Handler;
 
-use crate::{analyzer::Analyzer, util::CoreResult};
+use crate::{analyzer::Analyzer, entity::TermPosition, util::CoreResult};
 
 use super::store::InvertIndex;
 
 type TermInvertIndex = InvertIndex<String, Bitmap>;
-type DocInvertIndex = InvertIndex<(u32, String), Vec<u32>>;
+type DocInvertIndex = InvertIndex<String, Arc<RwLock<TermPosition>>>;
 
 pub struct FulltextIndex {
     start: u64,
     inner: Arc<proto::core::Field>,
     analyzer: Arc<Analyzer>,
     token_index: TermInvertIndex,
-    doc_index: DocInvertIndex,
+    term_position: DocInvertIndex,
     doc_count: AtomicU32,
     total_term: AtomicU64,
 }
@@ -45,7 +45,7 @@ impl FulltextIndex {
             inner,
             analyzer,
             token_index: TermInvertIndex::new_memory(),
-            doc_index: DocInvertIndex::new_memory(),
+            term_position: DocInvertIndex::new_memory(),
             doc_count: AtomicU32::new(0),
             total_term: AtomicU64::new(0),
         })
@@ -67,8 +67,8 @@ impl FulltextIndex {
                 path.join(TERM_INDEX),
                 Box::new(TokenDeserializer {}),
             )?,
-            doc_index: DocInvertIndex::new_disk(
-                path.join(DOC_INDEX),
+            term_position: DocInvertIndex::new_disk(
+                path.join(TERM_POSITION),
                 Box::new(DocDeserializer {}),
             )?,
             doc_count: AtomicU32::new(doc_count),
@@ -77,18 +77,19 @@ impl FulltextIndex {
     }
 
     fn handler(&self) -> Handler {
-        Handler::new(self.token_index.clone_map(), self.doc_index.clone_map())
+        Handler::new(self.token_index.clone_map(), self.term_position.clone_map())
     }
 
     pub fn reader(&self) -> FulltextIndexReader {
         let doc_count = self.doc_count.load(Ordering::Relaxed);
         let total_term = self.total_term.load(Ordering::Relaxed);
+
         FulltextIndexReader {
             start: self.start,
             inner: self.inner.clone(),
             analyzer: self.analyzer.clone(),
             token_index: self.token_index.index_reader(),
-            doc_index: self.doc_index.index_reader(),
+            term_position: TermPositionReader::Memory(self.term_position.clone_map()),
             doc_count,
             total_term,
         }
@@ -150,7 +151,7 @@ impl FulltextIndex {
         );
 
         //replace maptree with new one
-        self.doc_index.replace(doc_index);
+        self.term_position.replace(doc_index);
         self.token_index.replace(token_index);
     }
 }
