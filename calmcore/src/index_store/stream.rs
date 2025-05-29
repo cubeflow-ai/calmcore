@@ -1,15 +1,12 @@
 use std::{
     cmp::max,
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     fmt::Debug,
     sync::{atomic::AtomicUsize, Arc},
 };
 
-use arrow::csv::reader;
-use bytes::buf;
-use croaring::{bitmap::BitmapIterator, Bitmap};
-use itertools::{Itertools, Position};
-use proto::core::Hit;
+use croaring::bitmap::BitmapIterator;
+use itertools::Itertools;
 
 use crate::{analyzer::Token, searcher::plan};
 
@@ -17,10 +14,11 @@ use super::index_fulltext::reader::{FulltextIndexReader, PositionList};
 
 pub trait HitStream: Send {
     fn score(&self) -> f32;
-    fn next_value(&mut self, value: u64) -> Option<u64>;
+    fn next_value(&mut self, value: Option<u64>) -> Option<u64>;
 }
 
 pub struct CombHitStream {
+    start: u64,
     streams: Vec<Box<dyn HitStream>>,
     operator: plan::LogicOperator,
     value: Option<u64>,
@@ -29,8 +27,9 @@ pub struct CombHitStream {
 }
 
 impl CombHitStream {
-    pub fn new(capacity: usize, operator: plan::LogicOperator) -> Self {
+    pub fn new(start: u64, capacity: usize, operator: plan::LogicOperator) -> Self {
         Self {
+            start,
             streams: Vec::with_capacity(capacity),
             operator,
             value: Some(0),
@@ -50,22 +49,29 @@ impl HitStream for CombHitStream {
         self.score
     }
 
-    fn next_value(&mut self, skip: u64) -> Option<u64> {
+    fn next_value(&mut self, skip: Option<u64>) -> Option<u64> {
         let value = self.value?;
 
-        if skip < value {
-            return Some(value);
-        }
+        let skip = match skip {
+            Some(skip) => {
+                if skip < value {
+                    return Some(value);
+                } else {
+                    skip
+                }
+            }
+            None => self.start,
+        };
 
         match self.operator {
             plan::LogicOperator::And => {
+                let mut max_value = skip;
                 loop {
-                    let mut max_value = 0;
                     let mut all_same = true;
                     let mut all_score = 0.0;
 
                     for stream in self.streams.iter_mut() {
-                        match stream.next_value(max(max_value, skip)) {
+                        match stream.next_value(Some(max_value)) {
                             Some(v) => {
                                 if max_value < v {
                                     if max_value != 0 {
@@ -99,7 +105,7 @@ impl HitStream for CombHitStream {
                 for i in 0..self.buffer.len() {
                     let stream = &mut self.streams[i];
                     if self.buffer[i].is_none() {
-                        if let Some(id) = stream.next_value(skip) {
+                        if let Some(id) = stream.next_value(Some(skip)) {
                             self.buffer[i] = Some((id, stream.score()));
                         }
                     }
@@ -159,11 +165,18 @@ impl HitStream for BitmapStream {
         self.score
     }
 
-    fn next_value(&mut self, skip: u64) -> Option<u64> {
+    fn next_value(&mut self, skip: Option<u64>) -> Option<u64> {
         let value = self.value?;
-        if value >= skip {
-            return Some(value);
-        }
+        let skip = match skip {
+            Some(skip) => {
+                if skip < value {
+                    return Some(value);
+                } else {
+                    skip
+                }
+            }
+            None => self.start,
+        };
 
         let value = (skip - self.start) as u32;
         loop {
@@ -251,6 +264,19 @@ impl TextStream {
         term_position: HashMap<String, Option<PositionList>>,
         operator: bool,
     ) -> Self {
+        println!("TextStream::new tokens: {:?}", tokens);
+        println!(
+            "TextStream::new tokens: {:?}",
+            term_position
+                .iter()
+                .next()
+                .unwrap()
+                .1
+                .as_ref()
+                .unwrap()
+                .len()
+        );
+
         let term_position: HashMap<String, Option<Arc<PositionList>>> = term_position
             .into_iter()
             .map(|(k, v)| (k, v.map(Arc::new)))
@@ -296,30 +322,34 @@ impl HitStream for TextStream {
         self.score * self.boost
     }
 
-    fn next_value(&mut self, skip: u64) -> Option<u64> {
+    fn next_value(&mut self, skip: Option<u64>) -> Option<u64> {
         let value = self.value?;
 
-        if value >= skip && skip != 0 {
-            return Some(value);
-        }
+        let skip = match skip {
+            Some(skip) => {
+                if skip < value {
+                    return Some(value);
+                } else {
+                    skip
+                }
+            }
+            None => self.reader.start as u64,
+        };
 
         let except_id = (skip - self.reader.start) as u32;
 
-        if self.operator {
+        if self.operator || self.tokens.len() == 1 {
             loop {
-                let mut max_value = 0;
-                let mut all_score = 0.0;
+                let mut max_value = (skip - self.reader.start) as u32;
 
                 for (i, iter) in self.iters.iter_mut().enumerate() {
-                    match iter
-                        .unwrap()
-                        .next(max(max_value, (skip - self.reader.start) as u32))
-                    {
+                    match iter.as_mut().unwrap().next(max_value) {
                         Ok(true) => {
                             self.buffer[i] = Some(max_value);
                         }
                         Ok(false) => {
-                            self.buffer[i] = None;
+                            self.value = None;
+                            return None;
                         }
                         Err(v) => {
                             self.buffer[i] = Some(v);
@@ -327,13 +357,24 @@ impl HitStream for TextStream {
                     }
                 }
 
-                let all_same = self
-                    .buffer
-                    .iter()
-                    .all(|v| v.is_some() && v.unwrap() == self.buffer[0].unwrap());
+                let all_same = self.buffer.iter().all(|v| {
+                    if let Some(v) = v {
+                        max_value = max(max_value, *v);
+                        *v == self.buffer[0].unwrap()
+                    } else {
+                        false
+                    }
+                });
 
                 if all_same {
                     // if all values are some, set value and score
+                    if max_value < 10 {
+                        println!(
+                            "TextStream::next_value all_same: {:?}============={:?}",
+                            max_value, self.reader.start
+                        );
+                    }
+
                     self.value = Some(max_value as u64 + self.reader.start);
                     self.score = self.reader.score_text(
                         max_value as u64 + self.reader.start,
@@ -341,6 +382,7 @@ impl HitStream for TextStream {
                         &self.term_position,
                         self.avgdl,
                     );
+                    return self.value;
                 }
             }
         } else {
@@ -430,12 +472,19 @@ impl HitStream for PhraseStream {
         self.score * self.boost
     }
 
-    fn next_value(&mut self, skip: u64) -> Option<u64> {
+    fn next_value(&mut self, skip: Option<u64>) -> Option<u64> {
         let value = self.value?;
 
-        if value >= skip && value != 0 {
-            return Some(value);
-        }
+        let skip = match skip {
+            Some(skip) => {
+                if skip < value {
+                    return Some(value);
+                } else {
+                    skip
+                }
+            }
+            None => self.reader.start as u64,
+        };
 
         for i in &self.hits[self.index.load(std::sync::atomic::Ordering::Relaxed)..] {
             let id = *i;
@@ -456,6 +505,7 @@ impl HitStream for PhraseStream {
 
 #[derive(Default, Debug)]
 pub struct VectorStream {
+    start: u64,
     boost: f32,
     hits: Vec<(u64, f32)>,
     index: usize,
@@ -464,13 +514,14 @@ pub struct VectorStream {
 }
 
 impl VectorStream {
-    pub(crate) fn new(boost: f32, mut value: Vec<(f32, u64)>) -> Self {
+    pub(crate) fn new(start: u64, boost: f32, value: Vec<(f32, u64)>) -> Self {
         let hits = value
             .into_iter()
             .map(|(f, i)| (i, f))
             .sorted_by(|a, b| a.0.cmp(&b.0))
             .collect();
         Self {
+            start,
             boost,
             hits,
             index: 0,
@@ -485,12 +536,19 @@ impl HitStream for VectorStream {
         self.score * self.boost
     }
 
-    fn next_value(&mut self, skip: u64) -> Option<u64> {
+    fn next_value(&mut self, skip: Option<u64>) -> Option<u64> {
         let value = self.value?;
 
-        if value >= skip {
-            return Some(value);
-        }
+        let skip = match skip {
+            Some(skip) => {
+                if skip < value {
+                    return Some(value);
+                } else {
+                    skip
+                }
+            }
+            None => self.start as u64,
+        };
 
         if self.index >= self.hits.len() {
             self.value = None;
@@ -500,7 +558,7 @@ impl HitStream for VectorStream {
         let (id, score) = &self.hits[self.index];
         if *id < skip {
             self.index += 1;
-            return self.next_value(skip);
+            return self.next_value(Some(skip));
         } else {
             self.value = Some(*id);
             self.score = *score;

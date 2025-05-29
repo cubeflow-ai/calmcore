@@ -124,23 +124,38 @@ pub mod result_wrapper {
     }
 
     impl ObjectValueWrapper {
+        pub fn kind_to_json(kind: Kind) -> serde_json::Value {
+            match kind {
+                Kind::BoolValue(b) => serde_json::json!(b),
+                Kind::IntValue(i) => serde_json::json!(i),
+                Kind::FloatValue(f) => serde_json::json!(f),
+                Kind::StringValue(s) => serde_json::json!(s),
+                Kind::VectorValue(v) => serde_json::json!(v.vector),
+                Kind::ListValue(list_value) => {
+                    let list = list_value
+                        .values
+                        .into_iter()
+                        .filter_map(|v| v.kind)
+                        .map(Self::kind_to_json)
+                        .collect();
+                    serde_json::Value::Array(list)
+                }
+                Kind::ObjectValue(object_value) => {
+                    let mut obj = serde_json::Map::new();
+                    for (k, v) in object_value.fields {
+                        obj.insert(k, Self::kind_to_json(v.kind.unwrap()));
+                    }
+                    serde_json::Value::Object(obj)
+                }
+            }
+        }
+
         pub fn new(value: ObjectValue) -> Self {
             let value = value
                 .fields
                 .into_iter()
-                .map(|(k, v)| {
-                    (
-                        k,
-                        match v.kind.unwrap() {
-                            Kind::BoolValue(b) => serde_json::json!(b),
-                            Kind::IntValue(i) => serde_json::json!(i),
-                            Kind::FloatValue(f) => serde_json::json!(f),
-                            Kind::StringValue(s) => serde_json::json!(s),
-                            Kind::VectorValue(v) => serde_json::json!(v.vector),
-                            _ => unreachable!("unsupported value type"),
-                        },
-                    )
-                })
+                .filter(|(_, v)| v.kind.is_some())
+                .map(|(k, v)| (k, Self::kind_to_json(v.kind.unwrap())))
                 .collect();
             Self { value }
         }

@@ -78,7 +78,7 @@ pub trait ANNIndex<E: node::FloatElement, T: node::IdxType>: Send + Sync {
         &self,
         item: &node::Node<E, T>,
         k: usize,
-        filter: &Bitmap,
+        filter: Option<&Bitmap>,
     ) -> Vec<(node::Node<E, T>, E)>;
 
     /// search for k nearest neighbors and return full info
@@ -108,7 +108,7 @@ pub trait ANNIndex<E: node::FloatElement, T: node::IdxType>: Send + Sync {
         &self,
         item: &[E],
         k: usize,
-        filter: &Bitmap,
+        filter: Option<&Bitmap>,
     ) -> Vec<(node::Node<E, T>, E)> {
         assert_eq!(item.len(), self.dimension());
         self.node_search_k_with_filter(&node::Node::new(item), k, filter)

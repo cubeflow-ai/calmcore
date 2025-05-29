@@ -392,7 +392,7 @@ impl<E: node::FloatElement, T: node::IdxType> HNSWIndex<E, T> {
         &self,
         search_data: &node::Node<E, T>,
         k: usize,
-        filter: &Bitmap,
+        filter: Option<&Bitmap>,
     ) -> Result<BinaryHeap<Neighbor<E, usize>>, &'static str> {
         let mut top_candidate: BinaryHeap<Neighbor<E, usize>> = BinaryHeap::new();
         if self._n_constructed_items == 0 {
@@ -452,7 +452,7 @@ impl<E: node::FloatElement, T: node::IdxType> HNSWIndex<E, T> {
         level: usize,
         ef: usize,
         has_deletion: bool,
-        filter: &Bitmap,
+        filter: Option<&Bitmap>,
     ) -> BinaryHeap<Neighbor<E, usize>> {
         let mut visited_id = FixedBitSet::with_capacity(self._nodes.len());
         let mut top_candidates: BinaryHeap<Neighbor<E, usize>> = BinaryHeap::new();
@@ -488,7 +488,9 @@ impl<E: node::FloatElement, T: node::IdxType> HNSWIndex<E, T> {
                 if top_candidates.len() < ef || dist < lower_bound {
                     candidates.push(Neighbor::new(*neigh, -dist));
 
-                    if !self.is_deleted(*neigh) && filter.contains(*neigh as u32) {
+                    if !self.is_deleted(*neigh)
+                        && filter.map(|f| f.contains(*neigh as u32)).unwrap_or(true)
+                    {
                         top_candidates.push(Neighbor::new(*neigh, dist))
                     }
 
@@ -755,7 +757,7 @@ impl<E: node::FloatElement, T: node::IdxType> ann_index::ANNIndex<E, T> for HNSW
         &self,
         item: &node::Node<E, T>,
         k: usize,
-        filter: &Bitmap,
+        filter: Option<&Bitmap>,
     ) -> Vec<(node::Node<E, T>, E)> {
         let mut ret: BinaryHeap<Neighbor<E, usize>> =
             self.search_knn_with_filter(item, k, filter).unwrap();

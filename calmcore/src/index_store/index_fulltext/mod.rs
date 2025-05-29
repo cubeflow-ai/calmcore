@@ -117,7 +117,6 @@ impl FulltextIndex {
         let mut handler = self.handler();
 
         let start = std::time::Instant::now();
-        println!("write ==================:{:?}", source.len());
 
         for r in source.iter() {
             let (id, obj) = (r.0, &r.1);
@@ -137,18 +136,7 @@ impl FulltextIndex {
             }
         }
 
-        println!(
-            "write fulltext index {} cost time:{:?}",
-            source.len(),
-            start.elapsed()
-        );
-
         let (token_index, doc_index) = handler.release();
-
-        println!(
-            "write fulltext index release cost time:{:?}",
-            start.elapsed()
-        );
 
         //replace maptree with new one
         self.term_position.replace(doc_index);

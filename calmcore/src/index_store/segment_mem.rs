@@ -427,6 +427,8 @@ impl MemSegmentReader {
     }
 
     pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Cow<ObjectValue>> {
+        println!("=====================start:{:?} ids:{:?}", self.start, ids);
+
         let ids = ids.iter().map(|id| self.abs_id(*id)).collect_vec();
         self.source_store
             .mget(&ids)

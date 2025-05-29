@@ -10,6 +10,7 @@ use std::{
 
 use context::SearchContext;
 use croaring::Bitmap;
+use half::vec;
 use itertools::Itertools;
 use plan::{PhysicsPlan, Query};
 use proto::core::{
@@ -21,7 +22,10 @@ use rayon::iter::{
 };
 
 use crate::{
-    index_store::{segment::SegmentReader, stream::HitStream},
+    index_store::{
+        segment::SegmentReader,
+        stream::{self, HitStream},
+    },
     util::{self, kind_to_vec, CoreError, CoreResult},
 };
 
@@ -34,7 +38,7 @@ static SCORE_FIELD: LazyLock<Arc<Field>> = LazyLock::new(|| {
 });
 
 pub struct SegmentSearcher<'a> {
-    filter: Bitmap,
+    filter: Option<Bitmap>,
     stream: Option<Box<dyn HitStream>>,
     segment: &'a SegmentReader,
 }
@@ -50,7 +54,7 @@ impl SegmentSearcher<'_> {
 }
 
 type Streams = Vec<Box<dyn HitStream>>;
-type Filters = Vec<Bitmap>;
+type Filters = Vec<Option<Bitmap>>;
 
 pub struct Searcher {
     segments: Vec<SegmentReader>,
@@ -93,13 +97,16 @@ impl Searcher {
         order_by: Vec<(String, bool)>,
         limit: (usize, usize),
     ) -> CoreResult<QueryResult> {
-        let sc = SearchContext::new();
+        let sc = SearchContext::new(query, &order_by);
 
         let result = {
             let (streams, filters) = self.query_execute(query, &sc, order_by.is_empty())?;
 
             // statistics total hits
-            let mut total_hits = filters.iter().map(|f| f.cardinality()).sum::<u64>();
+            let mut total_hits = filters
+                .iter()
+                .map(|f| f.as_ref().map(|v| v.cardinality()).unwrap_or(0) as u64)
+                .sum::<u64>();
 
             let order_by = self.make_order_by(order_by)?;
 
@@ -114,7 +121,10 @@ impl Searcher {
             let searchers: Vec<SegmentSearcher<'_>> = filters
                 .into_iter()
                 .enumerate()
-                .filter(|(_, f)| f.cardinality() > 0)
+                .filter(|(_, f)| match f {
+                    Some(b) => b.cardinality() > 0,
+                    None => true,
+                })
                 .map(|(index, filter)| SegmentSearcher {
                     stream: streams.next(),
                     segment: &self.segments[index],
@@ -122,9 +132,8 @@ impl Searcher {
                 })
                 .collect_vec();
 
-            let need_realcount = query.map(|q| q.need_realcount()).unwrap_or_default();
-            let (hits, realcount) =
-                self.topn(projection, searchers, &order_by, limit, need_realcount)?;
+            let (hits, realcount) = self.topn(&sc, projection, searchers, &order_by, limit)?;
+
             if let Some(realcount) = realcount {
                 total_hits = realcount;
             }
@@ -153,33 +162,42 @@ impl Searcher {
                         PhysicsPlan::new(s, query, &mut guard)
                     })
                     .collect::<CoreResult<Vec<PhysicsPlan>>>()?;
-                let filters = plans
-                    .par_iter()
-                    .zip(&self.segments)
-                    .map(|(p, s)| {
-                        let guard = sc.get(s.start());
-                        p.as_filter(&guard)
-                    })
-                    .collect::<Vec<_>>();
 
-                if no_sort {
-                    let streams = plans
+                let filters = if sc.need_filter {
+                    plans
+                        .par_iter()
+                        .zip(&self.segments)
+                        .map(|(p, s)| {
+                            let guard = sc.get(s.start());
+                            Some(p.as_filter(&guard))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![None; plans.len()]
+                };
+
+                let streams = if sc.need_stream {
+                    plans
                         .into_par_iter()
                         .zip(self.segments.par_iter())
-                        .map(|(p, s)| (p, s))
                         .zip(filters.par_iter())
                         .map(|((p, s), f)| {
                             let mut guard = sc.get(s.start());
-                            p.into_stream(s.start(), &mut guard, f)
+                            p.into_stream(s.start(), &mut guard, f.as_ref())
                         })
-                        .collect::<CoreResult<Vec<_>>>()?;
-                    (streams, filters)
+                        .collect::<CoreResult<Vec<_>>>()?
                 } else {
-                    (vec![], filters)
-                }
+                    vec![]
+                };
+
+                (streams, filters)
             }
             None => {
-                let filters = self.segments.par_iter().map(|s| s.all_record()).collect();
+                let filters = self
+                    .segments
+                    .par_iter()
+                    .map(|s| Some(s.all_record()))
+                    .collect();
                 (vec![], filters)
             }
         };
@@ -322,11 +340,11 @@ impl Eq for SortedHit {}
 impl Searcher {
     fn topn(
         &self,
+        sc: &SearchContext,
         projection: Option<&[String]>,
         searches: Vec<SegmentSearcher<'_>>,
         order_by: &Vec<(Arc<Field>, bool)>,
         limit: (usize, usize),
-        need_realcount: bool,
     ) -> CoreResult<(Vec<SortedHit>, Option<u64>)> {
         let size = limit.0 + limit.1;
 
@@ -335,64 +353,98 @@ impl Searcher {
         }
 
         let mut heap = BTreeSet::new();
-        let mut list = vec![];
+
+        let mut list = Vec::with_capacity(size);
 
         let mut real_count = 0;
 
-        let need_all = !order_by.is_empty() || need_realcount;
         let need_score = order_by
             .iter()
             .any(|(f, _)| f.name.eq_ignore_ascii_case("_score"));
 
         log::debug!(
-            "topn: need_all:{:?}, need_score:{:?}, order_by:{:?}",
-            need_all,
+            "topn: search_context:{:?}, need_score:{:?}, order_by:{:?}",
+            sc,
             need_score,
             order_by
         );
 
-        let fetch_size = if need_all {
-            usize::max(size, 1000)
-        } else {
-            size
+        let mut process_to_heap = |records: Vec<Cow<'_, ObjectValue>>,
+                                   ids: &[u64],
+                                   scores: &[f32],
+                                   min: &mut Option<SortedHit>|
+         -> CoreResult<()> {
+            real_count += ids.len() as u64;
+
+            for (i, (value, id)) in records
+                .into_iter()
+                .map(Cow::into_owned)
+                .zip(ids)
+                .enumerate()
+            {
+                let score = scores.get(i).cloned().unwrap_or(0.0);
+
+                let sort = SortedHit::make_sort(*id, score, &value, order_by)?;
+
+                let sort_hit =
+                    if min.is_none() || min.as_ref().unwrap().cmp_record(&sort) == Ordering::Less {
+                        continue;
+                    } else {
+                        SortedHit::new(*id, score, value, sort)
+                    };
+
+                heap.insert(sort_hit);
+
+                if heap.len() > size {
+                    *min = heap.pop_last();
+                }
+            }
+            Ok(())
         };
+        let mut min: Option<SortedHit> = None;
 
         'outer: for search in searches {
-            let stream = &search.stream;
-            let filter = &search.filter;
-            let start = search.segment.start();
-            let mut min: Option<SortedHit> = None;
+            let SegmentSearcher {
+                stream,
+                filter,
+                segment,
+            } = search;
 
-            for ids in &filter.iter().chunks(fetch_size) {
-                let ids = ids.into_iter().map(|id| id as u64 + start).collect_vec();
+            let start = segment.start();
 
-                let records = search.batch_doc(projection, &ids)?;
-
-                if need_all {
-                    for (value, id) in records.into_iter().map(Cow::into_owned).zip(ids) {
-                        let score = match stream.as_ref().and_then(|s| s.score(id)) {
-                            Some(s) => s,
-                            None => continue,
-                        };
-
-                        real_count += 1;
-                        let sort = SortedHit::make_sort(id, score, &value, order_by)?;
-
-                        let sort_hit = if min.is_none()
-                            || min.as_ref().unwrap().cmp_record(&sort) == Ordering::Less
-                        {
-                            continue;
-                        } else {
-                            SortedHit::new(id, score, value, sort)
-                        };
-
-                        heap.insert(sort_hit);
-
-                        if heap.len() > size {
-                            min = heap.pop_last();
-                        }
+            let mut next = None;
+            if let Some(mut stream) = stream {
+                let mut ids = Vec::with_capacity(size);
+                let mut scores = Vec::with_capacity(size);
+                while let Some(id) = stream.next_value(next) {
+                    ids.push(id);
+                    if need_score {
+                        scores.push(stream.score());
                     }
-                } else {
+                    next = Some(id + 1);
+                    if ids.len() >= 1000 {
+                        let records: Vec<Cow<'_, ObjectValue>> =
+                            segment.batch_doc(projection, &ids)?;
+                        process_to_heap(records, &ids, &scores, &mut min)?;
+                        ids.clear();
+                        scores.clear();
+                    }
+                }
+
+                if !ids.is_empty() {
+                    let records: Vec<Cow<'_, ObjectValue>> = segment.batch_doc(projection, &ids)?;
+                    process_to_heap(records, &ids, &scores, &mut min)?;
+                }
+            } else {
+                let ids = filter
+                    .unwrap()
+                    .iter()
+                    .take(size)
+                    .map(|i| i as u64 + start)
+                    .collect_vec();
+
+                if !ids.is_empty() {
+                    let records: Vec<Cow<'_, ObjectValue>> = segment.batch_doc(projection, &ids)?;
                     for (value, id) in records.into_iter().map(Cow::into_owned).zip(ids) {
                         let sort_hit = SortedHit::new(id, 0.0, value, vec![]);
 

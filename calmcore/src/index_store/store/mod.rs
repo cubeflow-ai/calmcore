@@ -54,7 +54,12 @@ impl VectorIndexReader {
         }
     }
 
-    pub fn search(&self, query: &[f32], k: usize, filter: &Bitmap) -> CoreResult<Vec<(f32, u64)>> {
+    pub fn search(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: Option<&Bitmap>,
+    ) -> CoreResult<Vec<(f32, u64)>> {
         match self {
             Self::Memory(m) => m.search(query, k, filter),
             Self::Disk(d) => d.search(query, k, filter),

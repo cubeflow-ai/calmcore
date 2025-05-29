@@ -243,7 +243,7 @@ impl<E: node::FloatElement, T: node::IdxType> ann_index::ANNIndex<E, T> for PQIn
         &self,
         _item: &node::Node<E, T>,
         _k: usize,
-        _filter: &croaring::Bitmap,
+        _filter: Option<&croaring::Bitmap>,
     ) -> Vec<(node::Node<E, T>, E)> {
         unimplemented!("TODO .....")
     }
@@ -497,7 +497,7 @@ impl<E: node::FloatElement, T: node::IdxType> ann_index::ANNIndex<E, T> for IVFP
         &self,
         _item: &node::Node<E, T>,
         _k: usize,
-        _filter: &croaring::Bitmap,
+        _filter: Option<&croaring::Bitmap>,
     ) -> Vec<(node::Node<E, T>, E)> {
         unimplemented!("TODO .....")
     }

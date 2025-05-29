@@ -42,7 +42,12 @@ impl DiskVectorIndex {
         })
     }
 
-    pub fn search(&self, query: &[f32], size: usize, ids: &Bitmap) -> CoreResult<Vec<(f32, u64)>> {
+    pub fn search(
+        &self,
+        query: &[f32],
+        size: usize,
+        ids: Option<&Bitmap>,
+    ) -> CoreResult<Vec<(f32, u64)>> {
         let result = self
             .index
             .read()

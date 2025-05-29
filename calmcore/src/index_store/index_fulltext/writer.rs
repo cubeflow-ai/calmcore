@@ -3,11 +3,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use arrow::compute::kernels::length;
 use croaring::Bitmap;
 use itertools::Itertools;
 use mem_btree::{Action, BTree, BatchWrite};
-use rkyv::ArchiveUnsized;
 
 use crate::{analyzer::Token, entity::TermPosition};
 

@@ -28,31 +28,31 @@ fn main() -> CoreResult<()> {
     println!("insert time: {:?}", start.elapsed());
 
     // // test get
-    println!("------------get--------------------------------------------------------------");
-    let record = engine.get(&"1588".to_string()).unwrap();
-    println!("get result: {:?}", record.to_wrapper());
+    // println!("------------get--------------------------------------------------------------");
+    // let record = engine.get(&"1588".to_string()).unwrap();
+    // println!("get result: {:?}", record);
 
     // test search
 
     // println!("------------sql--------------------------------------------------------------");
     let result = engine
-        .sql("select urltitle from test where urltitle=text('资格') order by _score desc")
+        .sql("select urltitle from test where urltitle=text('格') order by _score desc")
         .unwrap();
     println!("sql result:{:?}", result.to_wrapper());
 
-    println!("------------sql--------------------------------------------------------------");
-    let result = engine.sql("select urltitle from test ").unwrap();
-    println!("sql result:{:?}", result.to_wrapper());
+    // println!("------------sql--------------------------------------------------------------");
+    // let result = engine.sql("select urltitle from test ").unwrap();
+    // println!("sql result:{:?}", result.to_wrapper());
 
-    // println!("------------sql--------------------num query---------------------------------");
-    let result = engine.sql("select * from test where district='浙江省交通运输厅办公室' and ssrwnf<=2014 limit 0,10").unwrap();
-    println!("sql result:{:?}", result.to_wrapper());
+    // // println!("------------sql--------------------num query---------------------------------");
+    // let result = engine.sql("select * from test where district='浙江省交通运输厅办公室' and ssrwnf<=2014 limit 0,10").unwrap();
+    // println!("sql result:{:?}", result.to_wrapper());
 
-    // println!("------------sql--------------------num query---------------------------------");
-    let result = engine
-        .sql("select ssrwnf,district from test where  ssrwnf>=2014 order by ssrwnf asc limit 0,10")
-        .unwrap();
-    println!("sql result:{:?}", result.to_wrapper());
+    // // println!("------------sql--------------------num query---------------------------------");
+    // let result = engine
+    //     .sql("select ssrwnf,district from test where  ssrwnf>=2014 order by ssrwnf asc limit 0,10")
+    //     .unwrap();
+    // println!("sql result:{:?}", result.to_wrapper());
 
     Ok(())
 }

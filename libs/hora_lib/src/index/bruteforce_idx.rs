@@ -84,15 +84,17 @@ impl<E: node::FloatElement, T: node::IdxType> ann_index::ANNIndex<E, T> for Brut
         &self,
         item: &node::Node<E, T>,
         k: usize,
-        filter: &croaring::Bitmap,
+        filter: Option<&croaring::Bitmap>,
     ) -> Vec<(node::Node<E, T>, E)> {
         let mut heap = BinaryHeap::with_capacity(k + 1);
         self.nodes
             .iter()
             .zip(0..self.nodes.len())
             .for_each(|(node, i)| {
-                if !filter.contains(i as u32) {
-                    return;
+                if let Some(filter) = filter {
+                    if !filter.contains(i as u32) {
+                        return;
+                    }
                 }
                 heap.push(neighbor::Neighbor::new(
                     // use max heap, and every time pop out the greatest one in the heap

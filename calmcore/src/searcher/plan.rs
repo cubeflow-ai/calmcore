@@ -94,16 +94,21 @@ impl Query {
         }
     }
 
-    pub(crate) fn need_realcount(&self) -> bool {
+    pub(crate) fn visiter(&self, has_phrase: &mut bool, has_vector: &mut bool) {
         match self {
-            Query::Phrase { .. } => true,
+            Query::Phrase { .. } => *has_phrase = true,
             Query::Logical {
                 left,
                 right,
                 operator: _,
-            } => left.need_realcount() || right.need_realcount(),
-
-            _ => return false,
+            } => {
+                right.visiter(has_phrase, has_vector);
+                left.visiter(has_phrase, has_vector);
+            }
+            Query::Vector { .. } => {
+                *has_vector = true;
+            }
+            _ => {}
         }
     }
 }
@@ -184,23 +189,8 @@ impl PhysicsPlan {
             } => {
                 let reader = segment.get_text_reader(field)?;
                 let tokens = reader.analyzer(value)?;
-
-                // Arc<FulltextIndexReader>,
-                // f32,                           //boost
-                // Vec<u64>,                      // hits
-                // Vec<Token>,                    // tokens
-                // HashMap<String, PositionList>, // term_position
-
                 let (hits, term_position) = reader.phrase_tokens(&tokens, *slop)?;
-
-                Ok(Self::Phrase(
-                    reader,
-                    *boost,
-                    hits,
-                    tokens,
-                    reader.start,
-                    term_position,
-                ))
+                Ok(Self::Phrase(reader, *boost, hits, tokens, term_position))
             }
             Query::Text {
                 value,
@@ -216,7 +206,7 @@ impl PhysicsPlan {
 
                 let term_position = reader.tokens(&tokens)?;
 
-                Ok(Self::Text(reader, *boost, term_position, operator))
+                Ok(Self::Text(reader, *boost, tokens, term_position, operator))
             }
             Query::Logical {
                 left,
@@ -238,12 +228,14 @@ impl PhysicsPlan {
         self,
         start: u64,
         sc: &mut SegmentContext,
-        filter: &Bitmap,
+        filter: Option<&Bitmap>,
     ) -> CoreResult<Box<dyn HitStream>> {
         let result: Box<dyn HitStream> = match self {
-            PhysicsPlan::Map(boost, bitmap) => Box::new(BitmapStream::new(start, boost, bitmap)),
+            PhysicsPlan::Map(boost, bitmap) => {
+                Box::new(BitmapStream::new(start, boost, sc.make_iter(bitmap)))
+            }
             PhysicsPlan::Combin(vec, logic_operator) => {
-                let mut cs = CombHitStream::new(vec.len(), logic_operator);
+                let mut cs = CombHitStream::new(start, vec.len(), logic_operator);
                 for v in vec.into_iter() {
                     cs.add(v.into_stream(start, sc, filter)?);
                 }
@@ -256,8 +248,8 @@ impl PhysicsPlan {
                 PhraseStream::new(reader, boosts, hits, tokens, term_position),
             ),
             PhysicsPlan::Vector(vector_index_reader, boost, value, _) => {
-                let result = vector_index_reader.search(&value, 2000, &filter)?;
-                Box::new(VectorStream::new(boost, result))
+                let result = vector_index_reader.search(&value, 2000, filter)?;
+                Box::new(VectorStream::new(start, boost, result))
             }
         };
 
@@ -278,10 +270,33 @@ impl PhysicsPlan {
                     }
                 })
                 .unwrap_or_default(),
-            PhysicsPlan::Text(_, _, _, total_bitmap, _, _, _) => total_bitmap.clone(),
+            PhysicsPlan::Text(_, _, _, total_bitmap, operator) => {
+                if *operator {
+                    let mut bitmap: Option<Bitmap> = None;
+                    total_bitmap
+                        .iter()
+                        .filter_map(|(_, p)| p.as_ref())
+                        .for_each(|p| {
+                            let mut b = Bitmap::new();
+                            p.write_map(&mut b);
+                            match &mut bitmap {
+                                Some(bitmap) => bitmap.and_inplace(&b),
+                                None => bitmap = Some(b),
+                            }
+                        });
+                    bitmap.unwrap_or_default()
+                } else {
+                    let mut bitmap = Bitmap::new();
+                    for p in total_bitmap.iter().filter_map(|(_, p)| p.as_ref()) {
+                        p.write_map(&mut bitmap);
+                    }
+                    bitmap
+                }
+            }
             PhysicsPlan::Vector(_, _, _, total_bitmap) => total_bitmap.clone(),
-            PhysicsPlan::Phrase(_, start, hits) => {
-                Bitmap::from_iter(hits.iter().map(|h| (h.id - start) as u32))
+            PhysicsPlan::Phrase(reader, _, hits, _, _) => {
+                let start = reader.start;
+                Bitmap::from_iter(hits.iter().map(|h| (h - start) as u32))
             }
         }
     }

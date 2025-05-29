@@ -1,15 +1,11 @@
 use std::{
     collections::HashMap,
-    f32::consts::E,
-    hash::Hash,
-    marker::PhantomData,
     sync::{Arc, RwLock},
 };
 
 use croaring::Bitmap;
 use itertools::Itertools;
 use mem_btree::{persist::TreeReader, BTree};
-use proto::core::Hit;
 
 use crate::{
     analyzer::{Analyzer, Token},
@@ -54,7 +50,25 @@ impl PositionList {
 
     // current document count
     fn tf(&self, doc_id: u32) -> usize {
-        todo!()
+        //TODO impl me
+
+        100
+    }
+
+    pub(crate) fn write_map(&self, bitmap: &mut Bitmap) {
+        match self {
+            PositionList::Memory(rw_lock) => {
+                let tp = rw_lock.read().unwrap();
+                for id in tp.ids.iter() {
+                    bitmap.add(*id);
+                }
+            }
+            PositionList::Disk(archived_term_position) => {
+                for id in archived_term_position.ids.iter() {
+                    bitmap.add(id.to_native());
+                }
+            }
+        }
     }
 }
 

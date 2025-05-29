@@ -39,7 +39,7 @@ impl MemoryVectorIndexReader {
         &self,
         query: &[f32],
         size: usize,
-        filter: &Bitmap,
+        filter: Option<&Bitmap>,
     ) -> CoreResult<Vec<(f32, u64)>> {
         let fn_err = |e| {
             CoreError::Internal(format!(
@@ -49,8 +49,10 @@ impl MemoryVectorIndexReader {
         };
         let mut heap = BinaryHeap::new();
         for item in self.index.iter() {
-            if !filter.contains((item.0 - self.start) as u32) {
-                continue;
+            if let Some(filter) = filter {
+                if !filter.contains((item.0 - self.start) as u32) {
+                    continue;
+                }
             }
 
             let distance = match self.metric {
