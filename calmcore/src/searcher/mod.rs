@@ -43,16 +43,6 @@ pub struct SegmentSearcher<'a> {
     segment: &'a SegmentReader,
 }
 
-impl SegmentSearcher<'_> {
-    fn batch_doc(
-        &self,
-        columns: Option<&[String]>,
-        ids: &[u64],
-    ) -> CoreResult<Vec<Cow<ObjectValue>>> {
-        self.segment.batch_doc(columns, ids)
-    }
-}
-
 type Streams = Vec<Box<dyn HitStream>>;
 type Filters = Vec<Option<Bitmap>>;
 
@@ -386,12 +376,15 @@ impl Searcher {
 
                 let sort = SortedHit::make_sort(*id, score, &value, order_by)?;
 
-                let sort_hit =
-                    if min.is_none() || min.as_ref().unwrap().cmp_record(&sort) == Ordering::Less {
-                        continue;
-                    } else {
-                        SortedHit::new(*id, score, value, sort)
-                    };
+                if min
+                    .as_ref()
+                    .map(|m| m.cmp_record(&sort) == Ordering::Less)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                let sort_hit: SortedHit = SortedHit::new(*id, score, value, sort);
 
                 heap.insert(sort_hit);
 
@@ -413,6 +406,7 @@ impl Searcher {
             let start = segment.start();
 
             let mut next = None;
+
             if let Some(mut stream) = stream {
                 let mut ids = Vec::with_capacity(size);
                 let mut scores = Vec::with_capacity(size);

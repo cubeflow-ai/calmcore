@@ -426,16 +426,46 @@ impl MemSegmentReader {
         self.start >= self.end && self.source_store.is_empty()
     }
 
-    pub(crate) fn batch_doc(&self, ids: &[u64]) -> Vec<Cow<ObjectValue>> {
-        println!("=====================start:{:?} ids:{:?}", self.start, ids);
-
+    pub(crate) fn batch_doc(
+        &self,
+        columns: Option<&[String]>,
+        ids: &[u64],
+    ) -> Vec<Cow<ObjectValue>> {
         let ids = ids.iter().map(|id| self.abs_id(*id)).collect_vec();
-        self.source_store
-            .mget(&ids)
-            .iter()
-            .filter_map(|v| *v)
-            .map(Cow::Borrowed)
-            .collect::<Vec<_>>()
+
+        let need_project = columns
+            .map(|c| {
+                if self.fields.len() == c.len() {
+                    false
+                } else {
+                    true
+                }
+            })
+            .unwrap_or(false);
+
+        if need_project {
+            self.source_store
+                .mget(&ids)
+                .iter()
+                .filter_map(|v| *v)
+                .map(|v| {
+                    let mut fields = HashMap::new();
+                    for c in columns.unwrap_or(&[]) {
+                        if let Some(v) = v.fields.get(c).cloned() {
+                            fields.insert(c.clone(), v);
+                        }
+                    }
+                    Cow::Owned(ObjectValue { fields })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            self.source_store
+                .mget(&ids)
+                .iter()
+                .filter_map(|v| *v)
+                .map(Cow::Borrowed)
+                .collect::<Vec<_>>()
+        }
     }
 
     pub(crate) fn find_by_name(&self, name: &str) -> Option<u64> {

@@ -86,7 +86,7 @@ impl SegmentReader {
         ids: &[u64],
     ) -> CoreResult<Vec<Cow<ObjectValue>>> {
         match self {
-            SegmentReader::Hot(h) => Ok(h.batch_doc(ids)),
+            SegmentReader::Hot(h) => Ok(h.batch_doc(columns, ids)),
             SegmentReader::Warm(w) => w
                 .batch_doc(columns, ids)
                 .map(|v| v.into_iter().map(Cow::Owned).collect()),

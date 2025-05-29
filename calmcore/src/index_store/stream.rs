@@ -264,19 +264,6 @@ impl TextStream {
         term_position: HashMap<String, Option<PositionList>>,
         operator: bool,
     ) -> Self {
-        println!("TextStream::new tokens: {:?}", tokens);
-        println!(
-            "TextStream::new tokens: {:?}",
-            term_position
-                .iter()
-                .next()
-                .unwrap()
-                .1
-                .as_ref()
-                .unwrap()
-                .len()
-        );
-
         let term_position: HashMap<String, Option<Arc<PositionList>>> = term_position
             .into_iter()
             .map(|(k, v)| (k, v.map(Arc::new)))
@@ -339,9 +326,8 @@ impl HitStream for TextStream {
         let except_id = (skip - self.reader.start) as u32;
 
         if self.operator || self.tokens.len() == 1 {
+            let mut max_value = (skip - self.reader.start) as u32;
             loop {
-                let mut max_value = (skip - self.reader.start) as u32;
-
                 for (i, iter) in self.iters.iter_mut().enumerate() {
                     match iter.as_mut().unwrap().next(max_value) {
                         Ok(true) => {
