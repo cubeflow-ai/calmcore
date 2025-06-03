@@ -9,25 +9,17 @@ use mem_btree::{Action, BTree, BatchWrite};
 
 use crate::{analyzer::Token, entity::TermPosition};
 
-type ReleaseResult = (
-    BTree<String, Bitmap>,
-    BTree<String, Arc<RwLock<TermPosition>>>,
-);
+type ReleaseResult = BTree<String, Arc<RwLock<TermPosition>>>;
 
 pub struct Handler {
-    token_index: BTree<String, Bitmap>,
     term_position: BTree<String, Arc<RwLock<TermPosition>>>,
     token_index_buffer: BTreeMap<String, Action<Bitmap>>,
     term_position_buffer: BTreeMap<String, Action<Arc<RwLock<TermPosition>>>>,
 }
 
 impl Handler {
-    pub fn new(
-        token_index: BTree<String, Bitmap>,
-        term_position: BTree<String, Arc<RwLock<TermPosition>>>,
-    ) -> Self {
+    pub fn new(term_position: BTree<String, Arc<RwLock<TermPosition>>>) -> Self {
         Self {
-            token_index,
             term_position,
             token_index_buffer: Default::default(),
             term_position_buffer: Default::default(),
@@ -83,29 +75,12 @@ impl Handler {
                     }
                 }
             }
-
-            if let Some(bi) = self.token_index_buffer.get_mut(term) {
-                bi.mut_value().add(id);
-                continue;
-            }
-
-            let mut bi = self
-                .token_index
-                .get(term)
-                .cloned()
-                .unwrap_or_else(Bitmap::new);
-            bi.add(id);
-
-            self.token_index_buffer
-                .insert(term.to_string(), Action::Put(bi, None));
         }
     }
 
     pub fn release(mut self) -> ReleaseResult {
-        self.token_index
-            .write(BatchWrite::from(self.token_index_buffer));
         self.term_position
             .write(BatchWrite::from(self.term_position_buffer));
-        (self.token_index, self.term_position)
+        self.term_position
     }
 }

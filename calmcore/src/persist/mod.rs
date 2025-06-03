@@ -28,7 +28,8 @@ use crate::{
         index_fulltext::{
             reader::FulltextIndexReader,
             serializer::{
-                PositionSerializer, TokenSerializer, TERM_INDEX, TERM_POSITION, VECTOR_INDEX,
+                PositionSerializer, TokenSerializer, INDEX_INFO, TERM_INDEX, TERM_POSITION,
+                VECTOR_INDEX,
             },
         },
         index_term::{reader::TermIndexReader, serializer::TermSerializer},
@@ -177,11 +178,6 @@ pub fn merge_del_history(data_path: &Path, dels: &Bitmap) -> CoreResult<()> {
 
 fn write_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
     let write_fulltext = |path: PathBuf, ft: &FulltextIndexReader| -> CoreResult<()> {
-        let tser: Box<dyn KVSerializer<String, Bitmap>> = Box::new(TokenSerializer);
-        let mut persist_tree = BTree::new(1024);
-        persist_tree.merge(ft.token_index.clone_map());
-        TreeWriter::new(persist_tree, 0, tser).persist(&path.join(TERM_INDEX))?;
-
         let dser: Box<dyn KVSerializer<String, Arc<RwLock<TermPosition>>>> =
             Box::new(PositionSerializer::new());
         let mut persist_tree = BTree::new(1024);
@@ -195,7 +191,7 @@ fn write_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
             "total_term":ft.total_term,
         });
 
-        pos_write(path.join(TERM_POSITION), info.to_string().as_bytes())?;
+        pos_write(path.join(INDEX_INFO), info.to_string().as_bytes())?;
 
         Ok(())
     };

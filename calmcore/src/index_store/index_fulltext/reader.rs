@@ -10,7 +10,7 @@ use mem_btree::{persist::TreeReader, BTree};
 use crate::{
     analyzer::{Analyzer, Token},
     entity::{ArchivedTermPosition, TermPosition},
-    index_store::store::InvertIndexReader,
+    index_store::{index_fulltext::FulltextIndex, store::InvertIndexReader},
     util::CoreResult,
 };
 
@@ -195,7 +195,6 @@ pub struct FulltextIndexReader {
     pub start: u64,
     pub inner: Arc<proto::core::Field>,
     pub analyzer: Arc<Analyzer>,
-    pub(crate) token_index: InvertIndexReader<String, Bitmap>,
     pub(crate) term_position: TermPositionReader,
     // Field information
     pub doc_count: u32,  // total Document count
@@ -222,10 +221,6 @@ impl FulltextIndexReader {
             let value = self.term_position.get(token);
 
             if value.is_none() {
-                return Ok((vec![], result));
-            }
-
-            if self.token_index.get(token).is_none() {
                 return Ok((vec![], result));
             }
 

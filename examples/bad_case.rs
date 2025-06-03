@@ -2,6 +2,8 @@ use calmcore::{util::CoreResult, Action, ActionType, CalmCore};
 use proto::core::field::{self, fulltext_option, FulltextOption, TermOption};
 
 pub fn main() -> CoreResult<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+
     let schema_name = "test";
     let data_path = "data/calm_test";
 

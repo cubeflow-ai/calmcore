@@ -15,24 +15,37 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
 };
 use writer::Handler;
 
-use crate::{analyzer::Analyzer, entity::TermPosition, util::CoreResult};
+use crate::{
+    analyzer::Analyzer,
+    entity::{ArchivedTermPosition, TermPosition},
+    util::CoreResult,
+};
 
 use super::store::InvertIndex;
 
-type TermInvertIndex = InvertIndex<String, Bitmap>;
-type DocInvertIndex = InvertIndex<String, Arc<RwLock<TermPosition>>>;
+pub enum DocInvertIndex {
+    Memory(),
+    Disk(InvertIndex<String, &'static ArchivedTermPosition>),
+}
+impl DocInvertIndex {
+    fn clone_map(&self) -> BTree<String, Arc<RwLock<TermPosition>>> {
+        match self {
+            DocInvertIndex::Memory(invert_index) => invert_index.clone_map(),
+            DocInvertIndex::Disk(_) => unreachable!(),
+        }
+    }
+}
 
 pub struct FulltextIndex {
     start: u64,
     inner: Arc<proto::core::Field>,
     analyzer: Arc<Analyzer>,
-    token_index: TermInvertIndex,
-    term_position: DocInvertIndex,
+    term_position: BTree<String, Arc<RwLock<TermPosition>>>,
     doc_count: AtomicU32,
     total_term: AtomicU64,
 }
@@ -44,8 +57,7 @@ impl FulltextIndex {
             start,
             inner,
             analyzer,
-            token_index: TermInvertIndex::new_memory(),
-            term_position: DocInvertIndex::new_memory(),
+            term_position: BTree::new(32),
             doc_count: AtomicU32::new(0),
             total_term: AtomicU64::new(0),
         })
@@ -59,37 +71,42 @@ impl FulltextIndex {
 
         let doc_count = info.get("doc_count").unwrap().as_u64().unwrap() as u32;
         let total_term = info.get("total_term").unwrap().as_u64().unwrap();
+
+        let doc = InvertIndex::new_disk(path.join(TERM_POSITION), Box::new(DocDeserializer {}))?;
+
         Ok(Self {
             start,
             inner,
             analyzer,
-            token_index: TermInvertIndex::new_disk(
-                path.join(TERM_INDEX),
-                Box::new(TokenDeserializer {}),
-            )?,
-            term_position: DocInvertIndex::new_disk(
-                path.join(TERM_POSITION),
-                Box::new(DocDeserializer {}),
-            )?,
+            term_position: DocInvertIndex::Disk(doc),
             doc_count: AtomicU32::new(doc_count),
             total_term: AtomicU64::new(total_term),
         })
     }
 
     fn handler(&self) -> Handler {
-        Handler::new(self.token_index.clone_map(), self.term_position.clone_map())
+        match self.term_position {
+            DocInvertIndex::Memory(ref index) => Handler::new(index.clone_map()),
+            DocInvertIndex::Disk(_) => {
+                unreachable!("DocInvertIndex::Disk not support handler")
+            }
+        }
     }
 
     pub fn reader(&self) -> FulltextIndexReader {
         let doc_count = self.doc_count.load(Ordering::Relaxed);
         let total_term = self.total_term.load(Ordering::Relaxed);
 
+        let term_position = match self.term_position {
+            DocInvertIndex::Memory(_) => TermPositionReader::Memory(self.term_position.clone_map()),
+            DocInvertIndex::Disk(invert_index) => TermPositionReader::Disk(()),
+        };
+
         FulltextIndexReader {
             start: self.start,
             inner: self.inner.clone(),
             analyzer: self.analyzer.clone(),
-            token_index: self.token_index.index_reader(),
-            term_position: TermPositionReader::Memory(self.term_position.clone_map()),
+            term_position,
             doc_count,
             total_term,
         }
@@ -136,10 +153,12 @@ impl FulltextIndex {
             }
         }
 
-        let (token_index, doc_index) = handler.release();
-
         //replace maptree with new one
-        self.term_position.replace(doc_index);
-        self.token_index.replace(token_index);
+
+        if let DocInvertIndex::Memory(ii) = &self.term_position {
+            ii.replace(handler.release());
+        } else {
+            unreachable!("not memory position")
+        }
     }
 }

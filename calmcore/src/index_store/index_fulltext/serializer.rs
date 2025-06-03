@@ -7,7 +7,10 @@ use croaring::{Bitmap, Portable};
 use mem_btree::persist;
 use rkyv::ser::allocator::Arena;
 
-use crate::{entity::TermPosition, util::CoreError};
+use crate::{
+    entity::{ArchivedTermPosition, TermPosition},
+    util::CoreError,
+};
 
 pub const TERM_INDEX: &str = "term_index";
 pub const VECTOR_INDEX: &str = "vector_index";
@@ -72,24 +75,23 @@ impl persist::KVSerializer<String, Arc<RwLock<TermPosition>>> for PositionSerial
 
 pub struct DocDeserializer;
 
-impl persist::KVDeserializer<String, Arc<RwLock<TermPosition>>> for DocDeserializer {
+impl persist::KVDeserializer<String, &ArchivedTermPosition> for DocDeserializer {
     fn deserialize_value(
         &self,
         v: &[u8],
-    ) -> std::result::Result<Arc<RwLock<TermPosition>>, Box<dyn std::error::Error>> {
-        // let info = rkyv::access(v).map_err(|e| {
-        //     CoreError::DecodeError("decode doc index err".to_string(), v.to_vec()).into()
-        // })?;
-        // Ok(vec)
-        todo!()
+    ) -> std::result::Result<&'static ArchivedTermPosition, Box<dyn std::error::Error>> {
+        let result = TermPosition::deserializer(v).map_err(|e| Box::new(e))?;
+        let result = unsafe {
+            std::mem::transmute::<&ArchivedTermPosition, &'static ArchivedTermPosition>(result)
+        };
+        Ok(result)
     }
 
     fn serialize_key<'a>(&self, k: &'a String) -> Cow<'a, [u8]> {
-        // let mut bytes = vec![0; 4 + k.1.len()];
-        // bytes[..4].copy_from_slice(&k.0.to_be_bytes());
-        // bytes[4..].copy_from_slice(k.1.as_bytes());
-        // Cow::Owned(bytes)
-        todo!()
+        let mut bytes = vec![0; 4 + k.len()];
+        bytes[..4].copy_from_slice(&k.len().to_be_bytes());
+        bytes[4..].copy_from_slice(k.as_bytes());
+        Cow::Owned(bytes)
     }
 }
 
