@@ -28,24 +28,11 @@ use crate::{
 
 use super::store::InvertIndex;
 
-pub enum DocInvertIndex {
-    Memory(),
-    Disk(InvertIndex<String, &'static ArchivedTermPosition>),
-}
-impl DocInvertIndex {
-    fn clone_map(&self) -> BTree<String, Arc<RwLock<TermPosition>>> {
-        match self {
-            DocInvertIndex::Memory(invert_index) => invert_index.clone_map(),
-            DocInvertIndex::Disk(_) => unreachable!(),
-        }
-    }
-}
-
 pub struct FulltextIndex {
     start: u64,
     inner: Arc<proto::core::Field>,
     analyzer: Arc<Analyzer>,
-    term_position: BTree<String, Arc<RwLock<TermPosition>>>,
+    term_position: RwLock<BTree<String, Arc<RwLock<TermPosition>>>>,
     doc_count: AtomicU32,
     total_term: AtomicU64,
 }
@@ -57,56 +44,25 @@ impl FulltextIndex {
             start,
             inner,
             analyzer,
-            term_position: BTree::new(32),
+            term_position: RwLock::new(BTree::new(32)),
             doc_count: AtomicU32::new(0),
             total_term: AtomicU64::new(0),
         })
     }
 
-    pub(crate) fn new_disk(start: u64, inner: Arc<Field>, path: PathBuf) -> CoreResult<Self> {
-        let analyzer = Self::make_analyzer(&inner)?;
-
-        let info: serde_json::Value =
-            serde_json::from_reader(std::fs::File::open(path.join(INDEX_INFO))?)?;
-
-        let doc_count = info.get("doc_count").unwrap().as_u64().unwrap() as u32;
-        let total_term = info.get("total_term").unwrap().as_u64().unwrap();
-
-        let doc = InvertIndex::new_disk(path.join(TERM_POSITION), Box::new(DocDeserializer {}))?;
-
-        Ok(Self {
-            start,
-            inner,
-            analyzer,
-            term_position: DocInvertIndex::Disk(doc),
-            doc_count: AtomicU32::new(doc_count),
-            total_term: AtomicU64::new(total_term),
-        })
-    }
-
     fn handler(&self) -> Handler {
-        match self.term_position {
-            DocInvertIndex::Memory(ref index) => Handler::new(index.clone_map()),
-            DocInvertIndex::Disk(_) => {
-                unreachable!("DocInvertIndex::Disk not support handler")
-            }
-        }
+        Handler::new(self.term_position.read().unwrap().clone())
     }
 
     pub fn reader(&self) -> FulltextIndexReader {
         let doc_count = self.doc_count.load(Ordering::Relaxed);
         let total_term = self.total_term.load(Ordering::Relaxed);
 
-        let term_position = match self.term_position {
-            DocInvertIndex::Memory(_) => TermPositionReader::Memory(self.term_position.clone_map()),
-            DocInvertIndex::Disk(invert_index) => TermPositionReader::Disk(()),
-        };
-
         FulltextIndexReader {
             start: self.start,
             inner: self.inner.clone(),
             analyzer: self.analyzer.clone(),
-            term_position,
+            term_position: TermPositionReader::Memory(self.term_position.read().unwrap().clone()),
             doc_count,
             total_term,
         }
@@ -133,8 +89,6 @@ impl FulltextIndex {
 
         let mut handler = self.handler();
 
-        let start = std::time::Instant::now();
-
         for r in source.iter() {
             let (id, obj) = (r.0, &r.1);
             if let Some(value) = obj.fields.get(&self.inner.name) {
@@ -154,11 +108,6 @@ impl FulltextIndex {
         }
 
         //replace maptree with new one
-
-        if let DocInvertIndex::Memory(ii) = &self.term_position {
-            ii.replace(handler.release());
-        } else {
-            unreachable!("not memory position")
-        }
+        *self.term_position.write().unwrap() = handler.release();
     }
 }

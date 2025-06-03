@@ -114,9 +114,9 @@ impl DiskSegment {
                     };
                 }
                 proto::core::field::Type::Text => {
-                    match FulltextIndex::new_disk(start, field.clone(), field_path) {
-                        Ok(fi) => {
-                            index_fulltext.insert(name.clone(), Arc::new(fi.reader()));
+                    match FulltextIndexReader::new(start, field.clone(), field_path) {
+                        Ok(fir) => {
+                            index_fulltext.insert(name.clone(), Arc::new(fir));
                         }
                         Err(e) => {
                             log::error!("load fulltext:{:?} index error:{:?}", name, e);

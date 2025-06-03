@@ -1,16 +1,28 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicU32, AtomicU64},
+        Arc, RwLock,
+    },
 };
 
 use croaring::Bitmap;
 use itertools::Itertools;
-use mem_btree::{persist::TreeReader, BTree};
+use mem_btree::{
+    persist::{self, TreeReader},
+    BTree,
+};
 
 use crate::{
     analyzer::{Analyzer, Token},
     entity::{ArchivedTermPosition, TermPosition},
-    index_store::{index_fulltext::FulltextIndex, store::InvertIndexReader},
+    index_store::{
+        index_fulltext::{
+            serializer::{DocDeserializer, INDEX_INFO, TERM_POSITION},
+            FulltextIndex,
+        },
+        store::{InvertIndex, InvertIndexReader},
+    },
     util::CoreResult,
 };
 
@@ -201,6 +213,34 @@ pub struct FulltextIndexReader {
     pub total_term: u64, // Average document length
 }
 impl FulltextIndexReader {
+    pub(crate) fn new(
+        start: u64,
+        inner: Arc<proto::core::Field>,
+        path: std::path::PathBuf,
+    ) -> CoreResult<Self> {
+        let analyzer = FulltextIndex::make_analyzer(&inner)?;
+
+        let info: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(path.join(INDEX_INFO))?)?;
+
+        let doc_count = info.get("doc_count").unwrap().as_u64().unwrap() as u32;
+        let total_term = info.get("total_term").unwrap().as_u64().unwrap();
+
+        let term_position = TermPositionReader::Disk(Arc::new(persist::TreeReader::new(
+            &path.join(TERM_POSITION),
+            Box::new(DocDeserializer {}),
+        )?));
+
+        Ok(Self {
+            start,
+            inner,
+            analyzer,
+            term_position,
+            doc_count: doc_count as u32,
+            total_term: total_term,
+        })
+    }
+
     pub(crate) fn analyzer(&self, value: &str) -> CoreResult<Vec<Token>> {
         Ok(self.analyzer.analyzer_query(value))
     }
