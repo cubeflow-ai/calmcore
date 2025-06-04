@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use croaring::Bitmap;
+use croaring::{Bitmap, BitmapView};
 use itertools::Itertools;
 use mem_btree::{
     persist::{self, TreeReader},
@@ -15,7 +15,7 @@ use mem_btree::{
 
 use crate::{
     analyzer::{Analyzer, Token},
-    entity::{ArchivedTermPosition, TermPosition},
+    entity::{ArchivedTermPosition, TermPosition, TermPositionWriter},
     index_store::index_fulltext::{
         serializer::{DocDeserializer, INDEX_INFO, TERM_POSITION},
         FulltextIndex,
@@ -24,7 +24,7 @@ use crate::{
 };
 
 pub(crate) enum TermPositionReader {
-    Memory(BTree<String, Arc<RwLock<TermPosition>>>),
+    Memory(BTree<String, Arc<RwLock<TermPositionWriter>>>),
     Disk(Arc<TreeReader<String, &'static ArchivedTermPosition>>),
 }
 
@@ -36,7 +36,7 @@ impl TermPositionReader {
         }
     }
 
-    pub(crate) fn clone_map(&self) -> BTree<String, Arc<RwLock<TermPosition>>> {
+    pub(crate) fn clone_map(&self) -> BTree<String, Arc<RwLock<TermPositionWriter>>> {
         match self {
             TermPositionReader::Memory(tree) => tree.clone(),
             TermPositionReader::Disk(_) => panic!("Disk TermPositionReader cannot clone"),
@@ -45,7 +45,7 @@ impl TermPositionReader {
 }
 
 pub enum PositionList {
-    Memory(Arc<RwLock<TermPosition>>),
+    Memory(Arc<RwLock<TermPositionWriter>>),
     Disk(&'static ArchivedTermPosition),
 }
 
@@ -72,10 +72,9 @@ impl PositionList {
                     bitmap.add(*id);
                 }
             }
-            PositionList::Disk(archived_term_position) => {
-                for id in archived_term_position.ids.iter() {
-                    bitmap.add(id.to_native());
-                }
+            PositionList::Disk(atp) => {
+                let bi = unsafe { BitmapView::deserialize::<croaring::Portable>(&atp.ids) };
+                bitmap.and_inplace(&bi);
             }
         }
     }

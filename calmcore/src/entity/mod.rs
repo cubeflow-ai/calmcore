@@ -1,4 +1,4 @@
-use croaring::Bitmap;
+use croaring::{Bitmap, Portable};
 use proto::core::Hit;
 use rkyv::{
     api::high::to_bytes_with_alloc, ser::allocator::Arena, util::AlignedVec, Archive, Deserialize,
@@ -69,10 +69,36 @@ macro_rules! data_column_name {
     }};
 }
 
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct TermPosition {
+pub struct TermPositionWriter {
     pub name: String,
     pub ids: Vec<u32>,
+    pub index: Vec<u32>,
+    pub length: Vec<u16>,
+    pub offsets: Vec<u32>,
+}
+
+impl TermPositionWriter {
+    pub fn release(&self) -> TermPosition {
+        let mut bitmap = Bitmap::from_iter(self.ids.iter().cloned());
+
+        bitmap.run_optimize();
+
+        let ids = bitmap.serialize::<Portable>();
+
+        TermPosition {
+            name: self.name.clone(),
+            ids,
+            index: self.index.clone(),
+            length: self.length.clone(),
+            offsets: self.offsets.clone(),
+        }
+    }
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
+pub struct TermPosition {
+    pub name: String,
+    pub ids: Vec<u8>,
     pub index: Vec<u32>,
     pub length: Vec<u16>,
     pub offsets: Vec<u32>,

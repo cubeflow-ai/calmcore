@@ -182,7 +182,16 @@ fn write_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
             Box::new(PositionSerializer::new());
         let mut persist_tree = BTree::new(1024);
 
-        persist_tree.merge(ft.term_position.clone_map());
+        let mut tpm = ft.term_position.clone_map().iter();
+
+        for chunk in &tpm.chunks(1024) {
+            let mut batch_write = BatchWrite::default();
+            for e in chunk {
+                let pos = e.1.read().unwrap().release();
+                batch_write.put(e.0.to_string(), pos);
+            }
+            persist_tree.write(batch_write);
+        }
 
         TreeWriter::new(persist_tree, 0, dser).persist(&path.join(TERM_POSITION))?;
 

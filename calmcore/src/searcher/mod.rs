@@ -108,8 +108,6 @@ impl Searcher {
 
             let mut streams = streams.into_iter();
 
-            println!("filters:{}  searchers:{}", filters.len(), streams.len());
-
             let searchers: Vec<SegmentSearcher<'_>> = filters
                 .into_iter()
                 .enumerate()
