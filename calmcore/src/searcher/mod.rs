@@ -90,7 +90,7 @@ impl Searcher {
         let sc = SearchContext::new(query, &order_by);
 
         let result = {
-            let (streams, filters) = self.query_execute(query, &sc, order_by.is_empty())?;
+            let (streams, filters) = self.query_execute(query, &sc)?;
 
             // statistics total hits
             let mut total_hits = filters
@@ -107,6 +107,8 @@ impl Searcher {
             };
 
             let mut streams = streams.into_iter();
+
+            println!("filters:{}  searchers:{}", filters.len(), streams.len());
 
             let searchers: Vec<SegmentSearcher<'_>> = filters
                 .into_iter()
@@ -140,7 +142,6 @@ impl Searcher {
         &self,
         query: Option<&Query>,
         sc: &SearchContext,
-        no_sort: bool,
     ) -> CoreResult<(Streams, Filters)> {
         let value = match query {
             Some(query) => {

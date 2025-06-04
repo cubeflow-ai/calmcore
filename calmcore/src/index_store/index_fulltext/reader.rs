@@ -16,12 +16,9 @@ use mem_btree::{
 use crate::{
     analyzer::{Analyzer, Token},
     entity::{ArchivedTermPosition, TermPosition},
-    index_store::{
-        index_fulltext::{
-            serializer::{DocDeserializer, INDEX_INFO, TERM_POSITION},
-            FulltextIndex,
-        },
-        store::{InvertIndex, InvertIndexReader},
+    index_store::index_fulltext::{
+        serializer::{DocDeserializer, INDEX_INFO, TERM_POSITION},
+        FulltextIndex,
     },
     util::CoreResult,
 };
@@ -225,6 +222,9 @@ impl FulltextIndexReader {
 
         let doc_count = info.get("doc_count").unwrap().as_u64().unwrap() as u32;
         let total_term = info.get("total_term").unwrap().as_u64().unwrap();
+
+        let abc =
+            persist::TreeReader::new(&path.join(TERM_POSITION), Box::new(DocDeserializer {}))?;
 
         let term_position = TermPositionReader::Disk(Arc::new(persist::TreeReader::new(
             &path.join(TERM_POSITION),

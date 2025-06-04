@@ -88,10 +88,7 @@ impl persist::KVDeserializer<String, &ArchivedTermPosition> for DocDeserializer 
     }
 
     fn serialize_key<'a>(&self, k: &'a String) -> Cow<'a, [u8]> {
-        let mut bytes = vec![0; 2 + k.len()];
-        bytes[..2].copy_from_slice(&(k.len() as u16).to_be_bytes());
-        bytes[2..].copy_from_slice(k.as_bytes());
-        Cow::Owned(bytes)
+        Cow::Borrowed(k.as_bytes())
     }
 }
 
