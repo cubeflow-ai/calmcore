@@ -22,10 +22,7 @@ use rayon::iter::{
 };
 
 use crate::{
-    index_store::{
-        segment::SegmentReader,
-        stream::{self, HitStream},
-    },
+    index_store::{segment::SegmentReader, stream::HitStream},
     util::{self, kind_to_vec, CoreError, CoreResult},
 };
 

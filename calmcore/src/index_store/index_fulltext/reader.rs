@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use croaring::{Bitmap, BitmapView};
+use croaring::{bitmap::BitmapIterator, Bitmap, BitmapView};
 use itertools::Itertools;
 use mem_btree::{
     persist::{self, TreeReader},
@@ -32,7 +32,11 @@ impl TermPositionReader {
     pub fn get(&self, key: &String) -> Option<PositionList> {
         match self {
             TermPositionReader::Memory(tree) => Some(PositionList::Memory(tree.get(key)?.clone())),
-            TermPositionReader::Disk(tree) => Some(PositionList::Disk(tree.get(key)?)),
+            TermPositionReader::Disk(tree) => {
+                let archived = tree.get(key)?;
+                let bi = unsafe { BitmapView::deserialize::<croaring::Portable>(&archived.ids) };
+                Some(PositionList::Disk(archived, bi))
+            }
         }
     }
 
@@ -46,14 +50,14 @@ impl TermPositionReader {
 
 pub enum PositionList {
     Memory(Arc<RwLock<TermPositionWriter>>),
-    Disk(&'static ArchivedTermPosition),
+    Disk(&'static ArchivedTermPosition, BitmapView<'static>),
 }
 
 impl PositionList {
     pub fn len(&self) -> usize {
         match self {
             PositionList::Memory(arc) => arc.read().unwrap().ids.len(),
-            PositionList::Disk(archived) => archived.ids.len(),
+            PositionList::Disk(_, b) => b.cardinality() as usize,
         }
     }
 
@@ -72,63 +76,101 @@ impl PositionList {
                     bitmap.add(*id);
                 }
             }
-            PositionList::Disk(atp) => {
-                let bi = unsafe { BitmapView::deserialize::<croaring::Portable>(&atp.ids) };
-                bitmap.and_inplace(&bi);
+            PositionList::Disk(_, bi) => {
+                *bitmap = bi.to_bitmap();
             }
         }
     }
 }
 
-struct PositionListIter<'a> {
-    inner: &'a PositionList,
+pub struct PositionListIter {
+    inner: Arc<PositionList>,
     index: usize,
+    iter: Option<BitmapIterator<'static>>,
     len: usize,
+    current_id: u32,
 }
 
-impl<'a> PositionListIter<'a> {
-    fn new(inner: &'a PositionList) -> Self {
+impl PositionListIter {
+    pub fn new(inner: Arc<PositionList>) -> Self {
         let len = inner.len();
+
+        let iter = if let PositionList::Disk(_, b) = &*inner {
+            let iter = unsafe {
+                std::mem::transmute::<BitmapIterator<'_>, BitmapIterator<'static>>(b.iter())
+            };
+            Some(iter)
+        } else {
+            None
+        };
+
         Self {
             inner,
             index: 0,
+            iter,
             len,
+            current_id: 0,
         }
     }
 
-    fn next(&mut self, id: u32) -> Result<bool, u32> {
-        loop {
-            if self.index >= self.len {
-                return Ok(false);
-            }
-            let current_id = self.current_id();
-            if id > current_id {
-                self.index += 1;
-                continue;
-            } else if id == current_id {
-                return Ok(true);
-            } else {
-                return Err(current_id);
-            }
+    pub fn next(&mut self, id: u32) -> Result<bool, u32> {
+        match &mut self.iter {
+            Some(iter) => loop {
+                if self.index >= self.len {
+                    return Ok(false);
+                }
+
+                let current_id = self.current_id;
+                if id > current_id {
+                    let current_id = iter.next();
+                    self.index += 1;
+                    match current_id {
+                        Some(id) => self.current_id = id,
+                        None => {
+                            self.current_id = 0;
+                            return Ok(false);
+                        }
+                    }
+                    continue;
+                } else if id == current_id {
+                    return Ok(true);
+                } else {
+                    return Err(current_id);
+                }
+            },
+            None => loop {
+                if self.index >= self.len {
+                    return Ok(false);
+                }
+                let current_id = self.current_id();
+                if id > current_id {
+                    self.index += 1;
+                    continue;
+                } else if id == current_id {
+                    return Ok(true);
+                } else {
+                    return Err(current_id);
+                }
+            },
         }
     }
 
     fn current_id(&self) -> u32 {
-        match self.inner {
+        match self.inner.as_ref() {
             PositionList::Memory(arc) => arc.read().unwrap().ids[self.index],
-            PositionList::Disk(archived) => archived.ids[self.index].to_native(),
+            PositionList::Disk(_, _) => self.current_id,
         }
     }
 
     fn positions(&self) -> Vec<u32> {
-        match self.inner {
+        match self.inner.as_ref() {
             PositionList::Memory(t) => {
                 let tp = t.read().unwrap();
                 let start = tp.index[self.index];
                 let end = tp.length[self.index];
                 tp.offsets[start as usize..=end as usize].to_vec()
             }
-            PositionList::Disk(archived) => {
+            PositionList::Disk(archived, _) => {
                 let start = archived.index[self.index].to_native();
                 let end = archived.length[self.index].to_native();
                 archived.offsets[start as usize..=end as usize]
@@ -141,7 +183,7 @@ impl<'a> PositionListIter<'a> {
 
     fn find_positions(&self, pre: &[u32], slop: i32) -> Vec<u32> {
         let mut result = vec![];
-        match self.inner {
+        match self.inner.as_ref() {
             PositionList::Memory(t) => {
                 let tp = t.read().unwrap();
                 let start = tp.index[self.index];
@@ -168,7 +210,7 @@ impl<'a> PositionListIter<'a> {
                     }
                 }
             }
-            PositionList::Disk(archived) => {
+            PositionList::Disk(archived, _) => {
                 let start = archived.index[self.index].to_native();
                 let end = archived.length[self.index].to_native();
 
@@ -248,7 +290,7 @@ impl FulltextIndexReader {
         &self,
         tokens: &[Token],
         slop: i32,
-    ) -> CoreResult<(Vec<u64>, HashMap<String, PositionList>)> {
+    ) -> CoreResult<(Vec<u64>, HashMap<String, Arc<PositionList>>)> {
         let mut result = HashMap::new();
 
         for token in tokens.iter() {
@@ -263,7 +305,7 @@ impl FulltextIndexReader {
                 return Ok((vec![], result));
             }
 
-            result.insert(token.to_string(), value.unwrap());
+            result.insert(token.to_string(), Arc::new(value.unwrap()));
         }
 
         let hits = self.phrase_hits(self.start, tokens, &result, slop)?;
@@ -275,14 +317,14 @@ impl FulltextIndexReader {
         &self,
         start: u64,
         tokens: &[Token],
-        term_position: &HashMap<String, PositionList>,
+        term_position: &HashMap<String, Arc<PositionList>>,
         slop: i32,
     ) -> CoreResult<Vec<u64>> {
         assert!(tokens.len() > 1 && slop > 1);
 
         let mut iters = tokens
             .iter()
-            .map(|t| PositionListIter::new(term_position.get(&t.name).unwrap()))
+            .map(|t| PositionListIter::new(term_position.get(&t.name).unwrap().clone()))
             .collect_vec();
 
         let len = iters.len();
@@ -313,21 +355,7 @@ impl FulltextIndexReader {
         }
     }
 
-    pub fn avgdl(&self) -> f32 {
-        self.total_term as f32 / (self.doc_count + 1) as f32
-    }
-
-    pub(crate) fn tokens(
-        &self,
-        tokens: &[Token],
-    ) -> CoreResult<HashMap<String, Option<PositionList>>> {
-        Ok(tokens
-            .iter()
-            .map(|token| (token.name.clone(), self.term_position.get(&token.name)))
-            .collect())
-    }
-
-    fn pharse_filter<'a>(&self, iters: &[PositionListIter<'a>], slop: i32) -> Option<usize> {
+    fn pharse_filter<'a>(&self, iters: &[PositionListIter], slop: i32) -> Option<usize> {
         let mut pre = iters[0].positions();
 
         for i in 1..iters.len() - 1 {
@@ -343,30 +371,19 @@ impl FulltextIndexReader {
         Some(pre.len())
     }
 
-    // pub fn score_count(
-    //     &self,
-    //     doc_id: u64,
-    //     tokens: &[Token],
-    //     term_doc: &HashMap<String, usize>,
-    //     avgdl: f32,
-    // ) -> f32 {
-    //     let doc_len = 200; //TODO: get doc len by doc_id
+    pub fn avgdl(&self) -> f32 {
+        self.total_term as f32 / (self.doc_count + 1) as f32
+    }
 
-    //     let mut score = 0.0;
-    //     for token in tokens {
-    //         if let Some(td) = term_doc.get(token.name.as_str()) {
-    //             score += self.bm25(
-    //                 p.tf((doc_id - self.start) as u32),
-    //                 *td,
-    //                 self.doc_count,
-    //                 doc_len,
-    //                 avgdl,
-    //             );
-    //         }
-    //     }
-
-    //     score
-    // }
+    pub(crate) fn tokens(
+        &self,
+        tokens: &[Token],
+    ) -> CoreResult<HashMap<String, Option<PositionList>>> {
+        Ok(tokens
+            .iter()
+            .map(|token| (token.name.clone(), self.term_position.get(&token.name)))
+            .collect())
+    }
 
     pub fn score_text(
         &self,
@@ -397,7 +414,7 @@ impl FulltextIndexReader {
         &self,
         doc_id: u64,
         tokens: &[Token],
-        term_position: &HashMap<String, PositionList>,
+        term_position: &HashMap<String, Arc<PositionList>>,
         avgdl: f32,
     ) -> f32 {
         let doc_len = 200; //TODO: get doc len by doc_id

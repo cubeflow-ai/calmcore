@@ -178,8 +178,7 @@ pub fn merge_del_history(data_path: &Path, dels: &Bitmap) -> CoreResult<()> {
 
 fn write_fulltext(path: &Path, reader: &MemSegmentReader) -> CoreResult<()> {
     let write_fulltext = |path: PathBuf, ft: &FulltextIndexReader| -> CoreResult<()> {
-        let dser: Box<dyn KVSerializer<String, Arc<RwLock<TermPosition>>>> =
-            Box::new(PositionSerializer::new());
+        let dser: Box<dyn KVSerializer<String, TermPosition>> = Box::new(PositionSerializer::new());
         let mut persist_tree = BTree::new(1024);
 
         let mut tpm = ft.term_position.clone_map().iter();

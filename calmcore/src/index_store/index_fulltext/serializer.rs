@@ -61,14 +61,14 @@ impl PositionSerializer {
     }
 }
 
-impl persist::KVSerializer<String, Arc<RwLock<TermPosition>>> for PositionSerializer {
+impl persist::KVSerializer<String, TermPosition> for PositionSerializer {
     fn serialize_key<'a>(&self, k: &'a String) -> Cow<'a, [u8]> {
         Cow::Borrowed(k.as_bytes())
     }
 
-    fn serialize_value<'a>(&self, v: &'a Arc<RwLock<TermPosition>>) -> Cow<'a, [u8]> {
+    fn serialize_value<'a>(&self, v: &'a TermPosition) -> Cow<'a, [u8]> {
         let arena = &mut *self.arena.lock().unwrap();
-        let bytes = v.read().unwrap().serializer(arena).unwrap();
+        let bytes = v.serializer(arena).unwrap();
         Cow::Owned(bytes.to_vec()) //TODO use ref
     }
 }

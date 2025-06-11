@@ -7,18 +7,18 @@ use croaring::Bitmap;
 use itertools::Itertools;
 use mem_btree::{Action, BTree, BatchWrite};
 
-use crate::{analyzer::Token, entity::TermPosition};
+use crate::{analyzer::Token, entity::TermPositionWriter};
 
-type ReleaseResult = BTree<String, Arc<RwLock<TermPosition>>>;
+type ReleaseResult = BTree<String, Arc<RwLock<TermPositionWriter>>>;
 
 pub struct Handler {
-    term_position: BTree<String, Arc<RwLock<TermPosition>>>,
+    term_position: BTree<String, Arc<RwLock<TermPositionWriter>>>,
     token_index_buffer: BTreeMap<String, Action<Bitmap>>,
-    term_position_buffer: BTreeMap<String, Action<Arc<RwLock<TermPosition>>>>,
+    term_position_buffer: BTreeMap<String, Action<Arc<RwLock<TermPositionWriter>>>>,
 }
 
 impl Handler {
-    pub fn new(term_position: BTree<String, Arc<RwLock<TermPosition>>>) -> Self {
+    pub fn new(term_position: BTree<String, Arc<RwLock<TermPositionWriter>>>) -> Self {
         Self {
             term_position,
             token_index_buffer: Default::default(),
@@ -59,7 +59,7 @@ impl Handler {
                         None => {
                             let offsets = tokens.iter().map(|t| t.index as u32).collect_vec();
                             let length = vec![offsets.len() as u16];
-                            let tp = TermPosition {
+                            let tp = TermPositionWriter {
                                 name: term.to_string(),
                                 ids: vec![id],
                                 offsets,

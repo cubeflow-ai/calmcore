@@ -22,7 +22,7 @@ use writer::Handler;
 
 use crate::{
     analyzer::Analyzer,
-    entity::{ArchivedTermPosition, TermPosition},
+    entity::{ArchivedTermPosition, TermPositionWriter},
     util::CoreResult,
 };
 
@@ -32,7 +32,7 @@ pub struct FulltextIndex {
     start: u64,
     inner: Arc<proto::core::Field>,
     analyzer: Arc<Analyzer>,
-    term_position: RwLock<BTree<String, Arc<RwLock<TermPosition>>>>,
+    term_position: RwLock<BTree<String, Arc<RwLock<TermPositionWriter>>>>,
     doc_count: AtomicU32,
     total_term: AtomicU64,
 }

@@ -8,7 +8,9 @@ use std::{
 use croaring::bitmap::BitmapIterator;
 use itertools::Itertools;
 
-use crate::{analyzer::Token, searcher::plan};
+use crate::{
+    analyzer::Token, index_store::index_fulltext::reader::PositionListIter, searcher::plan,
+};
 
 use super::index_fulltext::reader::{FulltextIndexReader, PositionList};
 
@@ -208,42 +210,6 @@ pub struct TextStream {
     score: f32,
 }
 
-struct PositionListIter {
-    inner: Arc<PositionList>,
-    index: usize,
-    len: usize,
-}
-
-impl PositionListIter {
-    fn next(&mut self, id: u32) -> Result<bool, u32> {
-        loop {
-            if self.index >= self.len {
-                return Ok(false);
-            }
-            let current_id = self.current_id();
-            if id > current_id {
-                self.index += 1;
-                continue;
-            } else if id == current_id {
-                return Ok(true);
-            } else {
-                return Err(current_id);
-            }
-        }
-    }
-
-    fn current_id(&self) -> u32 {
-        match &*self.inner {
-            PositionList::Memory(arc) => arc.read().unwrap().ids[self.index],
-            PositionList::Disk(archived) => archived.ids[self.index].to_native(),
-        }
-    }
-
-    fn end(&self) -> bool {
-        self.index >= self.len
-    }
-}
-
 impl Debug for TextStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TextStream")
@@ -272,11 +238,7 @@ impl TextStream {
         let iters = tokens
             .iter()
             .map(|token| match term_position.get(&token.name).cloned() {
-                Some(Some(inner)) => Some(PositionListIter {
-                    len: inner.len(),
-                    inner,
-                    index: 0,
-                }),
+                Some(Some(inner)) => Some(PositionListIter::new(inner)),
                 _ => None,
             })
             .collect();
@@ -374,9 +336,6 @@ impl HitStream for TextStream {
         } else {
             for (i, iter) in self.iters.iter_mut().enumerate() {
                 if let Some(iter) = iter {
-                    if iter.end() {
-                        continue;
-                    }
                     match iter.next(except_id) {
                         Ok(true) => {
                             self.buffer[i] = Some(except_id);
@@ -423,7 +382,7 @@ pub struct PhraseStream {
     reader: Arc<FulltextIndexReader>,
     boost: f32,
     tokens: Vec<Token>,
-    term_position: HashMap<String, PositionList>,
+    term_position: HashMap<String, Arc<PositionList>>,
     hits: Vec<u64>,
     index: AtomicUsize,
     value: Option<u64>,
@@ -437,7 +396,7 @@ impl PhraseStream {
         boost: f32,
         hits: Vec<u64>,
         tokens: Vec<Token>,
-        term_position: HashMap<String, PositionList>,
+        term_position: HashMap<String, Arc<PositionList>>,
     ) -> Self {
         let avgdl = reader.avgdl();
         Self {

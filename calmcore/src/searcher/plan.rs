@@ -126,10 +126,10 @@ pub enum PhysicsPlan {
     ),
     Phrase(
         Arc<FulltextIndexReader>,
-        f32,                           //boost
-        Vec<u64>,                      // hits
-        Vec<Token>,                    // tokens
-        HashMap<String, PositionList>, // term_position
+        f32,                                //boost
+        Vec<u64>,                           // hits
+        Vec<Token>,                         // tokens
+        HashMap<String, Arc<PositionList>>, // term_position
     ),
     Combin(Vec<PhysicsPlan>, LogicOperator),
 }
