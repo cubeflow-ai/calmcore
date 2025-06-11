@@ -56,19 +56,23 @@ impl Index {
     fn make_index(&self, source: BTree<u32, ObjectValue>) {
         std::thread::scope(|s| {
             s.spawn(|| {
+                let start = std::time::Instant::now();
                 self.index_term
                     .read()
                     .unwrap()
                     .par_iter()
                     .for_each(|(_, i)| i.write(&source));
+                println!("index_term write cost: {:?}", start.elapsed());
             });
 
             s.spawn(|| {
+                let start = std::time::Instant::now();
                 self.index_fulltext
                     .read()
                     .unwrap()
                     .par_iter()
                     .for_each(|(_, i)| i.write(&source));
+                println!("index_fulltext write cost: {:?}", start.elapsed());
             });
 
             s.spawn(|| {
@@ -88,6 +92,9 @@ impl Index {
     }
 
     fn index_job(&self, rx: mpsc::Receiver<Option<()>>) {
+        let start = std::time::Instant::now();
+
+        let mut i = 0;
         while let Ok(Some(_)) = rx.recv() {
             let split_index = (self.indexed.load(SeqCst) + 1) as u32;
             let tree = self
@@ -96,8 +103,14 @@ impl Index {
                 .unwrap()
                 .clone()
                 .split_off(&split_index);
+
+            i = i + 1;
+            println!("------------{}-------------------------{:?}", i, tree.len());
+
             self.make_index(tree);
         }
+
+        println!("-------------------------------------{:?}", start.elapsed());
         self.finish.store(true, SeqCst);
     }
 }

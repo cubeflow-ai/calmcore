@@ -77,7 +77,7 @@ impl Job {
 
     fn segment_job(self: Arc<Self>) {
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_secs(10));
             let engines = self.engines.read().unwrap().clone();
             for engine in engines {
                 if let Err(e) = Self::segment(
@@ -138,7 +138,7 @@ impl Job {
         for segment in iter {
             if let SegmentReader::Hot(reader) = segment {
                 if !reader.is_finish() {
-                    log::info!(
+                    log::debug!(
                         "engine:{} segment:{}-{} not finish so break",
                         engine_name,
                         reader.start,
