@@ -83,8 +83,6 @@ pub fn pos_write(path: PathBuf, data: &[u8]) -> CoreResult<()> {
 pub fn write_segment(store: &Store, reader: Arc<MemSegmentReader>) -> CoreResult<()> {
     let start = std::time::Instant::now();
 
-    println!("=====================1.");
-
     // // 1.create dir for segment
     let active_path = store
         .base_path()
@@ -106,25 +104,15 @@ pub fn write_segment(store: &Store, reader: Arc<MemSegmentReader>) -> CoreResult
     }
     std::fs::create_dir_all(&data_path)?;
 
-    println!("====================={:?}   1", start.elapsed());
-
     let version = serde_json::to_vec_pretty(&Version::new(reader.marker()))?;
-
-    println!("====================={:?}   2", start.elapsed());
 
     pos_write(data_path.join("version"), &version)?;
 
-    println!("====================={:?}   3", start.elapsed());
-
     write_del(&data_path, &reader)?;
-
-    println!("====================={:?}   4", start.elapsed());
 
     let start = std::time::Instant::now();
     write_name(&data_path, &reader)?;
     println!("write_name cost:{:?}", start.elapsed());
-
-    println!("====================={:?}   5", start.elapsed());
 
     let start = std::time::Instant::now();
     write_source(&data_path, &reader)?;

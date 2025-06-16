@@ -30,30 +30,26 @@ use super::{
 };
 
 pub(self) struct Index {
-    indexed: AtomicI32,
     source_store: Arc<RwLock<BTree<u32, ObjectValue>>>,
     name_store: RwLock<BTree<String, u32>>,
     index_term: RwLock<HashMap<String, Arc<TermIndex>>>,
     index_fulltext: RwLock<HashMap<String, Arc<FulltextIndex>>>,
     index_vector: RwLock<HashMap<String, Arc<VectorIndex>>>,
     marker: RwLock<Option<String>>,
-    finish: AtomicBool,
 }
 impl Index {
     fn new() -> Self {
         Self {
-            indexed: AtomicI32::new(-1),
             source_store: Arc::new(RwLock::new(BTree::new(32))),
             name_store: RwLock::new(BTree::new(32)),
             index_term: RwLock::new(HashMap::new()),
             index_fulltext: RwLock::new(HashMap::new()),
             index_vector: RwLock::new(HashMap::new()),
             marker: RwLock::new(None),
-            finish: AtomicBool::new(false),
         }
     }
 
-    fn make_index(&self, source: BTree<u32, ObjectValue>) {
+    fn make_index(&self, records: &[RecordWrapper]) {
         std::thread::scope(|s| {
             s.spawn(|| {
                 let start = std::time::Instant::now();
@@ -61,7 +57,7 @@ impl Index {
                     .read()
                     .unwrap()
                     .par_iter()
-                    .for_each(|(_, i)| i.write(&source));
+                    .for_each(|(_, i)| i.write(records));
                 println!("index_term write cost: {:?}", start.elapsed());
             });
 
@@ -71,7 +67,7 @@ impl Index {
                     .read()
                     .unwrap()
                     .par_iter()
-                    .for_each(|(_, i)| i.write(&source));
+                    .for_each(|(_, i)| i.write(records));
                 println!("index_fulltext write cost: {:?}", start.elapsed());
             });
 
@@ -81,37 +77,10 @@ impl Index {
                     .unwrap()
                     .par_iter()
                     .for_each(|(_, i)| {
-                        i.write(&source);
+                        i.write(records);
                     });
             });
         });
-
-        if let Some(v) = source.max() {
-            self.indexed.store(v.0 as i32, SeqCst);
-        }
-    }
-
-    fn index_job(&self, rx: mpsc::Receiver<Option<()>>) {
-        let start = std::time::Instant::now();
-
-        let mut i = 0;
-        while let Ok(Some(_)) = rx.recv() {
-            let split_index = (self.indexed.load(SeqCst) + 1) as u32;
-            let tree = self
-                .source_store
-                .read()
-                .unwrap()
-                .clone()
-                .split_off(&split_index);
-
-            i = i + 1;
-            println!("------------{}-------------------------{:?}", i, tree.len());
-
-            self.make_index(tree);
-        }
-
-        println!("-------------------------------------{:?}", start.elapsed());
-        self.finish.store(true, SeqCst);
     }
 }
 
@@ -122,7 +91,6 @@ pub struct MemSegment {
     dels: RwLock<Bitmap>,
     dels_history: RwLock<Bitmap64>,
     index: Arc<Index>,
-    tx: mpsc::Sender<Option<()>>,
     created_at: std::time::Instant,
 }
 
@@ -159,8 +127,6 @@ impl MemSegment {
             )));
         }
 
-        let (tx, rx) = std::sync::mpsc::channel();
-
         let mut segment = MemSegment {
             start,
             end: AtomicU64::new(start),
@@ -169,17 +135,9 @@ impl MemSegment {
             dels_history: RwLock::new(Default::default()),
             index: Arc::new(Index::new()),
             created_at: std::time::Instant::now(),
-            tx,
         };
 
         segment.index_field()?;
-
-        let index = segment.index.clone();
-        std::thread::spawn(move || {
-            log::debug!("index start:{}", start);
-            index.index_job(rx);
-            log::debug!("index:{} end indexed:{}", start, index.indexed.load(SeqCst));
-        });
 
         Ok(segment)
     }
@@ -241,12 +199,31 @@ impl MemSegment {
         marker: Option<String>,
     ) -> Vec<CoreError> {
         if records.is_empty() && max == 0 && marker.is_none() {
-            // no need to write the segment is end
-            if let Err(e) = self.tx.send(None) {
-                log::error!("end send error: {:?}", e);
-            }
             return vec![];
         }
+
+        self.index
+            .index_term
+            .read()
+            .unwrap()
+            .par_iter()
+            .for_each(|(_, i)| i.write(&records));
+
+        self.index
+            .index_fulltext
+            .read()
+            .unwrap()
+            .par_iter()
+            .for_each(|(_, i)| i.write(&records));
+
+        self.index
+            .index_vector
+            .read()
+            .unwrap()
+            .par_iter()
+            .for_each(|(_, i)| {
+                i.write(&records);
+            });
 
         let to_value = |value| {
             let value: Value = value?;
@@ -298,10 +275,6 @@ impl MemSegment {
         }
 
         self.end.store(max, SeqCst);
-
-        if let Err(e) = self.tx.send(Some(())) {
-            log::error!("write send error: {:?}", e);
-        }
 
         results
     }
@@ -530,9 +503,5 @@ impl MemSegmentReader {
 
     pub fn marker(&self) -> Option<String> {
         self.index.marker.read().unwrap().clone()
-    }
-
-    pub fn is_finish(&self) -> bool {
-        self.index.finish.load(SeqCst)
     }
 }

@@ -13,7 +13,6 @@ type ReleaseResult = BTree<String, Arc<RwLock<TermPositionWriter>>>;
 
 pub struct Handler {
     term_position: BTree<String, Arc<RwLock<TermPositionWriter>>>,
-    token_index_buffer: BTreeMap<String, Action<Bitmap>>,
     term_position_buffer: BTreeMap<String, Action<Arc<RwLock<TermPositionWriter>>>>,
 }
 
@@ -21,7 +20,6 @@ impl Handler {
     pub fn new(term_position: BTree<String, Arc<RwLock<TermPositionWriter>>>) -> Self {
         Self {
             term_position,
-            token_index_buffer: Default::default(),
             term_position_buffer: Default::default(),
         }
     }

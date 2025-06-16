@@ -137,16 +137,6 @@ impl Job {
 
         for segment in iter {
             if let SegmentReader::Hot(reader) = segment {
-                if !reader.is_finish() {
-                    log::debug!(
-                        "engine:{} segment:{}-{} not finish so break",
-                        engine_name,
-                        reader.start,
-                        reader.end
-                    );
-                    break;
-                }
-
                 log::info!(
                     "engine:{} segment:{}-{} to persist",
                     engine_name,

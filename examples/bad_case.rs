@@ -24,7 +24,7 @@ pub fn main() -> CoreResult<()> {
     let schema = make_schema(schema_name);
     let core = CalmCore::new_with_conf(Config {
         data_path: data_path.to_string(),
-        segment_max_size: 500_000,
+        segment_max_size: 50_000,
         flush_interval_secs: 300,
     })?;
 
@@ -37,15 +37,22 @@ pub fn main() -> CoreResult<()> {
 
     let reader = BufReader::new(file);
 
+    let batch_size = 5000;
+
+    let mut batch = Vec::with_capacity(batch_size);
+
     for (index, line_result) in reader.lines().enumerate() {
         let line = line_result.unwrap();
 
         // 为每个文档创建一个唯一的 ID，这里使用行号作为示例
         let doc_id = (index + 1).to_string();
-        space.mutate(
-            vec![Action::new(ActionType::Append, &doc_id, line.as_bytes())],
-            None,
-        )?;
+
+        if batch.len() >= batch_size {
+            space.mutate(batch, None)?;
+            batch = Vec::with_capacity(batch_size);
+        } else {
+            batch.push(Action::new(ActionType::Append, &doc_id, line.as_bytes()));
+        }
 
         if index != 0 && index % 100_000 == 0 {
             println!("Processed {} lines", index);
