@@ -25,3 +25,4 @@ Cargo.lock
 .vscode/
 validate_data/
 big_data/
+.DS_Store

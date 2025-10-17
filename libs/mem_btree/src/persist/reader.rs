@@ -84,7 +84,7 @@ impl<K, V> TreeReader<K, V> {
             .collect()
     }
 
-    pub fn iter(&self) -> Result<Iter<K, V>> {
+    pub fn iter(&self) -> Result<Iter<'_, K, V>> {
         Iter::new(self)
     }
 

@@ -61,4 +61,11 @@ where
     pub fn into_map(self) -> BTreeMap<K, Action<V>> {
         self.inner
     }
+
+    pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
+        match self.inner.get_mut(&key) {
+            Some(Action::Put(v, _)) => Some(v),
+            _ => None,
+        }
+    }
 }
