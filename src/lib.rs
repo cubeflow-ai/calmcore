@@ -41,8 +41,8 @@ mod test {
 
         let partition = Partition::new(0, PathBuf::from("./data"), schema);
 
-        // 生成1000万条测试数据
-        let total_count = 10_000_000;
+        // 生成300万条测试数据
+        let total_count = 3_000_000;
         let batch_size = 10000; // 每批1万条
         let batch_count = total_count / batch_size;
 

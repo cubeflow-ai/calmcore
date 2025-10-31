@@ -629,6 +629,44 @@ where
         self.root.mget(k)
     }
 
+    /// Find the largest key-value pair where key <= given key (floor lookup)
+    /// This is useful for finding the RecordBatch containing a specific doc_id
+    ///
+    /// # Examples
+    /// ```rust
+    /// use mem_btree::BTree;
+    /// let mut btree = BTree::new(32);
+    /// btree.put(1, "batch1");
+    /// btree.put(100, "batch2");
+    /// btree.put(200, "batch3");
+    ///
+    /// // Query doc_id 50 should return batch at key 1
+    /// assert_eq!(btree.floor(&50).map(|item| item.0), Some(&1));
+    /// // Query doc_id 150 should return batch at key 100
+    /// assert_eq!(btree.floor(&150).map(|item| item.0), Some(&100));
+    /// // Query doc_id 1 should return exact match
+    /// assert_eq!(btree.floor(&1).map(|item| item.0), Some(&1));
+    /// // Query doc_id 0 should return None (no key <= 0)
+    /// assert_eq!(btree.floor(&0), None);
+    /// ```
+    pub fn floor(&self, key: &K) -> Option<Item<K, V>>
+    where
+        K: Clone,
+        V: Clone,
+    {
+        if self.root.len() == 0 {
+            return None;
+        }
+
+        // Use an iterator and seek_prev to find floor
+        let mut iter = self.iter();
+        iter.seek_prev(key);
+
+        // seek_prev positions us at key or just before it
+        // prev() will give us the largest key <= target
+        iter.prev()
+    }
+
     /// Get the number of key-value pairs in the B-tree
     /// # Examples
     /// ```rust

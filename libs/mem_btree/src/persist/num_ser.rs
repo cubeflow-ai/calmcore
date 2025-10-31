@@ -100,6 +100,32 @@ pub mod i64_coder {
     use crate::persist::zigzag::{self, BufferRead};
     use std::io::Write;
 
+    pub fn write_delta<W: Write>(writer: &mut W, values: &[i64]) -> std::io::Result<()> {
+        zigzag::write_u32(values.len() as u32, writer)?;
+        if values.len() == 0 {
+            return Ok(());
+        }
+        //writer first value
+        zigzag::write_i64(values[0], writer)?;
+        for i in 1..values.len() {
+            zigzag::write_i64(values[i] - values[i - 1], writer)?;
+        }
+        Ok(())
+    }
+
+    pub fn read_delta<B: BufferRead>(buf: &B) -> Vec<i64> {
+        let mut pos = 0;
+        let len = zigzag::read_u32(buf, &mut pos);
+        let mut value = zigzag::read_i64(buf, &mut pos);
+        let mut result = Vec::with_capacity(len as usize);
+        result.push(value);
+        for _ in 1..len {
+            value = zigzag::read_i64(buf, &mut pos) + value;
+            result.push(value);
+        }
+        result
+    }
+
     pub fn write<W: Write>(writer: &mut W, values: &[i64]) -> std::io::Result<()> {
         match super::guess_type(values).unwrap_or(CUSTOM) {
             SAME => {
@@ -231,6 +257,7 @@ where
 }
 
 mod test {
+    use crate::persist::num_ser::{i64_coder, u16_coder};
 
     #[test]
     fn test_guess_type() {

@@ -87,6 +87,15 @@ impl BufferRead for [u8] {
     }
 }
 
+impl BufferRead for &[u8] {
+    fn get_byte(&self, pos: usize) -> u8 {
+        self[pos]
+    }
+    fn size(&self) -> usize {
+        self.len()
+    }
+}
+
 impl BufferRead for Vec<u8> {
     fn get_byte(&self, pos: usize) -> u8 {
         self[pos]

@@ -1,5 +1,6 @@
 pub mod field;
 
+#[derive(Clone)]
 pub struct Schema {
     pub name: String,
     pub primary_key: Option<String>,

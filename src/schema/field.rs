@@ -1,9 +1,13 @@
 #[derive(Debug, Clone)]
 pub enum FieldType {
     Keyword,
+    F32,
+    F64,
+    I32,
+    I64,
+    U32,
+    U64,
     // Text,
-    // Integer,
-    // Float,
     // Boolean,
     // Date,
     // GeoPoint,
