@@ -20,48 +20,59 @@ pub enum FieldOption {
         index: bool,
         is_array: bool,
     },
-    // Text(Arc<TextField>),
-    // Integer(Arc<IntegerField>),
-    // Float(Arc<FloatField>),
-    // Boolean(Arc<BooleanField>),
-    // Date(Arc<DateField>),
-    // GeoPoint(Arc<GeoPointField>),
+    I32 {
+        name: String,
+        index: bool,
+    },
+    I64 {
+        name: String,
+        index: bool,
+    },
+    U32 {
+        name: String,
+        index: bool,
+    },
+    F32 {
+        name: String,
+        index: bool,
+    },
+    F64 {
+        name: String,
+        index: bool,
+    },
 }
 
 impl FieldOption {
     pub fn name(&self) -> &str {
         match self {
             FieldOption::Keyword { name, .. } => name,
-            // FieldOption::Text(field) => &field.name,
-            // FieldOption::Integer(field) => &field.name,
-            // FieldOption::Float(field) => &field.name,
-            // FieldOption::Boolean(field) => &field.name,
-            // FieldOption::Date(field) => &field.name,
-            // FieldOption::GeoPoint(field) => &field.name,
+            FieldOption::I32 { name, .. } => name,
+            FieldOption::I64 { name, .. } => name,
+            FieldOption::U32 { name, .. } => name,
+            FieldOption::F32 { name, .. } => name,
+            FieldOption::F64 { name, .. } => name,
         }
     }
 
     pub fn is_index(&self) -> bool {
         match self {
             FieldOption::Keyword { index, .. } => *index,
-            // FieldOption::Text(field) => field.index,
-            // FieldOption::Integer(field) => field.index,
-            // FieldOption::Float(field) => field.index,
-            // FieldOption::Boolean(field) => field.index,
-            // FieldOption::Date(field) => field.index,
-            // FieldOption::GeoPoint(field) => field.index,
+            FieldOption::I32 { index, .. } => *index,
+            FieldOption::I64 { index, .. } => *index,
+            FieldOption::U32 { index, .. } => *index,
+            FieldOption::F32 { index, .. } => *index,
+            FieldOption::F64 { index, .. } => *index,
         }
     }
 
     pub fn is_array(&self) -> bool {
         match self {
             FieldOption::Keyword { is_array, .. } => *is_array,
-            // FieldOption::Text(field) => field.is_array,
-            // FieldOption::Integer(field) => field.is_array,
-            // FieldOption::Float(field) => field.is_array,
-            // FieldOption::Boolean(field) => field.is_array,
-            // FieldOption::Date(field) => field.is_array,
-            // FieldOption::GeoPoint(field) => field.is_array,
+            FieldOption::I32 { .. } => false, // 数值类型不支持数组
+            FieldOption::I64 { .. } => false,
+            FieldOption::U32 { .. } => false,
+            FieldOption::F32 { .. } => false,
+            FieldOption::F64 { .. } => false,
         }
     }
 }

@@ -5,7 +5,10 @@ use std::{
 };
 
 use arrow::array::{ArrayRef, ListArray, RecordBatch, StringArray, UInt32Array};
-use roaring::RoaringBitmap;
+use byteorder::WriteBytesExt;
+use mem_btree::persist::{num_ser, zigzag};
+use rayon::result;
+use roaring::{treemap::BitmapIter, RoaringBitmap};
 
 use crate::{
     arrow_downcast,
@@ -29,10 +32,11 @@ impl Keyword {
     }
 
     /// Create a Keyword from disk-based inverted index
-    pub fn from_disk(
-        field: &FieldOption,
-        inverted_index: InvertedIndex<String>,
-    ) -> CoreResult<Self> {
+    pub fn from_disk(field: &FieldOption, field_path: &str) -> CoreResult<Self> {
+        // Create disk-based Keyword
+        let inverted_index =
+            InvertedIndex::new_disk(&field_path, StringRoaringSerializer::default())?;
+
         Ok(Self {
             field: field.clone(),
             indexs: RwLock::new(inverted_index),
@@ -217,6 +221,111 @@ impl PkWriter for Keyword {
         *self.indexs.write().unwrap() = indexs;
 
         Ok(cur_dels)
+    }
+}
+
+struct KeywordIdsSerializer {
+    zstd_level: i32,
+}
+
+impl KeywordIdsSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+
+    pub fn default() -> Self {
+        Self { zstd_level: 3 }
+    }
+}
+
+impl mem_btree::persist::KeySerializer<String, Vec<u32>, RoaringBitmap> for KeywordIdsSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<String>) -> CoreResult<Vec<u8>> {
+        let mut uncompressed = Vec::new();
+
+        // 写入key的个数
+        uncompressed.write_u16::<byteorder::BigEndian>(keys.len() as u16)?;
+
+        // 写入每个key
+        for key in keys {
+            let key_bytes = key.as_bytes();
+            zigzag::write_u32(&mut uncompressed, key_bytes.len() as i32)?;
+            uncompressed.extend_from_slice(key_bytes);
+        }
+
+        Ok(zstd::encode_all(&uncompressed[..], self.zstd_level))
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> CoreResult<Vec<String>> {
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
+        let data_to_parse = zstd::decode_all(data)?;
+        let mut result = Vec::new();
+        let mut pos = 0;
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        pos += 2;
+        for _ in 0..key_count {
+            if pos >= data_to_parse.len() {
+                break;
+            }
+
+            // 读取key的长度（zigzag编码）
+            let len = zigzag::read_u32(&data_to_parse[pos..], &mut pos) as usize;
+
+            if pos + len > data_to_parse.len() {
+                break;
+            }
+
+            // 读取key的内容
+            match String::from_utf8(data_to_parse[pos..pos + len].to_vec()) {
+                Ok(key) => result.push(key),
+                Err(_) => break,
+            }
+            pos += len;
+        }
+        Ok(result)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a Vec<u32>) -> CoreResult<std::borrow::Cow<'a, [u8]>> {
+        let mut result = Vec::new();
+        if value.len() < 1000 {
+            result.push(0); // 标记0：delta编码
+            num_ser::u32_coder::write_delta(&mut result, value)?;
+        } else {
+            result.push(1); // 标记1：RoaringBitmap原生序列化
+            let rb = RoaringBitmap::from_iter(value.iter().copied());
+            rb.serialize_into(&mut result)?;
+        }
+        Ok(std::borrow::Cow::Owned(result))
+    }
+
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        if data.is_empty() {
+            return Ok(RoaringBitmap::new());
+        }
+
+        let marker = data[0];
+        let mut data_slice = &data[1..];
+
+        match marker {
+            0 => {
+                // delta编码
+                let ids = num_ser::u32_coder::read_delta(&data_slice);
+                Ok(RoaringBitmap::from_iter(ids))
+            }
+            1 => {
+                // RoaringBitmap原生序列化
+                RoaringBitmap::deserialize_from(&mut data_slice)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            }
+            _ => Err(Box::new(CoreError::Internal(format!(
+                "Unknown marker byte for value deserialization: {}",
+                marker
+            )))),
+        }
     }
 }
 

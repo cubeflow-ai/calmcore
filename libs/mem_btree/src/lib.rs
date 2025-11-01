@@ -641,11 +641,11 @@ where
     /// btree.put(200, "batch3");
     ///
     /// // Query doc_id 50 should return batch at key 1
-    /// assert_eq!(btree.floor(&50).map(|item| item.0), Some(&1));
+    /// assert_eq!(btree.floor(&50).map(|item| item.0), Some(1));
     /// // Query doc_id 150 should return batch at key 100
-    /// assert_eq!(btree.floor(&150).map(|item| item.0), Some(&100));
+    /// assert_eq!(btree.floor(&150).map(|item| item.0), Some(100));
     /// // Query doc_id 1 should return exact match
-    /// assert_eq!(btree.floor(&1).map(|item| item.0), Some(&1));
+    /// assert_eq!(btree.floor(&1).map(|item| item.0), Some(1));
     /// // Query doc_id 0 should return None (no key <= 0)
     /// assert_eq!(btree.floor(&0), None);
     /// ```

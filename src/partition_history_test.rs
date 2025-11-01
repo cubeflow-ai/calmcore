@@ -63,7 +63,15 @@ mod history_delete_tests {
                 )
                 .unwrap();
 
-                segment.write(&data, None, None, &RwLock::new(())).unwrap();
+                segment
+                    .write(
+                        &data,
+                        None,
+                        None,
+                        &RwLock::new(()),
+                        crate::segment::FieldIndexMode::Sync,
+                    )
+                    .unwrap();
             }
             println!("  Segment {}: 写入 50 条记录", seg_idx);
         }

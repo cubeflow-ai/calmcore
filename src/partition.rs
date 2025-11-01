@@ -15,7 +15,7 @@ use crate::{
 };
 
 // pk_index, segments , dele_info
-pub(crate) struct WriteInfo(pub Vec<Arc<Segment>>, pub Vec<(usize, Vec<u32>)>);
+pub struct WriteInfo(pub Vec<Arc<Segment>>, pub Vec<(usize, Vec<u32>)>);
 
 pub struct Partition {
     id: u64,
@@ -30,10 +30,21 @@ pub struct Partition {
     read_lock: RwLock<()>,
     write_lock: Mutex<()>,
     segment_id_counter: AtomicU64,
+    // 非主键字段的索引模式
+    index_mode: crate::segment::FieldIndexMode,
 }
 
 impl Partition {
     pub fn new(id: u32, base_dir: PathBuf, schema: Schema) -> Self {
+        Self::new_with_mode(id, base_dir, schema, crate::segment::FieldIndexMode::Sync)
+    }
+
+    pub fn new_with_mode(
+        id: u32,
+        base_dir: PathBuf,
+        schema: Schema,
+        index_mode: crate::segment::FieldIndexMode,
+    ) -> Self {
         let schema = Arc::new(schema);
         Partition {
             id: id as u64,
@@ -44,6 +55,7 @@ impl Partition {
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
             segment_id_counter: AtomicU64::new(0),
+            index_mode,
         }
     }
 
@@ -338,6 +350,7 @@ impl Partition {
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
             segment_id_counter: AtomicU64::new(deprecated_counter),
+            index_mode: crate::segment::FieldIndexMode::Sync,
         })
     }
 
@@ -349,7 +362,7 @@ impl Partition {
     ) -> CoreResult<Vec<u64>> {
         let current_segment = self.current_segment.read().unwrap();
         current_segment
-            .write(data, pk_hash, info, &self.read_lock)
+            .write(data, pk_hash, info, &self.read_lock, self.index_mode)
             .map(|ids| {
                 ids.into_iter()
                     .map(|v| v as u64 + current_segment.start)
@@ -394,40 +407,131 @@ mod tests {
             primary_key: Some("id".to_string()),
             store_source: false,
             fields: vec![
+                // 主键
                 FieldOption::Keyword {
                     name: "id".to_string(),
                     index: true,
                     is_array: false,
                 },
+                // 文本类型字段
                 FieldOption::Keyword {
                     name: "name".to_string(),
                     index: true,
                     is_array: false,
+                },
+                FieldOption::Keyword {
+                    name: "url".to_string(),
+                    index: true,
+                    is_array: false,
+                },
+                FieldOption::Keyword {
+                    name: "tags".to_string(),
+                    index: true,
+                    is_array: true, // 数组类型
+                },
+                // 数值字段
+                FieldOption::I32 {
+                    name: "age".to_string(),
+                    index: true,
+                },
+                FieldOption::I64 {
+                    name: "timestamp".to_string(),
+                    index: true,
+                },
+                FieldOption::F32 {
+                    name: "score".to_string(),
+                    index: true,
+                },
+                FieldOption::F64 {
+                    name: "price".to_string(),
+                    index: true,
+                },
+                FieldOption::U32 {
+                    name: "status".to_string(),
+                    index: true,
                 },
             ],
         }
     }
 
     fn create_test_batch(start: i32, count: i32) -> RecordBatch {
+        use arrow::array::{Float32Array, Float64Array, Int32Array, Int64Array, UInt32Array};
+
+        // ID 列
         let ids = StringArray::from(
             (start..start + count)
                 .map(|i| format!("id_{}", i))
                 .collect::<Vec<_>>(),
         );
+
+        // 名字列
         let names = StringArray::from(
             (start..start + count)
                 .map(|i| format!("name_{}", i))
                 .collect::<Vec<_>>(),
         );
 
+        // URL 列
+        let urls = StringArray::from(
+            (start..start + count)
+                .map(|i| format!("https://example.com/item/{}", i))
+                .collect::<Vec<_>>(),
+        );
+
+        // 标签数组列 (每条记录3个标签)
+        let tags = StringArray::from(
+            (start..start + count)
+                .map(|i| {
+                    let tag1 = format!("tag{}_{}", i % 10, 1);
+                    let tag2 = format!("tag{}_{}", i % 10, 2);
+                    let tag3 = format!("tag{}_{}", i % 10, 3);
+                    format!("{},{},{}", tag1, tag2, tag3)
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        // 数值字段
+        let age = Int32Array::from_iter_values(
+            (start..start + count).map(|i| i % 100), // 0-99 循环
+        );
+        let timestamp = Int64Array::from_iter_values(
+            (start..start + count).map(|i| i as i64 * 1000), // 毫秒时间戳
+        );
+        let score = Float32Array::from_iter_values(
+            (start..start + count).map(|i| (i % 100) as f32 / 10.0), // 0.0-9.9
+        );
+        let price = Float64Array::from_iter_values(
+            (start..start + count).map(|i| (i % 1000) as f64 + 0.99), // 0.99-999.99
+        );
+        let status = UInt32Array::from_iter_values(
+            (start..start + count).map(|i| (i % 5) as u32), // 0-4 状态码
+        );
+
         let schema = ArrowSchema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("name", DataType::Utf8, false),
+            Field::new("url", DataType::Utf8, false),
+            Field::new("tags", DataType::Utf8, false),
+            Field::new("age", DataType::Int32, false),
+            Field::new("timestamp", DataType::Int64, false),
+            Field::new("score", DataType::Float32, false),
+            Field::new("price", DataType::Float64, false),
+            Field::new("status", DataType::UInt32, false),
         ]);
 
         RecordBatch::try_new(
             StdArc::new(schema),
-            vec![StdArc::new(ids), StdArc::new(names)],
+            vec![
+                StdArc::new(ids),
+                StdArc::new(names),
+                StdArc::new(urls),
+                StdArc::new(tags),
+                StdArc::new(age),
+                StdArc::new(timestamp),
+                StdArc::new(score),
+                StdArc::new(price),
+                StdArc::new(status),
+            ],
         )
         .unwrap()
     }
@@ -543,6 +647,99 @@ mod tests {
 
     #[test]
     fn test_auto_persist_unpersisted_segments() {
+        let temp_dir = std::env::temp_dir().join("calmcore_auto_persist_test");
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        println!("\n========================================");
+        println!("   自动持久化未持久化 Segments 测试");
+        println!("========================================\n");
+
+        let schema = create_test_schema();
+        let partition = Partition::new(1, temp_dir.clone(), schema);
+
+        // 1. 写入多批数据并 flush
+        println!("【1】写入并 flush 多个 segments");
+        for i in 0..3 {
+            let batch = create_test_batch(i * 100, 100);
+            partition.upsert(batch).unwrap();
+            let seg_id = partition.flush().unwrap();
+            println!("  Segment {} flushed (内存中)", seg_id);
+        }
+
+        // 2. 验证所有 segments 都未持久化
+        println!("\n【2】检查未持久化 segments");
+        let unpersisted = partition.get_unpersisted_segments();
+        println!("  未持久化 segments: {}", unpersisted.len());
+        assert_eq!(unpersisted.len(), 3);
+
+        for (seg_id, segment) in &unpersisted {
+            println!(
+                "    Segment {} - is_persisted: {}",
+                seg_id,
+                segment.is_persisted()
+            );
+            assert!(!segment.is_persisted());
+        }
+
+        // 3. 自动持久化所有未持久化的 segments
+        println!("\n【3】自动持久化未持久化 segments");
+        let persisted_ids = partition.persist_unpersisted_segments().unwrap();
+        println!(
+            "  成功持久化 {} 个 segments: {:?}",
+            persisted_ids.len(),
+            persisted_ids
+        );
+        assert_eq!(persisted_ids.len(), 3);
+
+        // 4. 验证所有 segments 已持久化
+        println!("\n【4】验证所有 segments 已持久化");
+        let unpersisted_after = partition.get_unpersisted_segments();
+        println!("  剩余未持久化 segments: {}", unpersisted_after.len());
+        assert_eq!(unpersisted_after.len(), 0);
+
+        // 验证每个 segment 的持久化状态
+        let frozen = partition.frozen_segments.read().unwrap();
+        for (seg_id, segment) in frozen.iter() {
+            println!(
+                "    Segment {} - is_persisted: {}",
+                seg_id,
+                segment.is_persisted()
+            );
+            assert!(segment.is_persisted());
+        }
+
+        // 5. 再次调用自动持久化（幂等）
+        println!("\n【5】再次调用自动持久化（应该为空）");
+        let persisted_again = partition.persist_unpersisted_segments().unwrap();
+        println!("  持久化 segments: {}", persisted_again.len());
+        assert_eq!(persisted_again.len(), 0);
+
+        // 6. 写入新数据并测试增量持久化
+        println!("\n【6】写入新数据并增量持久化");
+        let batch = create_test_batch(300, 50);
+        partition.upsert(batch).unwrap();
+        let seg_id = partition.flush().unwrap();
+        println!("  新 Segment {} flushed", seg_id);
+
+        let unpersisted_new = partition.get_unpersisted_segments();
+        println!("  新增未持久化 segments: {}", unpersisted_new.len());
+        assert_eq!(unpersisted_new.len(), 1);
+
+        partition.persist_unpersisted_segments().unwrap();
+        let unpersisted_final = partition.get_unpersisted_segments();
+        println!("  持久化后剩余: {}", unpersisted_final.len());
+        assert_eq!(unpersisted_final.len(), 0);
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+        println!("\n✅ 自动持久化测试通过!");
+    }
+
+    #[test]
+    fn test_partition_write_modes_sync_vs_async() {
         let temp_dir = std::env::temp_dir().join("calmcore_auto_persist_test");
         if temp_dir.exists() {
             std::fs::remove_dir_all(&temp_dir).unwrap();
@@ -877,19 +1074,22 @@ mod tests {
 
         // 统计Parquet文件数量
         let rowdata_path = segment_path.join("rowdata");
-        let parquet_count = std::fs::read_dir(&rowdata_path)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s == "parquet")
-                    .unwrap_or(false)
-            })
-            .count();
+        let parquet_count = if rowdata_path.exists() {
+            std::fs::read_dir(&rowdata_path)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s == "parquet")
+                        .unwrap_or(false)
+                })
+                .count()
+        } else {
+            0
+        };
         println!("  Parquet文件数: {} (每文件100条记录)", parquet_count);
-        println!();
 
         // ===== 查询性能测试 =====
         println!("【5】查询性能测试");
@@ -938,9 +1138,10 @@ mod tests {
         );
         println!("========================================\n");
 
+        // 最后再清理目录
+        println!("✅ 300万数据性能测试完成!");
         // Cleanup
         std::fs::remove_dir_all(&temp_dir).unwrap();
-        println!("✅ 1000万数据性能测试完成!");
     }
 
     #[test]
@@ -1160,7 +1361,15 @@ mod tests {
                 )
                 .unwrap();
 
-                segment.write(&data, None, None, &RwLock::new(())).unwrap();
+                segment
+                    .write(
+                        &data,
+                        None,
+                        None,
+                        &RwLock::new(()),
+                        crate::segment::FieldIndexMode::Sync,
+                    )
+                    .unwrap();
             }
             println!("  Segment {}: 写入 50 条记录", seg_idx);
         }

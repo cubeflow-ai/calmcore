@@ -7,40 +7,17 @@ use std::{
 use arrow::array::{ArrayRef, Int64Array, ListArray, RecordBatch, UInt32Array};
 use roaring::RoaringBitmap;
 
+use super::{IndexWriter, InvertedIndex, PkWriter};
 use crate::{
     arrow_downcast,
     partition::WriteInfo,
     schema::field::{FieldOption, FieldType},
-    segment::field_store::{IndexWriter, InvertedIndex, PkWriter},
     utils::error::{CoreError, CoreResult},
 };
 
 pub struct NumI64 {
     field: FieldOption,
-    indexs: RwLock<InvertedIndex<I64Key>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct I64Key(pub i64);
-
-impl I64Key {
-    pub fn to_memcomparable(&self) -> [u8; 8] {
-        let bits = self.0 as u64;
-        let encoded = bits ^ 0x8000000000000000;
-        encoded.to_be_bytes()
-    }
-
-    pub fn from_memcomparable(bytes: [u8; 8]) -> Self {
-        let encoded = u64::from_be_bytes(bytes);
-        let bits = encoded ^ 0x8000000000000000;
-        I64Key(bits as i64)
-    }
-}
-
-impl std::fmt::Display for I64Key {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
+    indexs: RwLock<InvertedIndex<i64>>,
 }
 
 impl NumI64 {
@@ -51,10 +28,7 @@ impl NumI64 {
         }
     }
 
-    pub fn from_disk(
-        field: &FieldOption,
-        inverted_index: InvertedIndex<I64Key>,
-    ) -> CoreResult<Self> {
+    pub fn from_disk(field: &FieldOption, inverted_index: InvertedIndex<i64>) -> CoreResult<Self> {
         Ok(Self {
             field: field.clone(),
             indexs: RwLock::new(inverted_index),
@@ -62,7 +36,6 @@ impl NumI64 {
     }
 
     pub fn persist(&self, path: &str) -> CoreResult<Self> {
-        use super::I64RoaringSerializer;
         use mem_btree::persist::TreeWriter;
 
         let memory_index = self.indexs.read().unwrap();
@@ -103,7 +76,7 @@ impl IndexWriter for NumI64 {
             return Ok(());
         };
 
-        let mut mtp: HashMap<I64Key, Vec<u32>> = HashMap::new();
+        let mut mtp: HashMap<i64, Vec<u32>> = HashMap::new();
 
         if self.field.is_array() {
             for (a, id) in arrow_downcast!(arr, ListArray)
@@ -112,7 +85,7 @@ impl IndexWriter for NumI64 {
             {
                 if let (Some(a), Some(id)) = (a, id) {
                     for v in arrow_downcast!(a, Int64Array).iter().flatten() {
-                        let key = I64Key(v);
+                        let key = v;
                         if let Some(list) = mtp.get_mut(&key) {
                             if list.last() != Some(&id) {
                                 list.push(id);
@@ -129,7 +102,7 @@ impl IndexWriter for NumI64 {
                 .zip(arrow_downcast!(data.column(0), UInt32Array).iter())
             {
                 if let (Some(v), Some(id)) = (a, id) {
-                    let key = I64Key(v);
+                    let key = v;
                     if let Some(list) = mtp.get_mut(&key) {
                         if list.last() != Some(&id) {
                             list.push(id);
@@ -185,7 +158,7 @@ impl PkWriter for NumI64 {
             ))
         })?;
 
-        let mut mtp: HashMap<I64Key, Vec<u32>> = HashMap::new();
+        let mut mtp: HashMap<i64, Vec<u32>> = HashMap::new();
         let internal_id_array = arrow_downcast!(data.column(0), UInt32Array);
 
         for (a, id) in arrow_downcast!(pk, Int64Array)
@@ -193,7 +166,7 @@ impl PkWriter for NumI64 {
             .zip(internal_id_array.iter())
         {
             if let (Some(v), Some(id)) = (a, id) {
-                let key = I64Key(v);
+                let key = v;
                 if let Some(list) = mtp.get_mut(&key) {
                     if !list.is_empty() {
                         cur_dels.extend(list.clone());
@@ -225,5 +198,96 @@ impl PkWriter for NumI64 {
         }
 
         Ok(cur_dels)
+    }
+}
+
+/// Serializer for I64Key with RoaringBitmap values
+#[derive(Clone)]
+pub struct I64RoaringSerializer {
+    _zstd_level: i32,
+}
+
+impl I64RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self {
+            _zstd_level: zstd_level,
+        }
+    }
+
+    pub fn default() -> Self {
+        Self { _zstd_level: 3 }
+    }
+}
+
+impl mem_btree::persist::KeySerializer<i64, RoaringBitmap, RoaringBitmap> for I64RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<i64>) -> std::borrow::Cow<'a, [u8]> {
+        use mem_btree::persist::num_ser::i64_coder;
+        let mut buf = Vec::new();
+        // Keys are strictly sorted; use delta encoding
+        i64_coder::write_delta(&mut buf, keys).expect("Failed to serialize i64 keys");
+        std::borrow::Cow::Owned(buf)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i64> {
+        use mem_btree::persist::num_ser::i64_coder;
+        let mut pos = 0;
+        // Decode with position-aware delta reader
+        i64_coder::read_delta_pos(&data, &mut pos)
+    }
+
+    fn serialize_value<'a>(&self, bitmap: &'a RoaringBitmap) -> std::borrow::Cow<'a, [u8]> {
+        let ids: Vec<u32> = bitmap.iter().collect();
+        let vec_size = 1 + ids.len() * 4;
+        let bitmap_size = 1 + bitmap.serialized_size();
+
+        let mut buf = Vec::new();
+        if vec_size <= bitmap_size {
+            buf.push(0u8);
+            for id in ids {
+                buf.extend_from_slice(&id.to_be_bytes());
+            }
+        } else {
+            buf.push(1u8);
+            if let Err(_) = bitmap.serialize_into(&mut buf) {
+                buf.clear();
+                buf.push(0u8);
+                for id in bitmap.iter() {
+                    buf.extend_from_slice(&id.to_be_bytes());
+                }
+            }
+        }
+        std::borrow::Cow::Owned(buf)
+    }
+
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        if data.is_empty() {
+            return Err("Empty data".into());
+        }
+
+        match data[0] {
+            0 => {
+                let count = (data.len() - 1) / 4;
+                let mut ids = Vec::with_capacity(count);
+                for i in 0..count {
+                    let offset = 1 + i * 4;
+                    if offset + 4 > data.len() {
+                        break;
+                    }
+                    let id = u32::from_be_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]);
+                    ids.push(id);
+                }
+                Ok(RoaringBitmap::from_sorted_iter(ids.into_iter())?)
+            }
+            1 => Ok(RoaringBitmap::deserialize_from(&data[1..])?),
+            _ => Err("Unknown type flag".into()),
+        }
     }
 }

@@ -2,7 +2,7 @@
 mod tests {
     use crate::{
         schema::{field::FieldOption, Schema},
-        segment::Segment,
+        segment::{FieldIndexMode, Segment},
     };
     use arrow::array::{RecordBatch, StringBuilder};
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
@@ -55,7 +55,15 @@ mod tests {
             )
             .unwrap();
 
-            segment.write(&data, None, None, &RwLock::new(())).unwrap();
+            segment
+                .write(
+                    &data,
+                    None,
+                    None,
+                    &RwLock::new(()),
+                    FieldIndexMode::Sync,
+                )
+                .unwrap();
         }
 
         println!("写入完成，共 {} 条记录", batch_count * batch_size);
@@ -133,7 +141,15 @@ mod tests {
             )
             .unwrap();
 
-            segment.write(&data, None, None, &RwLock::new(())).unwrap();
+            segment
+                .write(
+                    &data,
+                    None,
+                    None,
+                    &RwLock::new(()),
+                    FieldIndexMode::Sync,
+                )
+                .unwrap();
         }
 
         let persist_path = "/tmp/test_segment_load";
@@ -252,7 +268,15 @@ mod tests {
                 )
                 .unwrap();
 
-                segment.write(&data, None, None, &RwLock::new(())).unwrap();
+                segment
+                    .write(
+                        &data,
+                        None,
+                        None,
+                        &RwLock::new(()),
+                        FieldIndexMode::Sync,
+                    )
+                    .unwrap();
 
                 // 每20批输出一次进度
                 if (batch + 1) % 20 == 0 || batch + 1 == batch_count {

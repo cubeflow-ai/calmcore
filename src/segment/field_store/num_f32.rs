@@ -5,95 +5,23 @@ use std::{
 };
 
 use arrow::array::{ArrayRef, Float32Array, ListArray, RecordBatch, UInt32Array};
+use ordered_float::OrderedFloat;
 use roaring::RoaringBitmap;
 
 use crate::{
     arrow_downcast,
     partition::WriteInfo,
     schema::field::{FieldOption, FieldType},
-    segment::field_store::{IndexWriter, InvertedIndex, PkWriter},
     utils::error::{CoreError, CoreResult},
 };
 
+use super::{IndexWriter, InvertedIndex, PkWriter};
+
 /// F32 field type with inverted index
-/// Uses memcomparable encoding for sorted storage
+/// Uses OrderedFloat<f32> for proper ordering in BTree
 pub struct NumF32 {
     field: FieldOption,
-    indexs: RwLock<InvertedIndex<F32Key>>,
-}
-
-/// Wrapper for f32 that implements Ord for BTree storage
-/// Uses memcomparable encoding to maintain proper sort order
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct F32Key(pub f32);
-
-impl F32Key {
-    /// Convert f32 to memcomparable bytes
-    /// NaN -> 0x00...
-    /// -Inf -> 0x00...01
-    /// negative -> flip all bits
-    /// positive -> flip sign bit
-    /// +Inf -> 0xFF...FE
-    pub fn to_memcomparable(&self) -> [u8; 4] {
-        let value = self.0;
-
-        // Handle NaN
-        if value.is_nan() {
-            return [0x00, 0x00, 0x00, 0x00];
-        }
-
-        let bits = value.to_bits();
-        let encoded = if value >= 0.0 {
-            // Positive: flip sign bit
-            bits ^ 0x80000000
-        } else {
-            // Negative: flip all bits
-            !bits
-        };
-
-        encoded.to_be_bytes()
-    }
-
-    /// Convert memcomparable bytes back to f32
-    pub fn from_memcomparable(bytes: [u8; 4]) -> Self {
-        let encoded = u32::from_be_bytes(bytes);
-
-        let bits = if encoded & 0x80000000 != 0 {
-            // Was positive: flip sign bit back
-            encoded ^ 0x80000000
-        } else {
-            // Was negative: flip all bits back
-            !encoded
-        };
-
-        F32Key(f32::from_bits(bits))
-    }
-}
-
-impl Eq for F32Key {}
-
-impl PartialOrd for F32Key {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for F32Key {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.to_memcomparable().cmp(&other.to_memcomparable())
-    }
-}
-
-impl std::hash::Hash for F32Key {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.to_memcomparable().hash(state);
-    }
-}
-
-impl std::fmt::Display for F32Key {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
+    indexs: RwLock<InvertedIndex<OrderedFloat<f32>>>,
 }
 
 impl NumF32 {
@@ -107,7 +35,7 @@ impl NumF32 {
     /// Create a NumF32 from disk-based inverted index
     pub fn from_disk(
         field: &FieldOption,
-        inverted_index: InvertedIndex<F32Key>,
+        inverted_index: InvertedIndex<OrderedFloat<f32>>,
     ) -> CoreResult<Self> {
         Ok(Self {
             field: field.clone(),
@@ -117,7 +45,6 @@ impl NumF32 {
 
     /// Persist the in-memory index to disk and return a new NumF32 with disk-based index
     pub fn persist(&self, path: &str) -> CoreResult<Self> {
-        use super::F32RoaringSerializer;
         use mem_btree::persist::TreeWriter;
 
         // 1. Extract the memory index
@@ -166,7 +93,7 @@ impl IndexWriter for NumF32 {
             return Ok(());
         };
 
-        let mut mtp: HashMap<F32Key, Vec<u32>> = HashMap::new();
+        let mut mtp: HashMap<OrderedFloat<f32>, Vec<u32>> = HashMap::new();
 
         if self.field.is_array() {
             // Handle array of f32
@@ -176,7 +103,7 @@ impl IndexWriter for NumF32 {
             {
                 if let (Some(a), Some(id)) = (a, id) {
                     for v in arrow_downcast!(a, Float32Array).iter().flatten() {
-                        let key = F32Key(v);
+                        let key = OrderedFloat(v);
                         if let Some(list) = mtp.get_mut(&key) {
                             if list.last() != Some(&id) {
                                 list.push(id);
@@ -194,7 +121,7 @@ impl IndexWriter for NumF32 {
                 .zip(arrow_downcast!(data.column(0), UInt32Array).iter())
             {
                 if let (Some(v), Some(id)) = (a, id) {
-                    let key = F32Key(v);
+                    let key = OrderedFloat(v);
                     if let Some(list) = mtp.get_mut(&key) {
                         if list.last() != Some(&id) {
                             list.push(id);
@@ -246,5 +173,135 @@ impl PkWriter for NumF32 {
         Err(CoreError::Internal(
             "F32 field cannot be used as primary key".to_string(),
         ))
+    }
+}
+
+/// Serializer for F32Key with RoaringBitmap values
+/// Handles key serialization using memcomparable encoding
+#[derive(Clone)]
+pub struct F32RoaringSerializer {
+    _zstd_level: i32,
+}
+
+impl F32RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self {
+            _zstd_level: zstd_level,
+        }
+    }
+
+    pub fn default() -> Self {
+        Self { _zstd_level: 3 }
+    }
+}
+
+impl mem_btree::persist::KeySerializer<OrderedFloat<f32>, RoaringBitmap, RoaringBitmap>
+    for F32RoaringSerializer
+{
+    fn serialize_keys<'a>(&self, keys: &'a Vec<OrderedFloat<f32>>) -> std::borrow::Cow<'a, [u8]> {
+        let mut buf = Vec::with_capacity(4 + keys.len() * 4);
+        buf.extend_from_slice(&(keys.len() as u32).to_be_bytes());
+
+        for key in keys {
+            // OrderedFloat memcomparable encoding for f32
+            let value = key.into_inner();
+            let bits = value.to_bits();
+            let encoded = if value >= 0.0 || value.is_nan() {
+                // Positive or NaN: flip sign bit
+                bits ^ 0x80000000
+            } else {
+                // Negative: flip all bits
+                !bits
+            };
+            buf.extend_from_slice(&encoded.to_be_bytes());
+        }
+
+        std::borrow::Cow::Owned(buf)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<OrderedFloat<f32>> {
+        if data.len() < 4 {
+            return Vec::new();
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut keys = Vec::with_capacity(count);
+        let mut pos = 4;
+
+        for _ in 0..count {
+            if pos + 4 > data.len() {
+                break;
+            }
+            let bytes = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
+            let encoded = u32::from_be_bytes(bytes);
+            let bits = if encoded & 0x80000000 != 0 {
+                // Was positive: flip sign bit back
+                encoded ^ 0x80000000
+            } else {
+                // Was negative: flip all bits back
+                !encoded
+            };
+            let value = f32::from_bits(bits);
+            keys.push(OrderedFloat(value));
+            pos += 4;
+        }
+
+        keys
+    }
+
+    fn serialize_value<'a>(&self, bitmap: &'a RoaringBitmap) -> std::borrow::Cow<'a, [u8]> {
+        let ids: Vec<u32> = bitmap.iter().collect();
+        let vec_size = 1 + ids.len() * 4;
+        let bitmap_size = 1 + bitmap.serialized_size();
+
+        let mut buf = Vec::new();
+        if vec_size <= bitmap_size {
+            buf.push(0u8);
+            for id in ids {
+                buf.extend_from_slice(&id.to_be_bytes());
+            }
+        } else {
+            buf.push(1u8);
+            if let Err(_) = bitmap.serialize_into(&mut buf) {
+                buf.clear();
+                buf.push(0u8);
+                for id in bitmap.iter() {
+                    buf.extend_from_slice(&id.to_be_bytes());
+                }
+            }
+        }
+        std::borrow::Cow::Owned(buf)
+    }
+
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        if data.is_empty() {
+            return Err("Empty data".into());
+        }
+
+        match data[0] {
+            0 => {
+                let count = (data.len() - 1) / 4;
+                let mut ids = Vec::with_capacity(count);
+                for i in 0..count {
+                    let offset = 1 + i * 4;
+                    if offset + 4 > data.len() {
+                        break;
+                    }
+                    let id = u32::from_be_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]);
+                    ids.push(id);
+                }
+                Ok(RoaringBitmap::from_sorted_iter(ids.into_iter())?)
+            }
+            1 => Ok(RoaringBitmap::deserialize_from(&data[1..])?),
+            _ => Err("Unknown type flag".into()),
+        }
     }
 }

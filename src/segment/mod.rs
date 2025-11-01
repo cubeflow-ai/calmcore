@@ -4,30 +4,37 @@ use crate::{
     partition::WriteInfo,
     schema::{field::FieldOption, Schema},
     segment::field_store::{
-        keyword::Keyword, IndexWriter, PkWriter, RowDataStore, U32RecordBatchSerializer,
+        keyword::{Keyword, StringIdsSerializer},
+        num_f32::{F32RoaringSerializer, NumF32},
+        num_f64::{F64RoaringSerializer, NumF64},
+        num_i32::{I32RoaringSerializer, NumI32},
+        num_i64::{I64RoaringSerializer, NumI64},
+        num_u32::{NumU32, U32RoaringSerializer},
+        IndexWriter, InvertedIndex, PkWriter, RowDataStore, U32RecordBatchSerializer,
     },
     utils::error::{CoreError, CoreResult},
 };
 use arrow::{
-    array::{ArrayRef, RecordBatch, StringArray, UInt32Array},
+    array::{ArrayRef, RecordBatch, UInt32Array},
     datatypes::{DataType, Field, SchemaRef},
 };
-use core::num;
 use itertools::Itertools;
-use log::error;
-use mem_btree::BTree;
-use parquet::schema;
-use rand::seq::index;
 use roaring::RoaringBitmap;
 use std::{
-    any::Any,
-    collections::{hash_map::DefaultHasher, HashMap, LinkedList},
-    hash::{Hash, Hasher},
+    collections::HashMap,
+    io::Read,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        mpsc, Arc, RwLock,
+        Arc, RwLock,
     },
 };
+
+/// 控制非主键字段的索引写入模式
+#[derive(Clone, Copy, Debug)]
+pub enum FieldIndexMode {
+    Sync,
+    Async,
+}
 
 pub struct Segment {
     pub start: u64,
@@ -45,13 +52,63 @@ pub struct Segment {
 
 impl Segment {
     pub fn new(start: u64, schema: Arc<Schema>) -> Self {
-        let fields: Vec<Box<dyn IndexWriter>> = schema
-            .fields
-            .iter()
-            .map(|f| match f {
-                FieldOption::Keyword { .. } => Box::new(Keyword::new(f)) as Box<dyn IndexWriter>,
-            })
-            .collect();
+        let mut fields: Vec<Box<dyn IndexWriter>> = Vec::new();
+
+        for field_opt in &schema.fields {
+            let field_path = format!("{}/field-{}", segment_path, field_opt.name());
+
+            match field_opt {
+                FieldOption::Keyword { .. } => {
+                    let keyword = Keyword::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I32 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_i32::I32RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_i32::NumI32::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::I64 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_i64::I64RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_i64::NumI64::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::U32 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_u32::U32RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_u32::NumU32::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::F32 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_f32::F32RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_f32::NumF32::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::F64 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_f64::F64RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_f64::NumF64::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+            }
+        }
 
         let field_index = schema
             .fields
@@ -75,6 +132,7 @@ impl Segment {
         }
     }
 
+    #[allow(dead_code)]
     fn index_write(&mut self, schema: SchemaRef, data: RecordBatch) {
         let num_rows = data.num_rows() as u32;
 
@@ -89,7 +147,7 @@ impl Segment {
         );
         columns.extend_from_slice(old_columns);
 
-        let new_batch = RecordBatch::try_new(schema, columns).unwrap();
+        let _new_batch = RecordBatch::try_new(schema, columns).unwrap();
 
         // update doc_id_gen
         self.doc_id_gen
@@ -118,6 +176,7 @@ impl Segment {
         pk_hash: Option<Vec<u32>>,
         info: Option<WriteInfo>,
         lock: &RwLock<()>,
+        index_mode: FieldIndexMode,
     ) -> CoreResult<Vec<u32>> {
         // add id column
         let mut columns = Vec::with_capacity(data.schema().fields().len() + 1);
@@ -161,7 +220,29 @@ impl Segment {
         }
 
         // 使用 RowDataStore 的 put 方法存储 RecordBatch
-        self.row_data.write().unwrap().put(start_id, new_data);
+        self.row_data
+            .write()
+            .unwrap()
+            .put(start_id, new_data.clone());
+
+        // 非主键字段索引：根据模式决定同步或异步（当前异步留空位实现）
+        if matches!(index_mode, FieldIndexMode::Sync) {
+            let pk_name = self.schema.primary_key.as_deref();
+            let fields = self.fields.read().unwrap();
+            for f in fields.iter() {
+                if let Some(pk) = pk_name {
+                    if f.name() == pk {
+                        continue;
+                    }
+                }
+                if let Err(e) = f.write(&new_data) {
+                    eprintln!("index write field {:?} failed: {:?}", f.name(), e);
+                }
+            }
+        } else {
+            // TODO(calm): 异步索引（非主键）下沉到后台线程
+            // 由于当前 Segment 未以 Arc 形式持有，跨线程写入需要进一步改造。
+        }
 
         Ok(result)
     }
@@ -210,6 +291,7 @@ impl Segment {
     /// Get internal ids by primary key hash and primary key column
     /// if not found, return None, never return empty vector
     /// internal id is the row number in the segment + start
+    #[allow(dead_code)]
     pub(crate) fn mget_internal_id(
         &self,
         pk_hash: Option<&Vec<u32>>,
@@ -424,6 +506,160 @@ impl Segment {
     ///
     /// # Returns
     /// Returns Ok(()) on success.
+    pub fn recover_from_disk(segment_path: &str, schema: Arc<Schema>) -> CoreResult<Self> {
+        println!("Loading frozen segment from: {}", segment_path);
+
+        // 1. Load fields
+        let start = std::time::Instant::now();
+        let mut fields: Vec<Box<dyn IndexWriter>> = Vec::new();
+
+        for field_opt in &schema.fields {
+            let field_name = field_opt.name();
+            let field_path = format!("{}/field-{}", segment_path, field_name);
+
+            match field_opt {
+                FieldOption::Keyword { .. } => {
+                    // Create disk-based Keyword
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::keyword::StringRoaringSerializer::default(),
+                    )?;
+
+                    let keyword =
+                        field_store::keyword::Keyword::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I32 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_i32::I32RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_i32::NumI32::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::I64 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_i64::I64RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_i64::NumI64::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::U32 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_u32::U32RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_u32::NumU32::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::F32 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_f32::F32RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_f32::NumF32::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::F64 { .. } => {
+                    let inverted_index = InvertedIndex::new_disk(
+                        &field_path,
+                        field_store::num_f64::F64RoaringSerializer::default(),
+                    )?;
+
+                    let num = field_store::num_f64::NumF64::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+            }
+        }
+
+        println!("  Fields loaded in {:?}", start.elapsed());
+
+        // 2. Load bloomfilter
+        let pk_path = format!("{}/pk_bloomfilter", segment_path);
+        let deleted_path = format!("{}/deleted", segment_path);
+        let row_data_path = format!("{}/row_data", segment_path);
+
+        let pk_bloomfilter = if std::path::Path::new(&pk_path).exists() {
+            let mut buffer = Vec::new();
+            std::fs::File::open(&pk_path)
+                .map_err(|e| CoreError::IOError(e.to_string()))?
+                .read_to_end(&mut buffer)
+                .map_err(|e| CoreError::IOError(e.to_string()))?;
+            RoaringBitmap::deserialize_from(&buffer[..])
+                .map_err(|e| CoreError::IOError(e.to_string()))?
+        } else {
+            RoaringBitmap::new()
+        };
+
+        let deleted = if std::path::Path::new(&deleted_path).exists() {
+            let mut buffer = Vec::new();
+            std::fs::File::open(&deleted_path)
+                .map_err(|e| CoreError::IOError(e.to_string()))?
+                .read_to_end(&mut buffer)
+                .map_err(|e| CoreError::IOError(e.to_string()))?;
+            RoaringBitmap::deserialize_from(&buffer[..])
+                .map_err(|e| CoreError::IOError(e.to_string()))?
+        } else {
+            RoaringBitmap::new()
+        };
+
+        // 3. Get start ID and doc count from path
+        let file_name = std::path::Path::new(segment_path)
+            .file_name()
+            .ok_or_else(|| CoreError::IOError("Invalid segment path".to_string()))?
+            .to_str()
+            .ok_or_else(|| CoreError::IOError("Invalid segment path".to_string()))?;
+
+        let mut parts = file_name.split('-');
+        parts.next(); // Skip "segment"
+        let start = parts
+            .next()
+            .ok_or_else(|| CoreError::IOError("Invalid segment path".to_string()))?
+            .parse::<u64>()
+            .map_err(|e| CoreError::IOError(e.to_string()))?;
+        let end = parts
+            .next()
+            .ok_or_else(|| CoreError::IOError("Invalid segment path".to_string()))?
+            .parse::<u64>()
+            .map_err(|e| CoreError::IOError(e.to_string()))?;
+
+        let doc_count = (end - start) as u32;
+
+        // 4. Create field name to index map
+        let field_index = schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name().to_string(), i))
+            .collect();
+
+        // 5. Load row data
+        let row_data = if std::path::Path::new(&row_data_path).exists() {
+            RowDataStore::new_disk(&row_data_path, U32RecordBatchSerializer::default())?
+        } else {
+            RowDataStore::new_memory(32)
+        };
+
+        Ok(Self {
+            start,
+            doc_id_gen: AtomicU32::new(doc_count),
+            max_doc_id: AtomicU32::new(doc_count),
+            persisted: AtomicBool::new(true),
+            pk_bloomfilter: RwLock::new(pk_bloomfilter),
+            deleted: RwLock::new(deleted),
+            fields: RwLock::new(fields),
+            field_index,
+            schema,
+            row_data: RwLock::new(row_data),
+            base_path: Some(segment_path.to_string()),
+        })
+    }
+
     pub fn persist(
         &self,
         base_dir: &str,
@@ -462,10 +698,43 @@ impl Segment {
 
                 println!("  Persisting field: {}", field_name);
 
-                // Downcast to Keyword and persist
-                if let Some(keyword) = field.as_any().downcast_ref::<Keyword>() {
-                    let disk_keyword = keyword.persist(&field_path)?;
-                    new_fields.push(Box::new(disk_keyword) as Box<dyn IndexWriter>);
+                // Try to downcast and persist based on field type
+                if let Some(keyword) = field
+                    .as_any()
+                    .downcast_ref::<field_store::keyword::Keyword>()
+                {
+                    let disk_field = keyword.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num) = field
+                    .as_any()
+                    .downcast_ref::<field_store::num_i32::NumI32>()
+                {
+                    let disk_field = num.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num) = field
+                    .as_any()
+                    .downcast_ref::<field_store::num_i64::NumI64>()
+                {
+                    let disk_field = num.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num) = field
+                    .as_any()
+                    .downcast_ref::<field_store::num_u32::NumU32>()
+                {
+                    let disk_field = num.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num) = field
+                    .as_any()
+                    .downcast_ref::<field_store::num_f32::NumF32>()
+                {
+                    let disk_field = num.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num) = field
+                    .as_any()
+                    .downcast_ref::<field_store::num_f64::NumF64>()
+                {
+                    let disk_field = num.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else {
                     return Err(CoreError::Internal(format!(
                         "Unsupported field type for persist: {}",
@@ -693,6 +962,41 @@ impl Segment {
 
                     let keyword = Keyword::from_disk(field_opt, inverted_index)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I32 { .. } => {
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, I32RoaringSerializer::default())?;
+
+                    let num = field_store::num_i32::NumI32::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::I64 { .. } => {
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, I64RoaringSerializer::default())?;
+
+                    let num = field_store::num_i64::NumI64::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::U32 { .. } => {
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, U32RoaringSerializer::default())?;
+
+                    let num = field_store::num_u32::NumU32::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::F32 { .. } => {
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, F32RoaringSerializer::default())?;
+
+                    let num = field_store::num_f32::NumF32::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
+                }
+                FieldOption::F64 { .. } => {
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, F64RoaringSerializer::default())?;
+
+                    let num = field_store::num_f64::NumF64::from_disk(field_opt, inverted_index)?;
+                    fields.push(Box::new(num));
                 }
             }
         }
@@ -985,6 +1289,7 @@ impl Segment {
 
     /// Process RecordBatch to handle deleted documents
     /// Sets deleted document rows' columns to None to save disk space
+    #[allow(dead_code)]
     fn process_batch_for_deleted(
         &self,
         batch: &RecordBatch,

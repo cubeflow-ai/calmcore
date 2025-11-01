@@ -7,41 +7,19 @@ use std::{
 use arrow::array::{ArrayRef, ListArray, RecordBatch, UInt32Array};
 use roaring::RoaringBitmap;
 
+use super::{IndexWriter, InvertedIndex, PkWriter};
 use crate::{
     arrow_downcast,
     partition::WriteInfo,
     schema::field::{FieldOption, FieldType},
-    segment::field_store::{IndexWriter, InvertedIndex, PkWriter},
     utils::error::{CoreError, CoreResult},
 };
 
 /// U32 field type with inverted index
-/// Uses memcomparable encoding (which is just big-endian for unsigned)
+/// u32 is naturally Ord in Rust
 pub struct NumU32 {
     field: FieldOption,
-    indexs: RwLock<InvertedIndex<U32Key>>,
-}
-
-/// Wrapper for u32 - already has natural ordering
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct U32Key(pub u32);
-
-impl U32Key {
-    /// Convert u32 to memcomparable bytes (big-endian)
-    pub fn to_memcomparable(&self) -> [u8; 4] {
-        self.0.to_be_bytes()
-    }
-
-    /// Convert memcomparable bytes back to u32
-    pub fn from_memcomparable(bytes: [u8; 4]) -> Self {
-        U32Key(u32::from_be_bytes(bytes))
-    }
-}
-
-impl std::fmt::Display for U32Key {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
+    indexs: RwLock<InvertedIndex<u32>>,
 }
 
 impl NumU32 {
@@ -52,10 +30,7 @@ impl NumU32 {
         }
     }
 
-    pub fn from_disk(
-        field: &FieldOption,
-        inverted_index: InvertedIndex<U32Key>,
-    ) -> CoreResult<Self> {
+    pub fn from_disk(field: &FieldOption, inverted_index: InvertedIndex<u32>) -> CoreResult<Self> {
         Ok(Self {
             field: field.clone(),
             indexs: RwLock::new(inverted_index),
@@ -63,7 +38,6 @@ impl NumU32 {
     }
 
     pub fn persist(&self, path: &str) -> CoreResult<Self> {
-        use super::U32RoaringSerializer;
         use mem_btree::persist::TreeWriter;
 
         let memory_index = self.indexs.read().unwrap();
@@ -108,7 +82,7 @@ impl IndexWriter for NumU32 {
             return Ok(());
         };
 
-        let mut mtp: HashMap<U32Key, Vec<u32>> = HashMap::new();
+        let mut mtp: HashMap<u32, Vec<u32>> = HashMap::new();
 
         if self.field.is_array() {
             for (a, id) in arrow_downcast!(arr, ListArray)
@@ -117,7 +91,7 @@ impl IndexWriter for NumU32 {
             {
                 if let (Some(a), Some(id)) = (a, id) {
                     for v in arrow_downcast!(a, UInt32Array).iter().flatten() {
-                        let key = U32Key(v);
+                        let key = v;
                         if let Some(list) = mtp.get_mut(&key) {
                             if list.last() != Some(&id) {
                                 list.push(id);
@@ -134,7 +108,7 @@ impl IndexWriter for NumU32 {
                 .zip(arrow_downcast!(data.column(0), UInt32Array).iter())
             {
                 if let (Some(v), Some(id)) = (a, id) {
-                    let key = U32Key(v);
+                    let key = v;
                     if let Some(list) = mtp.get_mut(&key) {
                         if list.last() != Some(&id) {
                             list.push(id);
@@ -190,7 +164,7 @@ impl PkWriter for NumU32 {
             ))
         })?;
 
-        let mut mtp: HashMap<U32Key, Vec<u32>> = HashMap::new();
+        let mut mtp: HashMap<u32, Vec<u32>> = HashMap::new();
         let internal_id_array = arrow_downcast!(data.column(0), UInt32Array);
 
         for (a, id) in arrow_downcast!(pk, UInt32Array)
@@ -198,7 +172,7 @@ impl PkWriter for NumU32 {
             .zip(internal_id_array.iter())
         {
             if let (Some(v), Some(id)) = (a, id) {
-                let key = U32Key(v);
+                let key = v;
                 if let Some(list) = mtp.get_mut(&key) {
                     if !list.is_empty() {
                         cur_dels.extend(list.clone());
@@ -230,5 +204,100 @@ impl PkWriter for NumU32 {
         }
 
         Ok(cur_dels)
+    }
+}
+
+/// Serializer for U32Key with RoaringBitmap values
+/// Handles key serialization using memcomparable encoding
+#[derive(Clone)]
+pub struct U32RoaringSerializer {
+    _zstd_level: i32,
+}
+
+impl U32RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self {
+            _zstd_level: zstd_level,
+        }
+    }
+
+    pub fn default() -> Self {
+        Self { _zstd_level: 3 }
+    }
+}
+
+impl mem_btree::persist::KeySerializer<u32, RoaringBitmap, RoaringBitmap> for U32RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<u32>) -> std::borrow::Cow<'a, [u8]> {
+        use mem_btree::persist::num_ser::i64_coder;
+        // Keys are sorted; delta encoding on i64 yields better compression
+        let keys_i64: Vec<i64> = keys.iter().map(|&k| k as i64).collect();
+        let mut buf = Vec::new();
+        // Keys are strictly sorted; use delta encoding
+        i64_coder::write_delta(&mut buf, &keys_i64).expect("Failed to serialize u32 keys");
+        std::borrow::Cow::Owned(buf)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u32> {
+        use mem_btree::persist::num_ser::i64_coder;
+        let mut pos = 0;
+        // Decode with position-aware delta reader
+        let keys_i64 = i64_coder::read_delta_pos(&data, &mut pos);
+        keys_i64.into_iter().map(|k| k as u32).collect()
+    }
+
+    fn serialize_value<'a>(&self, bitmap: &'a RoaringBitmap) -> std::borrow::Cow<'a, [u8]> {
+        let ids: Vec<u32> = bitmap.iter().collect();
+        let vec_size = 1 + ids.len() * 4;
+        let bitmap_size = 1 + bitmap.serialized_size();
+
+        let mut buf = Vec::new();
+        if vec_size <= bitmap_size {
+            buf.push(0u8);
+            for id in ids {
+                buf.extend_from_slice(&id.to_be_bytes());
+            }
+        } else {
+            buf.push(1u8);
+            if let Err(_) = bitmap.serialize_into(&mut buf) {
+                buf.clear();
+                buf.push(0u8);
+                for id in bitmap.iter() {
+                    buf.extend_from_slice(&id.to_be_bytes());
+                }
+            }
+        }
+        std::borrow::Cow::Owned(buf)
+    }
+
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        if data.is_empty() {
+            return Err("Empty data".into());
+        }
+
+        match data[0] {
+            0 => {
+                let count = (data.len() - 1) / 4;
+                let mut ids = Vec::with_capacity(count);
+                for i in 0..count {
+                    let offset = 1 + i * 4;
+                    if offset + 4 > data.len() {
+                        break;
+                    }
+                    let id = u32::from_be_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]);
+                    ids.push(id);
+                }
+                Ok(RoaringBitmap::from_sorted_iter(ids.into_iter())?)
+            }
+            1 => Ok(RoaringBitmap::deserialize_from(&data[1..])?),
+            _ => Err("Unknown type flag".into()),
+        }
     }
 }

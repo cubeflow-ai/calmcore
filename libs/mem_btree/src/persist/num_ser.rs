@@ -95,6 +95,56 @@ pub mod u16_coder {
     }
 }
 
+pub mod u32_coder {
+    use super::types::*;
+    use crate::persist::zigzag::{self, BufferRead};
+    use std::io::Write;
+
+    pub fn write_delta<W: Write>(writer: &mut W, values: &[u32]) -> std::io::Result<()> {
+        zigzag::write_u32(values.len() as u32, writer)?;
+        if values.is_empty() {
+            return Ok(());
+        }
+        //writer first value
+        zigzag::write_u32(values[0], writer)?;
+        for i in 1..values.len() {
+            zigzag::write_u32(values[i].wrapping_sub(values[i - 1]), writer)?;
+        }
+        Ok(())
+    }
+
+    pub fn read_delta<B: BufferRead>(buf: &B) -> Vec<u32> {
+        let mut pos = 0;
+        let len = zigzag::read_u32(buf, &mut pos);
+        if len == 0 {
+            return Vec::new();
+        }
+        let mut value = zigzag::read_u32(buf, &mut pos);
+        let mut result = Vec::with_capacity(len as usize);
+        result.push(value);
+        for _ in 1..len {
+            value = zigzag::read_u32(buf, &mut pos).wrapping_add(value);
+            result.push(value);
+        }
+        result
+    }
+
+    pub fn read_delta_pos<B: BufferRead>(buf: &B, pos: &mut usize) -> Vec<u32> {
+        let len = zigzag::read_u32(buf, pos);
+        if len == 0 {
+            return Vec::new();
+        }
+        let mut value = zigzag::read_u32(buf, pos);
+        let mut result = Vec::with_capacity(len as usize);
+        result.push(value);
+        for _ in 1..len {
+            value = zigzag::read_u32(buf, pos).wrapping_add(value);
+            result.push(value);
+        }
+        result
+    }
+}
+
 pub mod i64_coder {
     use super::types::*;
     use crate::persist::zigzag::{self, BufferRead};
@@ -121,6 +171,23 @@ pub mod i64_coder {
         result.push(value);
         for _ in 1..len {
             value = zigzag::read_i64(buf, &mut pos) + value;
+            result.push(value);
+        }
+        result
+    }
+
+    /// Read a delta-encoded i64 array from `buf` starting at `*pos`, and advance `pos`.
+    /// Format: len(u32 varint) + first(i64 zigzag) + (len-1) diffs(i64 zigzag)
+    pub fn read_delta_pos<B: BufferRead>(buf: &B, pos: &mut usize) -> Vec<i64> {
+        let len = zigzag::read_u32(buf, pos);
+        if len == 0 {
+            return Vec::new();
+        }
+        let mut value = zigzag::read_i64(buf, pos);
+        let mut result = Vec::with_capacity(len as usize);
+        result.push(value);
+        for _ in 1..len {
+            value = zigzag::read_i64(buf, pos) + value;
             result.push(value);
         }
         result
@@ -185,15 +252,8 @@ pub mod i64_coder {
                     .collect()
             }
             DELTA => {
-                let len = zigzag::read_u32(buf, pos);
-                let mut value = zigzag::read_i64(buf, pos);
-                let mut result = Vec::with_capacity(len as usize);
-                result.push(value);
-                for _ in 1..len {
-                    value = zigzag::read_i64(buf, pos) + value;
-                    result.push(value);
-                }
-                result
+                // Delegate to delta reader that advances pos
+                read_delta_pos(buf, pos)
             }
             _ => {
                 let len = zigzag::read_u32(buf, pos);
@@ -256,8 +316,9 @@ where
     }
 }
 
+#[cfg(test)]
 mod test {
-    use crate::persist::num_ser::{i64_coder, u16_coder};
+    use super::{i64_coder, u16_coder};
 
     #[test]
     fn test_guess_type() {
