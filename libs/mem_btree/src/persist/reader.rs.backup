@@ -3,19 +3,20 @@ use crate::persist::num_ser::i64_coder;
 use std::fs::File;
 
 /// High-performance B-Tree reader using memory-mapped files
-pub struct TreeReader<K, R> {
+pub struct TreeReader<K, V, R> {
     #[allow(dead_code)]
     key_len: u16,
     tree_len: u32,
     root_offset: i64,
     node: memmap2::Mmap,
     data: memmap2::Mmap,
-    reader_ser: Box<dyn ReadSerializer<K, R>>,
+    deserializer: Box<dyn KeySerializer<K, V, R>>,
 }
 
-impl<K, R> TreeReader<K, R>
+impl<K, V, R> TreeReader<K, V, R>
 where
-    K: Clone + PartialOrd,
+    K: Clone,
+    V: From<R>,
 {
     /// Creates a new TreeReader instance using mmap for fast random access
     ///
@@ -23,7 +24,7 @@ where
     /// NODE file: MAGIC(2) + root_offset(8) + key_len(2) + tree_len(4) + nodes...
     /// DATA file: MAGIC(2) + values...
     ///
-    pub fn new(dir: &Path, reader_ser: Box<dyn ReadSerializer<K, R>>) -> Result<Self> {
+    pub fn new(dir: &Path, deserializer: Box<dyn KeySerializer<K, V, R>>) -> Result<Self> {
         // Memory map the node file for fast random access
         let node = unsafe { memmap2::Mmap::map(&File::open(dir.join(NODE_NAME))?)? };
         Self::validate_magic(&node)?;
@@ -50,7 +51,7 @@ where
             root_offset,
             node,
             data,
-            reader_ser,
+            deserializer,
         })
     }
 
@@ -67,19 +68,26 @@ where
     /// Get value by key with O(log n) complexity
     ///
     /// Uses binary search through mmap'd B-Tree nodes for optimal performance
-    pub fn get(&self, key: &K) -> Option<R> {
+    pub fn get(&self, key: &K) -> Option<V>
+    where
+        K: Clone,
+        V: From<R>,
+    {
         if self.is_empty() {
             return None;
         }
 
+        // Serialize key for comparison
+        let key_bytes = self.serialize_single_key(key);
+
         // Find data offset by traversing B-Tree
-        let (start_offset, end_offset) = self.find_data_offset(key)?;
+        let (start_offset, end_offset) = self.find_data_offset(&key_bytes)?;
 
         // Read and deserialize value with known size
         Some(self.read_value_at(start_offset, end_offset))
     }
     /// Batch get - more efficient than multiple get() calls
-    pub fn mget(&self, keys: &[K]) -> Vec<Option<R>> {
+    pub fn mget(&self, keys: &[K]) -> Vec<Option<V>> {
         keys.iter().map(|k| self.get(k)).collect()
     }
 
@@ -87,25 +95,35 @@ where
     /// This is useful for finding the RecordBatch containing a specific doc_id
     ///
     /// Returns Some((key, value, ttl)) if found, None if no key <= target exists
-    pub fn floor(&self, key: &K) -> Option<crate::Item<K, R>> {
+    pub fn floor(&self, key: &K) -> Option<crate::Item<K, V>> {
         if self.is_empty() {
             return None;
         }
 
+        // Serialize key for comparison
+        let key_bytes = self.serialize_single_key(key);
+
         // Traverse tree to find floor
-        self.find_floor_in_tree(key)
+        self.find_floor_in_tree(&key_bytes)
     }
 
     /// Returns an iterator over all key-value pairs
-    pub(crate) fn iter(&self) -> TreeIterator<'_, K, R> {
+    pub(crate) fn iter(&self) -> TreeIterator<'_, K, V, R> {
         TreeIterator::new(self)
     }
 
     // ========== Internal Implementation ==========
 
+    /// Serialize a single key to bytes for comparison
+    fn serialize_single_key(&self, key: &K) -> Vec<u8> {
+        let keys_vec = vec![key.clone()];
+        let serialized = self.deserializer.serialize_keys(&keys_vec);
+        serialized.to_vec()
+    }
+
     /// Find data file offset for a key by traversing the B-Tree
     /// Returns (start_offset, end_offset) to allow calculating value size
-    fn find_data_offset(&self, search_key: &K) -> Option<(i64, i64)> {
+    fn find_data_offset(&self, key_bytes: &[u8]) -> Option<(i64, i64)> {
         let mut offset = self.root_offset;
 
         // Traverse from root to leaf
@@ -116,12 +134,10 @@ where
                 Err(_) => return None,
             };
 
-            let keys = self.reader_ser.deserialize_keys(&keys);
-
             // Find the appropriate child/value in current node
             if is_leaf {
                 // Leaf node: do exact binary search
-                match self.binary_search_keys(&keys, search_key) {
+                match self.binary_search_keys(&keys, key_bytes) {
                     SearchResult::Found(idx) => {
                         // Found exact key in leaf
                         let start = offsets[idx];
@@ -143,8 +159,9 @@ where
                 // We need to find the last child whose first key <= search_key
 
                 let mut child_idx = 0;
-                for (i, key) in keys.iter().enumerate() {
-                    if key <= search_key {
+                for (i, key) in self.deserializer.deserialize_keys(&keys).iter().enumerate() {
+                    let key_bytes_i = self.serialize_single_key(key);
+                    if key_bytes_i.as_slice() <= key_bytes {
                         child_idx = i;
                     } else {
                         break;
@@ -237,20 +254,26 @@ where
 
         Ok((is_leaf, keys_bytes, offsets))
     }
-    /// Binary search within deserialized keys using PartialOrd
-    fn binary_search_keys(&self, keys: &[K], search_key: &K) -> SearchResult {
+    /// Binary search within serialized keys
+    fn binary_search_keys(&self, keys_data: &[u8], search_key: &[u8]) -> SearchResult {
+        // Deserialize all keys for comparison
+        let keys = self.deserializer.deserialize_keys(keys_data);
+
+        // Serialize each for byte-level comparison
+        // This is inefficient - ideally we'd compare without full deserialization
         for (i, key) in keys.iter().enumerate() {
-            if key == search_key {
-                return SearchResult::Found(i);
-            } else if key > search_key {
-                return SearchResult::NotFound(i);
+            let key_bytes = self.serialize_single_key(key);
+            match key_bytes.as_slice().cmp(search_key) {
+                std::cmp::Ordering::Equal => return SearchResult::Found(i),
+                std::cmp::Ordering::Greater => return SearchResult::NotFound(i),
+                std::cmp::Ordering::Less => continue,
             }
         }
         SearchResult::NotFound(keys.len())
     }
 
     /// Find floor entry in tree: largest key <= search_key
-    fn find_floor_in_tree(&self, search_key: &K) -> Option<crate::Item<K, R>> {
+    fn find_floor_in_tree(&self, key_bytes: &[u8]) -> Option<crate::Item<K, V>> {
         let mut offset = self.root_offset;
         let mut floor_candidate: Option<(K, i64, i64)> = None; // (key, start_offset, end_offset)
 
@@ -261,12 +284,13 @@ where
                 Err(_) => break,
             };
 
-            let keys = self.reader_ser.deserialize_keys(&keys_data);
+            let keys = self.deserializer.deserialize_keys(&keys_data);
 
             if is_leaf {
                 // Leaf node: find largest key <= search_key
                 for (i, key) in keys.iter().enumerate() {
-                    if key <= search_key {
+                    let key_bytes_i = self.serialize_single_key(key);
+                    if key_bytes_i.as_slice() <= key_bytes {
                         // This key is <= search_key, it's a candidate
                         let start = offsets[i];
                         let end = if i + 1 < offsets.len() {
@@ -288,7 +312,8 @@ where
 
                 let mut child_idx = 0;
                 for (i, key) in keys.iter().enumerate() {
-                    if key <= search_key {
+                    let key_bytes_i = self.serialize_single_key(key);
+                    if key_bytes_i.as_slice() <= key_bytes {
                         child_idx = i;
                     } else {
                         break;
@@ -309,7 +334,7 @@ where
 
     /// Read value from data file at given offset range
     /// With start and end offsets, we know the exact size without parsing
-    fn read_value_at(&self, start_offset: i64, end_offset: i64) -> R {
+    fn read_value_at(&self, start_offset: i64, end_offset: i64) -> V {
         if start_offset < 2 {
             // Skip MAGIC_VERSION
             panic!("Invalid data offset: {}", start_offset);
@@ -332,10 +357,10 @@ where
 
         // Deserialize value using the provided deserializer
         let bitmap = self
-            .reader_ser
+            .deserializer
             .deserialize_value(value_data)
             .expect("Failed to deserialize value");
-        bitmap
+        V::from(bitmap)
     }
 
     fn validate_magic(mmap: &memmap2::Mmap) -> Result<()> {
@@ -366,17 +391,18 @@ enum SearchResult {
 
 /// Iterator over tree entries
 #[allow(dead_code)]
-pub struct TreeIterator<'a, K, R> {
-    reader: &'a TreeReader<K, R>,
+pub struct TreeIterator<'a, K, V, R> {
+    reader: &'a TreeReader<K, V, R>,
     stack: Vec<(usize, usize)>, // (node_offset, key_index)
     finished: bool,
 }
 
-impl<'a, K, R> TreeIterator<'a, K, R>
+impl<'a, K, V, R> TreeIterator<'a, K, V, R>
 where
-    K: Clone + PartialOrd,
+    K: Clone,
+    V: From<R>,
 {
-    fn new(reader: &'a TreeReader<K, R>) -> Self {
+    fn new(reader: &'a TreeReader<K, V, R>) -> Self {
         Self {
             reader,
             stack: Vec::new(),
@@ -385,11 +411,12 @@ where
     }
 }
 
-impl<'a, K, R> Iterator for TreeIterator<'a, K, R>
+impl<'a, K, V, R> Iterator for TreeIterator<'a, K, V, R>
 where
-    K: Clone + PartialOrd,
+    K: Clone,
+    V: From<R>,
 {
-    type Item = crate::Item<K, R>;
+    type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished {
@@ -412,23 +439,21 @@ mod tests {
     use crate::BTree;
     use std::path::PathBuf;
 
-    struct I64Serializer;
+    struct I64KeySerializer;
 
-    impl WriteSerializer<i64, i64> for I64Serializer {
+    impl KeySerializer<i64, i64> for I64KeySerializer {
         fn serialize_keys<'a>(&self, keys: &'a Vec<i64>) -> Cow<'a, [u8]> {
             let mut buf = Vec::with_capacity(keys.len() * 8);
             i64_coder::write_delta(&mut buf, keys).unwrap();
             Cow::Owned(buf)
         }
 
-        fn serialize_value<'a>(&self, value: &'a i64) -> Cow<'a, [u8]> {
-            Cow::Owned(value.to_be_bytes().to_vec())
-        }
-    }
-
-    impl ReadSerializer<i64, i64> for I64Serializer {
         fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i64> {
             i64_coder::read_delta(&data)
+        }
+
+        fn serialize_value<'a>(&self, value: &'a i64) -> Cow<'a, [u8]> {
+            Cow::Owned(value.to_be_bytes().to_vec())
         }
 
         fn deserialize_value<'a>(
@@ -454,11 +479,11 @@ mod tests {
         }
 
         TreeWriter::new(test_dir.clone(), 128, 0)
-            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), tree.iter())
+            .persist(tree.len(), Box::new(I64KeySerializer {}), tree.iter())
             .unwrap();
 
         // Read back
-        let reader = TreeReader::new(&test_dir, Box::new(I64Serializer {})).unwrap();
+        let reader = TreeReader::new(&test_dir, Box::new(I64KeySerializer {})).unwrap();
 
         assert_eq!(reader.len(), 100);
         assert!(!reader.is_empty());
@@ -522,7 +547,7 @@ mod tests {
                 Cow::Owned(buf)
             }
 
-            fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Rec<String> {
+            fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<String> {
                 let mut pos = 0;
                 let mut keys = Vec::new();
                 if data.len() < 4 {
@@ -630,7 +655,7 @@ mod tests {
                 Cow::Owned(buf)
             }
 
-            fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Rec<String> {
+            fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<String> {
                 let mut pos = 0;
                 let mut keys = Vec::new();
                 if data.len() < 4 {

@@ -15,7 +15,7 @@ use crate::{
     utils::error::{CoreError, CoreResult},
 };
 
-use super::{IndexWriter, InvertedIndex, PkWriter};
+use super::{serializer::F32RoaringSerializer, IndexWriter, InvertedIndex, PkWriter};
 
 /// F32 field type with inverted index
 /// Uses OrderedFloat<f32> for proper ordering in BTree
@@ -74,7 +74,11 @@ impl NumF32 {
         );
 
         writer
-            .persist(len, Box::new(serializer), iter)
+            .persist::<OrderedFloat<f32>, RoaringBitmap, RoaringBitmap>(
+                len,
+                Box::new(serializer),
+                iter,
+            )
             .map_err(|e| CoreError::IOError(e.to_string()))?;
 
         // 4. Create new NumF32 with disk index
@@ -173,135 +177,5 @@ impl PkWriter for NumF32 {
         Err(CoreError::Internal(
             "F32 field cannot be used as primary key".to_string(),
         ))
-    }
-}
-
-/// Serializer for F32Key with RoaringBitmap values
-/// Handles key serialization using memcomparable encoding
-#[derive(Clone)]
-pub struct F32RoaringSerializer {
-    _zstd_level: i32,
-}
-
-impl F32RoaringSerializer {
-    pub fn new(zstd_level: i32) -> Self {
-        Self {
-            _zstd_level: zstd_level,
-        }
-    }
-
-    pub fn default() -> Self {
-        Self { _zstd_level: 3 }
-    }
-}
-
-impl mem_btree::persist::KeySerializer<OrderedFloat<f32>, RoaringBitmap, RoaringBitmap>
-    for F32RoaringSerializer
-{
-    fn serialize_keys<'a>(&self, keys: &'a Vec<OrderedFloat<f32>>) -> std::borrow::Cow<'a, [u8]> {
-        let mut buf = Vec::with_capacity(4 + keys.len() * 4);
-        buf.extend_from_slice(&(keys.len() as u32).to_be_bytes());
-
-        for key in keys {
-            // OrderedFloat memcomparable encoding for f32
-            let value = key.into_inner();
-            let bits = value.to_bits();
-            let encoded = if value >= 0.0 || value.is_nan() {
-                // Positive or NaN: flip sign bit
-                bits ^ 0x80000000
-            } else {
-                // Negative: flip all bits
-                !bits
-            };
-            buf.extend_from_slice(&encoded.to_be_bytes());
-        }
-
-        std::borrow::Cow::Owned(buf)
-    }
-
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<OrderedFloat<f32>> {
-        if data.len() < 4 {
-            return Vec::new();
-        }
-
-        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        let mut keys = Vec::with_capacity(count);
-        let mut pos = 4;
-
-        for _ in 0..count {
-            if pos + 4 > data.len() {
-                break;
-            }
-            let bytes = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
-            let encoded = u32::from_be_bytes(bytes);
-            let bits = if encoded & 0x80000000 != 0 {
-                // Was positive: flip sign bit back
-                encoded ^ 0x80000000
-            } else {
-                // Was negative: flip all bits back
-                !encoded
-            };
-            let value = f32::from_bits(bits);
-            keys.push(OrderedFloat(value));
-            pos += 4;
-        }
-
-        keys
-    }
-
-    fn serialize_value<'a>(&self, bitmap: &'a RoaringBitmap) -> std::borrow::Cow<'a, [u8]> {
-        let ids: Vec<u32> = bitmap.iter().collect();
-        let vec_size = 1 + ids.len() * 4;
-        let bitmap_size = 1 + bitmap.serialized_size();
-
-        let mut buf = Vec::new();
-        if vec_size <= bitmap_size {
-            buf.push(0u8);
-            for id in ids {
-                buf.extend_from_slice(&id.to_be_bytes());
-            }
-        } else {
-            buf.push(1u8);
-            if let Err(_) = bitmap.serialize_into(&mut buf) {
-                buf.clear();
-                buf.push(0u8);
-                for id in bitmap.iter() {
-                    buf.extend_from_slice(&id.to_be_bytes());
-                }
-            }
-        }
-        std::borrow::Cow::Owned(buf)
-    }
-
-    fn deserialize_value<'a>(
-        &self,
-        data: &'a [u8],
-    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
-        if data.is_empty() {
-            return Err("Empty data".into());
-        }
-
-        match data[0] {
-            0 => {
-                let count = (data.len() - 1) / 4;
-                let mut ids = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = 1 + i * 4;
-                    if offset + 4 > data.len() {
-                        break;
-                    }
-                    let id = u32::from_be_bytes([
-                        data[offset],
-                        data[offset + 1],
-                        data[offset + 2],
-                        data[offset + 3],
-                    ]);
-                    ids.push(id);
-                }
-                Ok(RoaringBitmap::from_sorted_iter(ids.into_iter())?)
-            }
-            1 => Ok(RoaringBitmap::deserialize_from(&data[1..])?),
-            _ => Err("Unknown type flag".into()),
-        }
     }
 }

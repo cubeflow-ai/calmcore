@@ -46,29 +46,34 @@ pub fn decode_roaring_from_bytes(
 }
 
 /// Encode a RoaringBitmap into bytes with a leading marker, choosing the smaller form
-/// between: 0 + sorted u32s, or 1 + roaring native format.
+/// between: 0 + delta-encoded u32s, or 1 + roaring native format.
 pub fn encode_roaring_from_bitmap(bitmap: &RoaringBitmap) -> Vec<u8> {
-    // Estimate sizes
+    // Estimate sizes - need to check actual delta-encoded size
     let ids: Vec<u32> = bitmap.iter().collect();
-    let vec_size = 1 + ids.len() * 4;
-    let bitmap_size = 1 + bitmap.serialized_size();
 
-    let mut buf = Vec::new();
-    if vec_size <= bitmap_size {
-        buf.push(0u8);
-        for id in ids {
-            buf.extend_from_slice(&id.to_be_bytes());
+    // Try delta encoding
+    let mut delta_buf = Vec::new();
+    delta_buf.push(0u8);
+    if let Ok(_) = num_ser::u32_coder::write_delta(&mut delta_buf, &ids) {
+        // Try roaring native
+        let mut roaring_buf = Vec::new();
+        roaring_buf.push(1u8);
+        if let Ok(_) = bitmap.serialize_into(&mut roaring_buf) {
+            // Choose the smaller one
+            if delta_buf.len() <= roaring_buf.len() {
+                return delta_buf;
+            } else {
+                return roaring_buf;
+            }
+        } else {
+            // Roaring serialization failed, use delta
+            return delta_buf;
         }
     } else {
+        // Delta encoding failed (shouldn't happen), fallback to roaring
+        let mut buf = Vec::new();
         buf.push(1u8);
-        if let Err(_) = bitmap.serialize_into(&mut buf) {
-            // Fallback to plain ids if roaring serialization fails for any reason
-            buf.clear();
-            buf.push(0u8);
-            for id in bitmap.iter() {
-                buf.extend_from_slice(&id.to_be_bytes());
-            }
-        }
+        let _ = bitmap.serialize_into(&mut buf);
+        return buf;
     }
-    buf
 }

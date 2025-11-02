@@ -39,7 +39,7 @@ impl TreeWriter {
     pub fn persist<'a, K: 'a + Clone, V, R>(
         &self,
         len: usize,
-        serializer: Box<dyn KeySerializer<K, V, R>>,
+        serializer: Box<dyn WriteSerializer<K, V>>,
         iter: impl Iterator<Item = crate::Item<K, V>>,
     ) -> Result<()> {
         println!("persist tree len:{}", len);
@@ -130,26 +130,26 @@ impl<K: Clone> Chunk<K> {
     }
 }
 
-struct ChunkWriter<'a, K, V, R> {
+struct ChunkWriter<'a, K, V> {
     second_level: Vec<Chunk<K>>,
     node_file: BufWriter<File>,
-    serializer: &'a Box<dyn KeySerializer<K, V, R>>,
+    serializer: &'a Box<dyn WriteSerializer<K, V>>,
     current: Chunk<K>,
     chunk_size: usize,
     node_file_offset: u64, // Track node file offset manually
 }
 
-impl<'a, K, V, R> ChunkWriter<'a, K, V, R>
+impl<'a, K, V> ChunkWriter<'a, K, V>
 where
     K: Clone,
 {
     fn new(
         chunk_size: usize,
-        serializer: &'a Box<dyn KeySerializer<K, V, R>>,
+        serializer: &'a Box<dyn WriteSerializer<K, V>>,
         mut node_file: BufWriter<File>,
         key_len: u16,
         len: usize,
-    ) -> Result<ChunkWriter<'a, K, V, R>> {
+    ) -> Result<ChunkWriter<'a, K, V>> {
         node_file.write_all(MAGIC_VERSION)?;
         node_file.write_all(&[0; 8])?; // root node offset placeholder
         node_file.write_all(&key_len.to_be_bytes())?;

@@ -14,7 +14,7 @@ const NODE_NAME: &str = "node";
 
 type Result<T> = std::io::Result<T>;
 
-pub type TreeReader<K, V, R> = reader::TreeReader<K, V, R>;
+pub type TreeReader<K, R> = reader::TreeReader<K, R>;
 pub type TreeWriter = writer::TreeWriter;
 
 pub trait WriteSerializer<K, V>: Send + Sync {

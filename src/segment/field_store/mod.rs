@@ -25,8 +25,8 @@ pub mod num_i64;
 pub mod num_u32;
 // pub mod num_u64; // removed per design: u64 field not needed currently
 
-// Re-export StringIdsSerializer from keyword module
-pub use keyword::StringIdsSerializer;
+// Re-export StringRoaringSerializer from keyword module
+pub use keyword::StringRoaringSerializer;
 
 /// Serializer for u32 keys with RecordBatch values
 /// Stores RecordBatch in Arrow IPC format with zstd compression
@@ -45,7 +45,7 @@ impl U32RecordBatchSerializer {
     }
 }
 
-impl persist::KeySerializer<u32, RecordBatch, RecordBatch> for U32RecordBatchSerializer {
+impl persist::WriteSerializer<u32, RecordBatch> for U32RecordBatchSerializer {
     fn serialize_keys<'a>(&self, keys: &'a Vec<u32>) -> Cow<'a, [u8]> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(keys.len() as u32).to_be_bytes());
@@ -61,6 +61,28 @@ impl persist::KeySerializer<u32, RecordBatch, RecordBatch> for U32RecordBatchSer
         }
     }
 
+    fn serialize_value<'a>(&self, batch: &'a RecordBatch) -> Cow<'a, [u8]> {
+        use arrow::ipc::writer::StreamWriter;
+
+        let mut buf = Vec::new();
+
+        // 使用 Arrow IPC format
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &batch.schema())
+                .expect("Failed to create StreamWriter");
+            writer.write(batch).expect("Failed to write batch");
+            writer.finish().expect("Failed to finish writer");
+        }
+
+        // 使用 zstd 压缩
+        match zstd::encode_all(&buf[..], self.zstd_level) {
+            Ok(compressed) => Cow::Owned(compressed),
+            Err(_) => Cow::Owned(buf),
+        }
+    }
+}
+
+impl persist::ReadSerializer<u32, RecordBatch> for U32RecordBatchSerializer {
     fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u32> {
         // 解压
         let decompressed = match zstd::decode_all(data) {
@@ -96,26 +118,6 @@ impl persist::KeySerializer<u32, RecordBatch, RecordBatch> for U32RecordBatchSer
             pos += 4;
         }
         keys
-    }
-
-    fn serialize_value<'a>(&self, batch: &'a RecordBatch) -> Cow<'a, [u8]> {
-        use arrow::ipc::writer::StreamWriter;
-
-        let mut buf = Vec::new();
-
-        // 使用 Arrow IPC format
-        {
-            let mut writer = StreamWriter::try_new(&mut buf, &batch.schema())
-                .expect("Failed to create StreamWriter");
-            writer.write(batch).expect("Failed to write batch");
-            writer.finish().expect("Failed to finish writer");
-        }
-
-        // 使用 zstd 压缩
-        match zstd::encode_all(&buf[..], self.zstd_level) {
-            Ok(compressed) => Cow::Owned(compressed),
-            Err(_) => Cow::Owned(buf),
-        }
     }
 
     fn deserialize_value<'a>(&self, data: &'a [u8]) -> Result<RecordBatch, Box<dyn Error>> {
@@ -155,7 +157,7 @@ impl RowDataStore {
 
     pub fn new_disk<S>(path: &str, serializer: S) -> CoreResult<Self>
     where
-        S: persist::KeySerializer<u32, RecordBatch> + 'static,
+        S: persist::ReadSerializer<u32, RecordBatch> + 'static,
     {
         let reader = persist::TreeReader::new(std::path::Path::new(path), Box::new(serializer))
             .map_err(|e| crate::utils::error::CoreError::IOError(e.to_string()))?;
@@ -242,20 +244,22 @@ pub trait PkWriter: Sync + 'static {
 }
 
 #[derive(Clone)]
-pub(crate) enum InvertedIndex<K> {
+pub(crate) enum InvertedIndex<K>
+where
+    K: Clone + PartialOrd,
+{
     Disk(Arc<persist::TreeReader<K, RoaringBitmap>>),
     Memory(BTree<K, Arc<RwLock<Vec<u32>>>>),
 }
 
-impl<K: Clone + Ord> InvertedIndex<K> {
+impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
     pub fn new_memory(size: usize) -> InvertedIndex<K> {
         InvertedIndex::Memory(BTree::new(size))
     }
 
     pub fn new_disk<S>(path: &str, serializer: S) -> CoreResult<InvertedIndex<K>>
     where
-        K: Clone,
-        S: persist::KeySerializer<K, RoaringBitmap> + 'static,
+        S: persist::ReadSerializer<K, RoaringBitmap> + 'static,
     {
         let reader = persist::TreeReader::new(std::path::Path::new(path), Box::new(serializer))
             .map_err(|e| crate::utils::error::CoreError::IOError(e.to_string()))?;
@@ -264,7 +268,7 @@ impl<K: Clone + Ord> InvertedIndex<K> {
 }
 
 /// write functions
-impl<K: Clone + Ord> InvertedIndex<K> {
+impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
     pub(crate) fn extend(&mut self, k: K, ids: Vec<u32>) {
         if let InvertedIndex::Memory(tree) = self {
             match tree.get(&k) {
@@ -290,12 +294,10 @@ impl<K: Clone + Ord> InvertedIndex<K> {
 }
 
 /// read functions
-impl<K: Clone + Ord> InvertedIndex<K> {
+impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
     pub(crate) fn get_bitmap(&self, k: &K) -> Option<RoaringBitmap> {
         match self {
-            InvertedIndex::Disk(r) => r
-                .get(k)
-                .map(|ids| RoaringBitmap::from_sorted_iter(ids.into_iter())),
+            InvertedIndex::Disk(r) => r.get(k),
             InvertedIndex::Memory(btree) => btree.get(k).map(|v| {
                 RoaringBitmap::from_sorted_iter(v.read().unwrap().iter().copied()).unwrap()
             }),

@@ -7,7 +7,7 @@ use std::{
 use arrow::array::{ArrayRef, Int64Array, ListArray, RecordBatch, UInt32Array};
 use roaring::RoaringBitmap;
 
-use super::{IndexWriter, InvertedIndex, PkWriter};
+use super::{serializer::I64RoaringSerializer, IndexWriter, InvertedIndex, PkWriter};
 use crate::{
     arrow_downcast,
     partition::WriteInfo,
@@ -58,7 +58,7 @@ impl NumI64 {
         let writer = TreeWriter::new(std::path::PathBuf::from(path), 128, 8);
 
         writer
-            .persist(len, Box::new(serializer), iter)
+            .persist::<i64, RoaringBitmap, RoaringBitmap>(len, Box::new(serializer), iter)
             .map_err(|e| CoreError::IOError(e.to_string()))?;
 
         let disk_index = InvertedIndex::new_disk(path, I64RoaringSerializer::default())?;
@@ -201,93 +201,223 @@ impl PkWriter for NumI64 {
     }
 }
 
-/// Serializer for I64Key with RoaringBitmap values
-#[derive(Clone)]
-pub struct I64RoaringSerializer {
-    _zstd_level: i32,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::field::FieldOption;
 
-impl I64RoaringSerializer {
-    pub fn new(zstd_level: i32) -> Self {
-        Self {
-            _zstd_level: zstd_level,
+    #[test]
+    fn test_tree_writer_reader() {
+        use mem_btree::persist::{TreeReader, TreeWriter};
+        use roaring::RoaringBitmap;
+        use std::path::{Path, PathBuf};
+        use std::sync::Arc;
+
+        let persist_path = "/tmp/test_tree_direct";
+        let _ = std::fs::remove_dir_all(persist_path);
+
+        // 1. 写入数据
+        {
+            let writer = TreeWriter::new(PathBuf::from(persist_path), 128, 8); // i64 = 8 bytes
+            let serializer = I64RoaringSerializer::default();
+
+            let data = vec![
+                Arc::new((
+                    10i64,
+                    RoaringBitmap::from_sorted_iter([1, 2, 3].iter().copied()).unwrap(),
+                    None,
+                )),
+                Arc::new((
+                    20i64,
+                    RoaringBitmap::from_sorted_iter([4, 5, 6].iter().copied()).unwrap(),
+                    None,
+                )),
+            ];
+
+            writer
+                .persist::<i64, RoaringBitmap, RoaringBitmap>(
+                    2,
+                    Box::new(serializer),
+                    data.into_iter(),
+                )
+                .expect("Failed to persist");
         }
-    }
 
-    pub fn default() -> Self {
-        Self { _zstd_level: 3 }
-    }
-}
+        // 2. 检查文件是否创建
+        assert!(Path::new(persist_path).join("node").exists());
+        assert!(Path::new(persist_path).join("data").exists());
 
-impl mem_btree::persist::KeySerializer<i64, RoaringBitmap, RoaringBitmap> for I64RoaringSerializer {
-    fn serialize_keys<'a>(&self, keys: &'a Vec<i64>) -> std::borrow::Cow<'a, [u8]> {
-        use mem_btree::persist::num_ser::i64_coder;
-        let mut buf = Vec::new();
-        // Keys are strictly sorted; use delta encoding
-        i64_coder::write_delta(&mut buf, keys).expect("Failed to serialize i64 keys");
-        std::borrow::Cow::Owned(buf)
-    }
+        // 3. 读取数据
+        {
+            use mem_btree::persist::TreeReader;
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i64> {
-        use mem_btree::persist::num_ser::i64_coder;
-        let mut pos = 0;
-        // Decode with position-aware delta reader
-        i64_coder::read_delta_pos(&data, &mut pos)
-    }
+            let reader: TreeReader<i64, RoaringBitmap> = TreeReader::new(
+                Path::new(persist_path),
+                Box::new(I64RoaringSerializer::default()),
+            )
+            .expect("Failed to open reader");
 
-    fn serialize_value<'a>(&self, bitmap: &'a RoaringBitmap) -> std::borrow::Cow<'a, [u8]> {
-        let ids: Vec<u32> = bitmap.iter().collect();
-        let vec_size = 1 + ids.len() * 4;
-        let bitmap_size = 1 + bitmap.serialized_size();
+            println!("Reader len: {}", reader.len());
 
-        let mut buf = Vec::new();
-        if vec_size <= bitmap_size {
-            buf.push(0u8);
-            for id in ids {
-                buf.extend_from_slice(&id.to_be_bytes());
+            // 读取第一个值
+            let bitmap1 = reader.get(&10);
+            println!("bitmap1: {:?}", bitmap1);
+            if let Some(bitmap) = bitmap1 {
+                println!("bitmap1 len: {}", bitmap.len());
+                assert_eq!(bitmap.len(), 3);
+                assert!(bitmap.contains(1));
+                assert!(bitmap.contains(2));
+                assert!(bitmap.contains(3));
+            } else {
+                panic!("bitmap1 is None");
             }
-        } else {
-            buf.push(1u8);
-            if let Err(_) = bitmap.serialize_into(&mut buf) {
-                buf.clear();
-                buf.push(0u8);
-                for id in bitmap.iter() {
-                    buf.extend_from_slice(&id.to_be_bytes());
-                }
-            }
+
+            // 读取第二个值
+            let bitmap2 = reader.get(&20).expect("Should find key 20");
+            assert_eq!(bitmap2.len(), 3);
+            assert!(bitmap2.contains(4));
+            assert!(bitmap2.contains(5));
+            assert!(bitmap2.contains(6));
+
+            // 读取不存在的键
+            assert!(reader.get(&30).is_none());
         }
-        std::borrow::Cow::Owned(buf)
+
+        // 清理
+        let _ = std::fs::remove_dir_all(persist_path);
     }
 
-    fn deserialize_value<'a>(
-        &self,
-        data: &'a [u8],
-    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
-        if data.is_empty() {
-            return Err("Empty data".into());
+    #[test]
+    fn test_num_i64_persist_and_read() {
+        // 1. 创建一个内存中的 NumI64 索引
+        let field = FieldOption::I64 {
+            name: "age".to_string(),
+            index: true,
+        };
+
+        let num_i64 = NumI64::new(&field);
+
+        // 2. 写入一些测试数据
+        {
+            let mut indexs = num_i64.indexs.write().unwrap();
+            indexs.insert(18, vec![1, 2, 3]);
+            indexs.insert(25, vec![4, 5]);
+            indexs.insert(30, vec![6, 7, 8, 9]);
+            indexs.insert(45, vec![10]);
         }
 
-        match data[0] {
-            0 => {
-                let count = (data.len() - 1) / 4;
-                let mut ids = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = 1 + i * 4;
-                    if offset + 4 > data.len() {
-                        break;
-                    }
-                    let id = u32::from_be_bytes([
-                        data[offset],
-                        data[offset + 1],
-                        data[offset + 2],
-                        data[offset + 3],
-                    ]);
-                    ids.push(id);
-                }
-                Ok(RoaringBitmap::from_sorted_iter(ids.into_iter())?)
-            }
-            1 => Ok(RoaringBitmap::deserialize_from(&data[1..])?),
-            _ => Err("Unknown type flag".into()),
+        // 3. 验证内存索引
+        {
+            let indexs = num_i64.indexs.read().unwrap();
+            assert_eq!(indexs.len(), 4);
+            let bitmap = indexs.get_bitmap(&25).unwrap();
+            assert_eq!(bitmap.len(), 2);
+            assert!(bitmap.contains(4));
+            assert!(bitmap.contains(5));
         }
+
+        // 4. 持久化到磁盘
+        let persist_path = "/tmp/test_num_i64_persist";
+        let _ = std::fs::remove_dir_all(persist_path);
+
+        let disk_num_i64 = num_i64.persist(persist_path).unwrap();
+
+        // 5. 验证磁盘索引
+        {
+            let indexs = disk_num_i64.indexs.read().unwrap();
+            assert_eq!(indexs.len(), 4);
+
+            // 测试读取单个值
+            let bitmap = indexs.get_bitmap(&30).unwrap();
+            assert_eq!(bitmap.len(), 4);
+            assert!(bitmap.contains(6));
+            assert!(bitmap.contains(7));
+            assert!(bitmap.contains(8));
+            assert!(bitmap.contains(9));
+
+            // 测试读取不存在的键
+            assert!(indexs.get_bitmap(&100).is_none());
+        }
+
+        // 6. 清理
+        let _ = std::fs::remove_dir_all(persist_path);
+
+        println!("✅ NumI64 persist and read test passed!");
+    }
+
+    #[test]
+    fn test_serializer_compatibility() {
+        // 测试新的 WriteSerializer + ReadSerializer 模式
+        use mem_btree::persist::TreeWriter;
+        use std::path::Path;
+
+        let persist_path = "/tmp/test_i64_serializer";
+        let _ = std::fs::remove_dir_all(persist_path);
+
+        // 1. 使用 WriteSerializer 写入数据
+        {
+            let serializer = I64RoaringSerializer::default();
+            let writer = TreeWriter::new(std::path::PathBuf::from(persist_path), 128, 8);
+
+            let data = vec![
+                Arc::new((
+                    10i64,
+                    RoaringBitmap::from_sorted_iter([1, 2, 3].iter().copied()).unwrap(),
+                    None,
+                )),
+                Arc::new((
+                    20i64,
+                    RoaringBitmap::from_sorted_iter([4, 5, 6].iter().copied()).unwrap(),
+                    None,
+                )),
+                Arc::new((
+                    30i64,
+                    RoaringBitmap::from_sorted_iter([7, 8, 9].iter().copied()).unwrap(),
+                    None,
+                )),
+            ];
+
+            writer
+                .persist::<i64, RoaringBitmap, RoaringBitmap>(
+                    3,
+                    Box::new(serializer),
+                    data.into_iter(),
+                )
+                .expect("Failed to persist");
+        }
+
+        // 2. 使用 ReadSerializer 读取数据
+        {
+            use mem_btree::persist::TreeReader;
+
+            let reader: TreeReader<i64, RoaringBitmap> = TreeReader::new(
+                Path::new(persist_path),
+                Box::new(I64RoaringSerializer::default()),
+            )
+            .expect("Failed to open reader");
+
+            assert_eq!(reader.len(), 3);
+
+            // 读取第一个值
+            let bitmap = reader.get(&10).expect("Key 10 should exist");
+            assert_eq!(bitmap.len(), 3);
+            assert!(bitmap.contains(1));
+            assert!(bitmap.contains(2));
+            assert!(bitmap.contains(3));
+
+            // 读取第二个值
+            let bitmap = reader.get(&20).expect("Key 20 should exist");
+            assert_eq!(bitmap.len(), 3);
+            assert!(bitmap.contains(4));
+            assert!(bitmap.contains(5));
+
+            // 读取不存在的键
+            assert!(reader.get(&100).is_none());
+        }
+
+        // 3. 清理
+        let _ = std::fs::remove_dir_all(persist_path);
+
+        println!("✅ Serializer compatibility test passed!");
     }
 }

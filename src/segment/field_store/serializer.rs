@@ -99,3 +99,171 @@ impl RoaringSerializer<OrderedFloat<f64>> for F64RoaringSerializer {
         OrderedFloat(f64::from_bits(value as u64))
     }
 }
+
+// ============== 通用的 WriteSerializer 和 ReadSerializer 实现 ==============
+// 所有数字类型 -> RoaringBitmap 的序列化都可以复用这个实现
+
+use mem_btree::persist::{ReadSerializer, WriteSerializer};
+use roaring::RoaringBitmap;
+use std::borrow::Cow;
+
+// 为 i32 -> RoaringBitmap 实现
+impl WriteSerializer<i32, RoaringBitmap> for I32RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<i32>) -> Cow<'a, [u8]> {
+        use mem_btree::persist::num_ser::i64_coder;
+        let i64_keys: Vec<i64> = keys.iter().map(|&k| k as i64).collect();
+        let mut buf = Vec::new();
+        i64_coder::write_delta(&mut buf, &i64_keys).expect("write delta failed");
+        Cow::Owned(buf)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        let bytes = mem_btree::persist::value_codec::encode_roaring_from_bitmap(value);
+        Cow::Owned(bytes)
+    }
+}
+
+impl ReadSerializer<i32, RoaringBitmap> for I32RoaringSerializer {
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i32> {
+        use mem_btree::persist::num_ser::i64_coder;
+        i64_coder::read_delta(&data)
+            .iter()
+            .map(|&k| k as i32)
+            .collect()
+    }
+
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        mem_btree::persist::value_codec::decode_roaring_from_bytes(data)
+    }
+}
+
+// 为 i64 -> RoaringBitmap 实现
+impl WriteSerializer<i64, RoaringBitmap> for I64RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<i64>) -> Cow<'a, [u8]> {
+        use mem_btree::persist::num_ser::i64_coder;
+        let mut buf = Vec::new();
+        i64_coder::write_delta(&mut buf, keys).expect("write delta failed");
+        Cow::Owned(buf)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        let bytes = mem_btree::persist::value_codec::encode_roaring_from_bitmap(value);
+        Cow::Owned(bytes)
+    }
+}
+
+impl ReadSerializer<i64, RoaringBitmap> for I64RoaringSerializer {
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i64> {
+        use mem_btree::persist::num_ser::i64_coder;
+        i64_coder::read_delta(&data)
+    }
+
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        mem_btree::persist::value_codec::decode_roaring_from_bytes(data)
+    }
+}
+
+// 为 u32 -> RoaringBitmap 实现
+impl WriteSerializer<u32, RoaringBitmap> for U32RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<u32>) -> Cow<'a, [u8]> {
+        use mem_btree::persist::num_ser::i64_coder;
+        let i64_keys: Vec<i64> = keys.iter().map(|&k| k as i64).collect();
+        let mut buf = Vec::new();
+        i64_coder::write_delta(&mut buf, &i64_keys).expect("write delta failed");
+        Cow::Owned(buf)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        let bytes = mem_btree::persist::value_codec::encode_roaring_from_bitmap(value);
+        Cow::Owned(bytes)
+    }
+}
+
+impl ReadSerializer<u32, RoaringBitmap> for U32RoaringSerializer {
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u32> {
+        use mem_btree::persist::num_ser::i64_coder;
+        i64_coder::read_delta(&data)
+            .iter()
+            .map(|&k| k as u32)
+            .collect()
+    }
+
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        mem_btree::persist::value_codec::decode_roaring_from_bytes(data)
+    }
+}
+
+// 为 OrderedFloat<f32> -> RoaringBitmap 实现
+impl WriteSerializer<OrderedFloat<f32>, RoaringBitmap> for F32RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<OrderedFloat<f32>>) -> Cow<'a, [u8]> {
+        use mem_btree::persist::num_ser::i64_coder;
+        let i64_keys: Vec<i64> = keys.iter().map(|k| k.0.to_bits() as i64).collect();
+        let mut buf = Vec::new();
+        i64_coder::write_delta(&mut buf, &i64_keys).expect("write delta failed");
+        Cow::Owned(buf)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        let bytes = mem_btree::persist::value_codec::encode_roaring_from_bitmap(value);
+        Cow::Owned(bytes)
+    }
+}
+
+impl ReadSerializer<OrderedFloat<f32>, RoaringBitmap> for F32RoaringSerializer {
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<OrderedFloat<f32>> {
+        use mem_btree::persist::num_ser::i64_coder;
+        i64_coder::read_delta(&data)
+            .iter()
+            .map(|&k| OrderedFloat(f32::from_bits(k as u32)))
+            .collect()
+    }
+
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        mem_btree::persist::value_codec::decode_roaring_from_bytes(data)
+    }
+}
+
+// 为 OrderedFloat<f64> -> RoaringBitmap 实现
+impl WriteSerializer<OrderedFloat<f64>, RoaringBitmap> for F64RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<OrderedFloat<f64>>) -> Cow<'a, [u8]> {
+        use mem_btree::persist::num_ser::i64_coder;
+        let i64_keys: Vec<i64> = keys.iter().map(|k| k.0.to_bits() as i64).collect();
+        let mut buf = Vec::new();
+        i64_coder::write_delta(&mut buf, &i64_keys).expect("write delta failed");
+        Cow::Owned(buf)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        let bytes = mem_btree::persist::value_codec::encode_roaring_from_bitmap(value);
+        Cow::Owned(bytes)
+    }
+}
+
+impl ReadSerializer<OrderedFloat<f64>, RoaringBitmap> for F64RoaringSerializer {
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<OrderedFloat<f64>> {
+        use mem_btree::persist::num_ser::i64_coder;
+        i64_coder::read_delta(&data)
+            .iter()
+            .map(|&k| OrderedFloat(f64::from_bits(k as u64)))
+            .collect()
+    }
+
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        mem_btree::persist::value_codec::decode_roaring_from_bytes(data)
+    }
+}

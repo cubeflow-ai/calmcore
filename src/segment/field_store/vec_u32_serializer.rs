@@ -1,4 +1,4 @@
-use mem_btree::persist::KeySerializer;
+use mem_btree::persist::{ReadSerializer, WriteSerializer};
 use roaring::RoaringBitmap;
 use std::borrow::Cow;
 use std::error::Error;
@@ -84,7 +84,7 @@ impl VecU32Serializer {
     }
 }
 
-impl KeySerializer<String, Vec<u32>, Vec<u32>> for VecU32Serializer {
+impl WriteSerializer<String, Vec<u32>> for VecU32Serializer {
     fn serialize_keys<'a>(&self, keys: &'a Vec<String>) -> Cow<'a, [u8]> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(keys.len() as u32).to_be_bytes());
@@ -102,6 +102,55 @@ impl KeySerializer<String, Vec<u32>, Vec<u32>> for VecU32Serializer {
         }
     }
 
+    fn serialize_value<'a>(&self, value: &'a Vec<u32>) -> Cow<'a, [u8]> {
+        let mut buf = Vec::new();
+
+        // 选择存储格式
+        let format = if value.len() < self.bitmap_threshold {
+            StorageFormat::Raw
+        } else if Self::is_sorted(value) {
+            StorageFormat::Delta
+        } else {
+            StorageFormat::Bitmap
+        };
+
+        // 写入格式标记
+        buf.push(format as u8);
+
+        match format {
+            StorageFormat::Raw => {
+                // 直接写入长度和数据
+                buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
+                for &v in value {
+                    buf.extend_from_slice(&v.to_be_bytes());
+                }
+            }
+            StorageFormat::Bitmap => {
+                // 转换为 RoaringBitmap (数据可能无序，使用 from_iter)
+                let bitmap = RoaringBitmap::from_iter(value.iter().copied());
+                let mut bitmap_buf = Vec::new();
+                bitmap.serialize_into(&mut bitmap_buf).unwrap();
+                buf.extend_from_slice(&bitmap_buf);
+            }
+            StorageFormat::Delta => {
+                // Delta 编码
+                let encoded = Self::encode_delta(value);
+                buf.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+                for &v in &encoded {
+                    buf.extend_from_slice(&v.to_be_bytes());
+                }
+            }
+        }
+
+        // 压缩
+        match zstd::encode_all(&buf[..], self.zstd_level) {
+            Ok(compressed) => Cow::Owned(compressed),
+            Err(_) => Cow::Owned(buf),
+        }
+    }
+}
+
+impl ReadSerializer<String, Vec<u32>> for VecU32Serializer {
     fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<String> {
         // 解压
         let decompressed = match zstd::decode_all(data) {
@@ -148,53 +197,6 @@ impl KeySerializer<String, Vec<u32>, Vec<u32>> for VecU32Serializer {
         }
 
         keys
-    }
-
-    fn serialize_value<'a>(&self, value: &'a Vec<u32>) -> Cow<'a, [u8]> {
-        let mut buf = Vec::new();
-
-        // 选择存储格式
-        let format = if value.len() < self.bitmap_threshold {
-            StorageFormat::Raw
-        } else if Self::is_sorted(value) {
-            StorageFormat::Delta
-        } else {
-            StorageFormat::Bitmap
-        };
-
-        // 写入格式标记
-        buf.push(format as u8);
-
-        match format {
-            StorageFormat::Raw => {
-                // 直接写入长度和数据
-                buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
-                for &v in value {
-                    buf.extend_from_slice(&v.to_be_bytes());
-                }
-            }
-            StorageFormat::Bitmap => {
-                // 转换为 RoaringBitmap
-                let bitmap = RoaringBitmap::from_sorted_iter(value.iter().copied()).unwrap();
-                let mut bitmap_buf = Vec::new();
-                bitmap.serialize_into(&mut bitmap_buf).unwrap();
-                buf.extend_from_slice(&bitmap_buf);
-            }
-            StorageFormat::Delta => {
-                // Delta 编码
-                let encoded = Self::encode_delta(value);
-                buf.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
-                for &v in &encoded {
-                    buf.extend_from_slice(&v.to_be_bytes());
-                }
-            }
-        }
-
-        // 压缩
-        match zstd::encode_all(&buf[..], self.zstd_level) {
-            Ok(compressed) => Cow::Owned(compressed),
-            Err(_) => Cow::Owned(buf),
-        }
     }
 
     fn deserialize_value<'a>(&self, data: &'a [u8]) -> Result<Vec<u32>, Box<dyn Error>> {
@@ -295,7 +297,7 @@ mod tests {
 
         // 验证格式是 Raw
         assert_eq!(
-            zstd::decode_all(&serialized).unwrap()[0],
+            zstd::decode_all(&*serialized).unwrap()[0],
             StorageFormat::Raw as u8
         );
     }
@@ -312,7 +314,7 @@ mod tests {
 
         // 验证格式是 Delta（因为是有序的）
         assert_eq!(
-            zstd::decode_all(&serialized).unwrap()[0],
+            zstd::decode_all(&*serialized).unwrap()[0],
             StorageFormat::Delta as u8
         );
     }
@@ -330,7 +332,7 @@ mod tests {
 
         // 验证格式是 Bitmap（因为大于阈值且无序）
         assert_eq!(
-            zstd::decode_all(&serialized).unwrap()[0],
+            zstd::decode_all(&*serialized).unwrap()[0],
             StorageFormat::Bitmap as u8
         );
     }

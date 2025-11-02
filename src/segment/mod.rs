@@ -4,13 +4,10 @@ use crate::{
     partition::WriteInfo,
     schema::{field::FieldOption, Schema},
     segment::field_store::{
-        keyword::{Keyword, StringIdsSerializer},
-        num_f32::{F32RoaringSerializer, NumF32},
-        num_f64::{F64RoaringSerializer, NumF64},
-        num_i32::{I32RoaringSerializer, NumI32},
-        num_i64::{I64RoaringSerializer, NumI64},
-        num_u32::{NumU32, U32RoaringSerializer},
-        IndexWriter, InvertedIndex, PkWriter, RowDataStore, U32RecordBatchSerializer,
+        keyword::Keyword, num_f32::NumF32, num_f64::NumF64, num_i32::NumI32, num_i64::NumI64,
+        num_u32::NumU32, F32RoaringSerializer, F64RoaringSerializer, I32RoaringSerializer,
+        I64RoaringSerializer, IndexWriter, InvertedIndex, PkWriter, RowDataStore,
+        U32RecordBatchSerializer, U32RoaringSerializer,
     },
     utils::error::{CoreError, CoreResult},
 };
@@ -55,56 +52,29 @@ impl Segment {
         let mut fields: Vec<Box<dyn IndexWriter>> = Vec::new();
 
         for field_opt in &schema.fields {
-            let field_path = format!("{}/field-{}", segment_path, field_opt.name());
-
             match field_opt {
                 FieldOption::Keyword { .. } => {
-                    let keyword = Keyword::from_disk(field_opt, &field_path)?;
+                    let keyword = Keyword::new(field_opt);
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
                 FieldOption::I32 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_i32::I32RoaringSerializer::default(),
-                    )?;
-
-                    let num = field_store::num_i32::NumI32::from_disk(field_opt, inverted_index)?;
+                    let num = NumI32::new(field_opt);
                     fields.push(Box::new(num));
                 }
                 FieldOption::I64 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_i64::I64RoaringSerializer::default(),
-                    )?;
-
-                    let num = field_store::num_i64::NumI64::from_disk(field_opt, inverted_index)?;
+                    let num = NumI64::new(field_opt);
                     fields.push(Box::new(num));
                 }
                 FieldOption::U32 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_u32::U32RoaringSerializer::default(),
-                    )?;
-
-                    let num = field_store::num_u32::NumU32::from_disk(field_opt, inverted_index)?;
+                    let num = NumU32::new(field_opt);
                     fields.push(Box::new(num));
                 }
                 FieldOption::F32 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_f32::F32RoaringSerializer::default(),
-                    )?;
-
-                    let num = field_store::num_f32::NumF32::from_disk(field_opt, inverted_index)?;
+                    let num = NumF32::new(field_opt);
                     fields.push(Box::new(num));
                 }
                 FieldOption::F64 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_f64::F64RoaringSerializer::default(),
-                    )?;
-
-                    let num = field_store::num_f64::NumF64::from_disk(field_opt, inverted_index)?;
+                    let num = NumF64::new(field_opt);
                     fields.push(Box::new(num));
                 }
             }
@@ -520,58 +490,42 @@ impl Segment {
             match field_opt {
                 FieldOption::Keyword { .. } => {
                     // Create disk-based Keyword
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::keyword::StringRoaringSerializer::default(),
-                    )?;
-
-                    let keyword =
-                        field_store::keyword::Keyword::from_disk(field_opt, inverted_index)?;
+                    let keyword = Keyword::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
                 FieldOption::I32 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_i32::I32RoaringSerializer::default(),
-                    )?;
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, I32RoaringSerializer::default())?;
 
-                    let num = field_store::num_i32::NumI32::from_disk(field_opt, inverted_index)?;
+                    let num = NumI32::from_disk(field_opt, inverted_index)?;
                     fields.push(Box::new(num));
                 }
                 FieldOption::I64 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_i64::I64RoaringSerializer::default(),
-                    )?;
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, I64RoaringSerializer::default())?;
 
-                    let num = field_store::num_i64::NumI64::from_disk(field_opt, inverted_index)?;
+                    let num = NumI64::from_disk(field_opt, inverted_index)?;
                     fields.push(Box::new(num));
                 }
                 FieldOption::U32 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_u32::U32RoaringSerializer::default(),
-                    )?;
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, U32RoaringSerializer::default())?;
 
-                    let num = field_store::num_u32::NumU32::from_disk(field_opt, inverted_index)?;
+                    let num = NumU32::from_disk(field_opt, inverted_index)?;
                     fields.push(Box::new(num));
                 }
                 FieldOption::F32 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_f32::F32RoaringSerializer::default(),
-                    )?;
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, F32RoaringSerializer::default())?;
 
-                    let num = field_store::num_f32::NumF32::from_disk(field_opt, inverted_index)?;
+                    let num = NumF32::from_disk(field_opt, inverted_index)?;
                     fields.push(Box::new(num));
                 }
                 FieldOption::F64 { .. } => {
-                    let inverted_index = InvertedIndex::new_disk(
-                        &field_path,
-                        field_store::num_f64::F64RoaringSerializer::default(),
-                    )?;
+                    let inverted_index =
+                        InvertedIndex::new_disk(&field_path, F64RoaringSerializer::default())?;
 
-                    let num = field_store::num_f64::NumF64::from_disk(field_opt, inverted_index)?;
+                    let num = NumF64::from_disk(field_opt, inverted_index)?;
                     fields.push(Box::new(num));
                 }
             }
@@ -933,7 +887,7 @@ impl Segment {
         end_id: u64,
         schema: Arc<Schema>,
     ) -> CoreResult<Self> {
-        use crate::segment::field_store::{InvertedIndex, StringRoaringSerializer};
+        use crate::segment::field_store::InvertedIndex;
 
         let segment_path = format!("{}/segment-{}-{}", base_dir, start_id, end_id);
 
@@ -957,10 +911,7 @@ impl Segment {
             match field_opt {
                 FieldOption::Keyword { .. } => {
                     // Create disk-based Keyword
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, StringRoaringSerializer::default())?;
-
-                    let keyword = Keyword::from_disk(field_opt, inverted_index)?;
+                    let keyword = Keyword::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
                 FieldOption::I32 { .. } => {
@@ -1229,7 +1180,7 @@ impl Segment {
         );
 
         writer
-            .persist(batch_count, Box::new(serializer), iter)
+            .persist::<u32, RecordBatch, RecordBatch>(batch_count, Box::new(serializer), iter)
             .map_err(|e| CoreError::IOError(e.to_string()))?;
 
         Ok(())
