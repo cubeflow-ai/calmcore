@@ -6,9 +6,8 @@ use std::{
 
 use arrow::array::{ArrayRef, ListArray, RecordBatch, StringArray, UInt32Array};
 use byteorder::WriteBytesExt;
-use mem_btree::persist::{num_ser, zigzag};
-use rayon::result;
-use roaring::{treemap::BitmapIter, RoaringBitmap};
+use mem_btree::persist::{zigzag, KeySerializer};
+use roaring::RoaringBitmap;
 
 use crate::{
     arrow_downcast,
@@ -35,7 +34,7 @@ impl Keyword {
     pub fn from_disk(field: &FieldOption, field_path: &str) -> CoreResult<Self> {
         // Create disk-based Keyword
         let inverted_index =
-            InvertedIndex::new_disk(&field_path, StringRoaringSerializer::default())?;
+            InvertedIndex::new_disk(&field_path, super::StringRoaringSerializer::default())?;
 
         Ok(Self {
             field: field.clone(),
@@ -239,27 +238,14 @@ impl KeywordIdsSerializer {
 }
 
 impl mem_btree::persist::KeySerializer<String, Vec<u32>, RoaringBitmap> for KeywordIdsSerializer {
-    fn serialize_keys<'a>(&self, keys: &'a Vec<String>) -> CoreResult<Vec<u8>> {
-        let mut uncompressed = Vec::new();
-
-        // 写入key的个数
-        uncompressed.write_u16::<byteorder::BigEndian>(keys.len() as u16)?;
-
-        // 写入每个key
-        for key in keys {
-            let key_bytes = key.as_bytes();
-            zigzag::write_u32(&mut uncompressed, key_bytes.len() as i32)?;
-            uncompressed.extend_from_slice(key_bytes);
-        }
-
-        Ok(zstd::encode_all(&uncompressed[..], self.zstd_level))
-    }
-
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> CoreResult<Vec<String>> {
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<String> {
         if data.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
-        let data_to_parse = zstd::decode_all(data)?;
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
         let mut result = Vec::new();
         let mut pos = 0;
         let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
@@ -270,7 +256,7 @@ impl mem_btree::persist::KeySerializer<String, Vec<u32>, RoaringBitmap> for Keyw
             }
 
             // 读取key的长度（zigzag编码）
-            let len = zigzag::read_u32(&data_to_parse[pos..], &mut pos) as usize;
+            let len = zigzag::read_u32(&data_to_parse, &mut pos) as usize;
 
             if pos + len > data_to_parse.len() {
                 break;
@@ -283,49 +269,102 @@ impl mem_btree::persist::KeySerializer<String, Vec<u32>, RoaringBitmap> for Keyw
             }
             pos += len;
         }
-        Ok(result)
+        result
     }
 
-    fn serialize_value<'a>(&self, value: &'a Vec<u32>) -> CoreResult<std::borrow::Cow<'a, [u8]>> {
-        let mut result = Vec::new();
-        if value.len() < 1000 {
-            result.push(0); // 标记0：delta编码
-            num_ser::u32_coder::write_delta(&mut result, value)?;
-        } else {
-            result.push(1); // 标记1：RoaringBitmap原生序列化
-            let rb = RoaringBitmap::from_iter(value.iter().copied());
-            rb.serialize_into(&mut result)?;
-        }
-        Ok(std::borrow::Cow::Owned(result))
+    fn serialize_value<'a>(&self, value: &'a Vec<u32>) -> std::borrow::Cow<'a, [u8]> {
+        let bytes = mem_btree::persist::value_codec::encode_roaring_from_u32s(value)
+            .unwrap_or_else(|_| Vec::new());
+        std::borrow::Cow::Owned(bytes)
     }
 
     fn deserialize_value<'a>(
         &self,
         data: &'a [u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        mem_btree::persist::value_codec::decode_roaring_from_bytes(data)
+    }
+}
+
+/// 磁盘用：String -> RoaringBitmap 的序列化器
+#[derive(Clone)]
+pub struct StringRoaringSerializer {
+    zstd_level: i32,
+}
+
+impl StringRoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+    pub fn default() -> Self {
+        Self { zstd_level: 3 }
+    }
+}
+
+impl mem_btree::persist::ReadSerializer<String, RoaringBitmap> for StringRoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        mem_btree::persist::value_codec::decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<String> {
         if data.is_empty() {
-            return Ok(RoaringBitmap::new());
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        let mut result = Vec::new();
+        let mut pos = 0;
+        if data_to_parse.len() < 2 {
+            return result;
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        pos += 2;
+        for _ in 0..key_count {
+            if pos >= data_to_parse.len() {
+                break;
+            }
+            let len = mem_btree::persist::zigzag::read_u32(&data_to_parse, &mut pos) as usize;
+            if pos + len > data_to_parse.len() {
+                break;
+            }
+            match String::from_utf8(data_to_parse[pos..pos + len].to_vec()) {
+                Ok(key) => result.push(key),
+                Err(_) => break,
+            }
+            pos += len;
+        }
+        result
+    }
+}
+
+impl mem_btree::persist::WriteSerializer<String, Vec<u32>> for StringRoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<String>) -> std::borrow::Cow<'a, [u8]> {
+        let mut uncompressed = Vec::new();
+        // 写入 key 的个数（u16 varint 更短，这里复用 BigEndian u16 保持一致性）
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+
+        for key in keys {
+            let key_bytes = key.as_bytes();
+            mem_btree::persist::zigzag::write_u32(key_bytes.len() as u32, &mut uncompressed)
+                .expect("write zigzag u32 failed");
+            uncompressed.extend_from_slice(key_bytes);
         }
 
-        let marker = data[0];
-        let mut data_slice = &data[1..];
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        std::borrow::Cow::Owned(compressed)
+    }
 
-        match marker {
-            0 => {
-                // delta编码
-                let ids = num_ser::u32_coder::read_delta(&data_slice);
-                Ok(RoaringBitmap::from_iter(ids))
-            }
-            1 => {
-                // RoaringBitmap原生序列化
-                RoaringBitmap::deserialize_from(&mut data_slice)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-            }
-            _ => Err(Box::new(CoreError::Internal(format!(
-                "Unknown marker byte for value deserialization: {}",
-                marker
-            )))),
-        }
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> std::borrow::Cow<'a, [u8]> {
+        let bytes = mem_btree::persist::value_codec::encode_roaring_from_bitmap(value);
+        std::borrow::Cow::Owned(bytes)
     }
 }
 
