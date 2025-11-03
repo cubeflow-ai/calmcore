@@ -31,12 +31,14 @@ mod test {
             name: "id".to_string(),
             index: true,
             is_array: false,
+            zip_level: 3,
         });
 
         schema.add_field(schema::field::FieldOption::Keyword {
             name: "name".to_string(),
             index: true,
             is_array: false,
+            zip_level: 3,
         });
 
         let partition = Partition::new(0, PathBuf::from("./data"), schema);

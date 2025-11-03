@@ -22,10 +22,17 @@ pub mod num_f64;
 pub mod num_i32;
 pub mod num_i64;
 pub mod num_u32;
+pub mod serializer;
 // pub mod num_u64; // removed per design: u64 field not needed currently
 
 // Re-export StringRoaringSerializer from keyword module
 pub use keyword::StringRoaringSerializer;
+
+// Re-export numeric serializers
+pub use serializer::{
+    F32RoaringSerializer, F64RoaringSerializer, I32RoaringSerializer, I64RoaringSerializer,
+    U32RoaringSerializer,
+};
 
 /// Serializer for u32 keys with RecordBatch values
 /// Stores RecordBatch in Arrow IPC format with zstd compression
