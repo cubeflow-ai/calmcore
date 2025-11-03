@@ -19,6 +19,7 @@ pub enum FieldOption {
         name: String,
         index: bool,
         is_array: bool,
+        zip_level: i32,
     },
     I32 {
         name: String,

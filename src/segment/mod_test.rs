@@ -19,6 +19,7 @@ mod tests {
                 name: "tags".to_string(),
                 is_array: false,
                 index: true,
+                zip_level: 3,
             }],
         });
 
@@ -109,6 +110,7 @@ mod tests {
                 name: "tags".to_string(),
                 is_array: false,
                 index: true,
+                zip_level: 3,
             }],
         });
 

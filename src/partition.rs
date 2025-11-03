@@ -412,22 +412,26 @@ mod tests {
                     name: "id".to_string(),
                     index: true,
                     is_array: false,
+                    zip_level: 3,
                 },
                 // 文本类型字段
                 FieldOption::Keyword {
                     name: "name".to_string(),
                     index: true,
                     is_array: false,
+                    zip_level: 3,
                 },
                 FieldOption::Keyword {
                     name: "url".to_string(),
                     index: true,
                     is_array: false,
+                    zip_level: 3,
                 },
                 FieldOption::Keyword {
                     name: "tags".to_string(),
                     index: true,
                     is_array: true, // 数组类型
+                    zip_level: 3,
                 },
                 // 数值字段
                 FieldOption::I32 {
@@ -1325,11 +1329,13 @@ mod tests {
                     name: "id".to_string(),
                     is_array: false,
                     index: true,
+                    zip_level: 3,
                 },
                 FieldOption::Keyword {
                     name: "name".to_string(),
                     is_array: false,
                     index: true,
+                    zip_level: 3,
                 },
             ],
         });
