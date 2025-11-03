@@ -120,7 +120,7 @@ mod test {
         });
 
         // 创建临时目录用于测试
-        let test_dir = PathBuf::from("/tmp/test_1m_data");
+        let test_dir = std::env::temp_dir().join("test_1m_data");
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).unwrap();
 
