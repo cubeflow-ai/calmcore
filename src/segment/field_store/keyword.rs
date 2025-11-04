@@ -187,12 +187,11 @@ impl IndexWriter for Keyword {
         FieldType::Keyword
     }
 
-    fn mget_internal_id(&self, _pk_filter: &RwLock<RoaringBitmap>, column: &ArrayRef) -> Vec<u32> {
+    fn mget_internal_id(&self, column: &ArrayRef) -> Vec<u32> {
         use arrow::array::Array;
 
-        // 注意：pk_filter 存储的是主键的 hash 值，而不是文档 ID
-        // 在这个方法中，我们直接从倒排索引查询文档 ID，不需要和 pk_filter 做交集
-        // pk_filter 已经在 Segment::mget_internal_id 中用于快速过滤 segment 了
+        // BloomFilter 已经在 Segment::mget_internal_id 中用于快速过滤 segment 了
+        // 这里直接从倒排索引查询文档 ID
 
         // 将 column 转换为 StringArray
         let string_array = arrow_downcast!(column, StringArray);

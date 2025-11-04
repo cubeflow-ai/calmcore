@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 
 #[tokio::main]
 async fn main() {
-    println!("🚀 JSON 读写测试 Demo - 1000万条数据\n");
+    // 清理旧数据（如果存在）
+    let _ = std::fs::remove_dir_all("./json_upsert_demo_data");
+
+    println!("🚀 JSON 读写测试 Demo - 100万条数据\n");
 
     let engine = Engine::new(EngineConfig {
         data_dir: "./json_upsert_demo_data".into(),
@@ -24,7 +27,7 @@ async fn main() {
     let partition = engine.create_partition(1, schema.clone()).await;
 
     // 测试参数
-    let total_records = 10_000_000; // 1000万条数据
+    let total_records = 10_000_000; // 先测试100万条数据验证性能
     let batch_size = 1_000;
     let total_batches = total_records / batch_size;
 
@@ -70,18 +73,34 @@ async fn main() {
         total_records as f64 / write_duration.as_secs_f64()
     );
 
-    // 先 flush 确保数据可查询
+    // 持久化所有数据
     println!("\n═══════════════════════════════════════════════════════════════");
-    println!("[2] 查询阶段：测试主键查询性能");
+    println!("[2] 持久化阶段：确保所有数据写入磁盘");
     println!("═══════════════════════════════════════════════════════════════\n");
 
-    println!("    Flush数据以便查询...");
-    partition.flush(false).ok();
-    println!("    ✅ Flush 完成\n");
+    let persist_start = Instant::now();
+    engine.stop().await;
+    let persist_duration = persist_start.elapsed();
 
-    // 先 flush 确保数据可查询
-    println!("\n    Flush数据以便查询...");
-    partition.flush(false).ok();
+    let total_duration = start_write.elapsed();
+    println!("\n    ✅ 持久化完成!");
+    println!(
+        "       - 持久化耗时: {:.2} 秒",
+        persist_duration.as_secs_f64()
+    );
+    println!(
+        "       - 写入+持久化总耗时: {:.2} 秒",
+        total_duration.as_secs_f64()
+    );
+    println!(
+        "       - 端到端吞吐量: {:.0} 条/秒",
+        total_records as f64 / total_duration.as_secs_f64()
+    );
+
+    // 查询测试
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("[3] 查询阶段：测试主键查询性能");
+    println!("═══════════════════════════════════════════════════════════════\n");
 
     // Step 5: 测试主键查询
     println!("\n[5] 测试主键查询 (使用 get_by_pk 方法)");
@@ -89,8 +108,8 @@ async fn main() {
     let test_ids = vec![
         "user_0000000000", // 第一条
         "user_0000001000", // 前面某条
-        "user_0005000000", // 中间位置
-        "user_0009999999", // 最后一条
+        "user_0000500000", // 中间位置
+        "user_0000999999", // 最后一条
     ];
 
     println!("    测试单个主键查询 ({} 条记录)...", test_ids.len());
@@ -136,10 +155,10 @@ async fn main() {
     let batch_query_start = Instant::now();
     let batch_ids = vec![
         "user_0000000000",
-        "user_0001000000",
-        "user_0005000000",
-        "user_0009000000",
-        "user_0009999999",
+        "user_0000100000",
+        "user_0000500000",
+        "user_0000900000",
+        "user_0000999999",
     ];
 
     match partition.get_by_pk(&batch_ids) {
@@ -185,25 +204,20 @@ async fn main() {
     );
     println!("       - QPS: {:.0}", test_count as f64 / stress_duration);
 
-    // Shutdown
-    println!("\n═══════════════════════════════════════════════════════════════");
-    println!("[3] 关闭 Engine");
-    println!("═══════════════════════════════════════════════════════════════\n");
-    engine.shutdown().await;
-    println!("    ✅ Engine 已关闭");
-
     println!("\n{}", "=".repeat(80));
     println!("✨ 测试完成！\n");
-    println!("� 性能总结:");
+    println!("📊 性能总结:");
     println!("   ✅ 写入: {} 条记录", total_records);
     println!(
-        "   ✅ 写入吞吐量: {:.0} 条/秒",
+        "   ✅ 纯写入吞吐量: {:.0} 条/秒 (不含持久化)",
         total_records as f64 / write_duration.as_secs_f64()
     );
     println!(
-        "   ✅ 查询 QPS: {:.0}",
-        test_count as f64 / stress_duration
+        "   ✅ 端到端吞吐量: {:.0} 条/秒 (含持久化)",
+        total_records as f64 / total_duration.as_secs_f64()
     );
+    println!("   ✅ 持久化耗时: {:.2} 秒", persist_duration.as_secs_f64());
+    println!("   ✅ 查询 QPS: {:.0}", test_count as f64 / stress_duration);
     println!(
         "   ✅ 平均查询延迟: {:.3} ms",
         (stress_duration * 1000.0) / test_count as f64
@@ -254,7 +268,7 @@ fn create_schema() -> Schema {
             },
         ],
         persist_policy: PersistPolicy {
-            max_docs_per_segment: 10_000,
+            max_docs_per_segment: 500_000,
             max_segment_age: Duration::from_secs(30),
         },
     }

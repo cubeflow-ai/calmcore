@@ -13,6 +13,7 @@ use arrow::{
     array::{ArrayRef, RecordBatch, UInt32Array},
     datatypes::{DataType, Field, SchemaRef},
 };
+use bloomfilter::Bloom;
 use itertools::Itertools;
 use roaring::RoaringBitmap;
 use std::{
@@ -35,10 +36,10 @@ pub enum FieldIndexMode {
 pub struct Segment {
     pub start: u64,
     doc_id_gen: AtomicU32,
-    max_doc_id: AtomicU32, // 当前已分配的最大文档ID (用于计算end)
-    persisted: AtomicBool, // 是否已持久化到磁盘
-    created_at: Instant,   // Segment 创建时间（用于时间阈值判断）
-    pk_bloomfilter: RwLock<RoaringBitmap>,
+    max_doc_id: AtomicU32,              // 当前已分配的最大文档ID (用于计算end)
+    persisted: AtomicBool,              // 是否已持久化到磁盘
+    created_at: Instant,                // Segment 创建时间（用于时间阈值判断）
+    pk_bloomfilter: RwLock<Bloom<u32>>, // 使用真正的 BloomFilter
     deleted: RwLock<RoaringBitmap>,
     fields: RwLock<Vec<Box<dyn IndexWriter>>>, // 改为 RwLock 以支持替换为 Disk 版本
     field_index: HashMap<String, usize>,
@@ -72,13 +73,17 @@ impl Segment {
             .map(|(i, f)| (f.name().to_string(), i))
             .collect();
 
+        // 创建 BloomFilter: 预估每个 segment 最多存储的文档数，误判率 1%
+        let expected_items = schema.persist_policy.max_docs_per_segment as usize;
+        let bloom = Bloom::new_for_fp_rate(expected_items, 0.01);
+
         Self {
             start,
             doc_id_gen: AtomicU32::new(0),
             max_doc_id: AtomicU32::new(0), // 初始没有文档,所以max_doc_id=0(无效值)
             persisted: AtomicBool::new(false),
             created_at: Instant::now(),
-            pk_bloomfilter: RwLock::default(),
+            pk_bloomfilter: RwLock::new(bloom),
             deleted: RwLock::default(),
             fields: RwLock::new(fields),
             field_index,
@@ -183,8 +188,12 @@ impl Segment {
                     self.deleted.write().unwrap().extend(del.iter());
                 }
 
+                // 将主键哈希值插入 BloomFilter
                 if let Some(hashes) = pk_hash {
-                    self.pk_bloomfilter.write().unwrap().extend(hashes);
+                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    for hash in hashes {
+                        bloom.set(&hash);
+                    }
                 }
             }
             _ => {
@@ -203,10 +212,10 @@ impl Segment {
     /// if not found, return None, never return empty vector
     /// internal id is the row number in the segment + start
     pub fn mget_internal_id(&self, pk_hash: &[u32], column: &ArrayRef) -> Option<Vec<u32>> {
-        // 使用 bloomfilter 进行预过滤，快速判断主键是否可能存在于当前 segment
-        let active = pk_hash
-            .iter()
-            .any(|v| self.pk_bloomfilter.read().unwrap().contains(*v));
+        // 使用 BloomFilter 进行预过滤，快速判断主键是否可能存在于当前 segment
+        let bloom = self.pk_bloomfilter.read().unwrap();
+        let active = pk_hash.iter().any(|v| bloom.check(v));
+        drop(bloom);
 
         // not found any id in this segment
         if !active {
@@ -220,7 +229,7 @@ impl Segment {
 
         let ids = {
             let fields = self.fields.read().unwrap();
-            let ids = fields[index].mget_internal_id(&self.pk_bloomfilter, column);
+            let ids = fields[index].mget_internal_id(column);
 
             let del_guard = self.deleted.read().unwrap();
 
@@ -441,15 +450,44 @@ impl Segment {
         let row_data_path = format!("{}/row_data", segment_path);
 
         let pk_bloomfilter = if std::path::Path::new(&pk_path).exists() {
-            let mut buffer = Vec::new();
-            std::fs::File::open(&pk_path)
-                .map_err(|e| CoreError::IOError(e.to_string()))?
-                .read_to_end(&mut buffer)
-                .map_err(|e| CoreError::IOError(e.to_string()))?;
-            RoaringBitmap::deserialize_from(&buffer[..])
-                .map_err(|e| CoreError::IOError(e.to_string()))?
+            let buffer = std::fs::read(&pk_path)
+                .map_err(|e| CoreError::IOError(format!("Failed to read pk_bloomfilter: {}", e)))?;
+
+            // 解析格式: [k_num(4 bytes)][sip_keys(4*16 bytes)][bitmap_len(8 bytes)][bitmap]
+            let mut offset = 0;
+            let k_num = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as u32;
+            offset += 4;
+
+            let mut sip_keys = [(0u64, 0u64); 2];
+            for i in 0..2 {
+                let k0_bytes: [u8; 8] = buffer[offset..offset + 8]
+                    .try_into()
+                    .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
+                let k0 = u64::from_le_bytes(k0_bytes);
+                offset += 8;
+
+                let k1_bytes: [u8; 8] = buffer[offset..offset + 8]
+                    .try_into()
+                    .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
+                let k1 = u64::from_le_bytes(k1_bytes);
+                offset += 8;
+
+                sip_keys[i] = (k0, k1);
+            }
+
+            let bitmap_len_bytes: [u8; 8] = buffer[offset..offset + 8]
+                .try_into()
+                .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
+            let bitmap_len = u64::from_le_bytes(bitmap_len_bytes) as usize;
+            offset += 8;
+
+            let bitmap = buffer[offset..offset + bitmap_len].to_vec();
+
+            Bloom::from_existing(&bitmap, (bitmap_len * 8) as u64, k_num, sip_keys)
         } else {
-            RoaringBitmap::new()
+            // 如果不存在，创建一个空的 BloomFilter
+            let expected_items = schema.persist_policy.max_docs_per_segment as usize;
+            Bloom::new_for_fp_rate(expected_items, 0.01)
         };
 
         let deleted = if std::path::Path::new(&deleted_path).exists() {
@@ -583,17 +621,32 @@ impl Segment {
             let pk_path = format!("{}/pk_bloomfilter", segment_tmp_path);
             let pk_bloom = self.pk_bloomfilter.read().unwrap();
 
-            let mut file = std::fs::File::create(&pk_path).map_err(|e| {
-                CoreError::IOError(format!("Failed to create pk_bloomfilter file: {}", e))
-            })?;
+            // BloomFilter 可以转换为字节数组
+            let bitmap = pk_bloom.bitmap();
+            let k_num = pk_bloom.number_of_hash_functions();
+            let sip_keys = pk_bloom.sip_keys();
 
-            pk_bloom.serialize_into(&mut file).map_err(|e| {
-                CoreError::IOError(format!("Failed to serialize pk_bloomfilter: {}", e))
+            // 简单格式: [k_num(4 bytes)][sip_keys(4*16 bytes)][bitmap_len(8 bytes)][bitmap]
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&(k_num as u32).to_le_bytes());
+
+            // 序列化两个 sip_key 对
+            for &(k0, k1) in &sip_keys {
+                buffer.extend_from_slice(&k0.to_le_bytes());
+                buffer.extend_from_slice(&k1.to_le_bytes());
+            }
+
+            buffer.extend_from_slice(&(bitmap.len() as u64).to_le_bytes());
+            buffer.extend_from_slice(&bitmap);
+
+            std::fs::write(&pk_path, buffer).map_err(|e| {
+                CoreError::IOError(format!("Failed to write pk_bloomfilter file: {}", e))
             })?;
 
             println!(
-                "  PK bloomfilter persisted ({} entries) in {:?}",
-                pk_bloom.len(),
+                "  PK bloomfilter persisted ({} bits, {} KB) in {:?}",
+                pk_bloom.number_of_bits(),
+                bitmap.len() / 1024,
                 pk_start.elapsed()
             );
         }
@@ -810,19 +863,49 @@ impl Segment {
         let pk_start = std::time::Instant::now();
         let pk_path = format!("{}/pk_bloomfilter", segment_path);
         let pk_bloomfilter = if std::path::Path::new(&pk_path).exists() {
-            let file = std::fs::File::open(&pk_path).map_err(|e| {
-                CoreError::IOError(format!("Failed to open pk_bloomfilter file: {}", e))
-            })?;
+            let buffer = std::fs::read(&pk_path)
+                .map_err(|e| CoreError::IOError(format!("Failed to read pk_bloomfilter: {}", e)))?;
 
-            RoaringBitmap::deserialize_from(file).map_err(|e| {
-                CoreError::IOError(format!("Failed to deserialize pk_bloomfilter: {}", e))
-            })?
+            // 解析格式: [k_num(4 bytes)][sip_keys(4*16 bytes)][bitmap_len(8 bytes)][bitmap]
+            let mut offset = 0;
+            let k_num = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as u32;
+            offset += 4;
+
+            let mut sip_keys = [(0u64, 0u64); 2];
+            for i in 0..2 {
+                let k0_bytes: [u8; 8] = buffer[offset..offset + 8]
+                    .try_into()
+                    .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
+                let k0 = u64::from_le_bytes(k0_bytes);
+                offset += 8;
+
+                let k1_bytes: [u8; 8] = buffer[offset..offset + 8]
+                    .try_into()
+                    .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
+                let k1 = u64::from_le_bytes(k1_bytes);
+                offset += 8;
+
+                sip_keys[i] = (k0, k1);
+            }
+
+            let bitmap_len_bytes: [u8; 8] = buffer[offset..offset + 8]
+                .try_into()
+                .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
+            let bitmap_len = u64::from_le_bytes(bitmap_len_bytes) as usize;
+            offset += 8;
+
+            let bitmap = buffer[offset..offset + bitmap_len].to_vec();
+
+            Bloom::from_existing(&bitmap, (bitmap_len * 8) as u64, k_num, sip_keys)
         } else {
-            RoaringBitmap::new()
+            // 如果不存在，创建一个空的 BloomFilter
+            let expected_items = schema.persist_policy.max_docs_per_segment as usize;
+            Bloom::new_for_fp_rate(expected_items, 0.01)
         };
         println!(
-            "  PK bloomfilter loaded ({} entries) in {:?}",
-            pk_bloomfilter.len(),
+            "  PK bloomfilter loaded ({} bits, {} KB) in {:?}",
+            pk_bloomfilter.number_of_bits(),
+            pk_bloomfilter.bitmap().len() / 1024,
             pk_start.elapsed()
         );
 
@@ -947,70 +1030,49 @@ impl Segment {
 
         println!("  Reorganizing row data into fixed-size batches...");
 
-        // Step 1: Collect all documents with their internal IDs
-        let mut all_docs: Vec<(u32, RecordBatch)> = Vec::new();
+        // Step 1: Collect all batches (avoid extracting individual rows)
+        let mut all_batches: Vec<RecordBatch> = Vec::new();
         for item in memory_tree.iter() {
             let (_key, batch, _ttl) = &*item;
-
-            // Extract each row from the batch
-            let internal_ids = arrow::array::cast::as_primitive_array::<arrow::datatypes::UInt32Type>(
-                batch.column(0),
-            );
-            for row_idx in 0..batch.num_rows() {
-                let doc_id = internal_ids.value(row_idx);
-
-                // Extract single row as RecordBatch
-                let mask: Vec<bool> = (0..batch.num_rows()).map(|i| i == row_idx).collect();
-                let mask_array = arrow::array::BooleanArray::from(mask);
-
-                if let Ok(single_row) = arrow::compute::filter_record_batch(batch, &mask_array) {
-                    all_docs.push((doc_id, single_row));
-                }
-            }
+            all_batches.push(batch.clone());
         }
 
-        // Sort by doc_id to ensure sequential order
-        all_docs.sort_by_key(|(id, _)| *id);
+        // If no data, return early
+        if all_batches.is_empty() {
+            println!("    No data to persist");
+            return Ok(());
+        }
 
-        let total_docs = all_docs.len();
-        println!("    Total documents to persist: {}", total_docs);
+        // Merge all batches into one large batch
+        let schema = all_batches[0].schema();
+        let merged_batch = concat_batches(&schema, &all_batches)
+            .map_err(|e| CoreError::Internal(format!("Failed to merge batches: {}", e)))?;
 
-        // Step 2: Reorganize into fixed-size batches (100 docs per batch)
-        const BATCH_SIZE: usize = 100;
+        println!(
+            "    Total rows in merged batch: {}",
+            merged_batch.num_rows()
+        );
+
+        // Step 2: Reorganize into fixed-size batches (1000 docs per batch for better performance)
+        const BATCH_SIZE: usize = 1000;
+        let total_docs = merged_batch.num_rows();
         let mut reorganized_batches: Vec<(u32, RecordBatch)> = Vec::new();
 
-        if !all_docs.is_empty() {
-            let schema = all_docs[0].1.schema();
+        // Get internal IDs array
+        let internal_ids = arrow::array::cast::as_primitive_array::<arrow::datatypes::UInt32Type>(
+            merged_batch.column(0),
+        );
 
-            for chunk_start in (0..total_docs).step_by(BATCH_SIZE) {
-                let chunk_end = (chunk_start + BATCH_SIZE).min(total_docs);
-                let chunk = &all_docs[chunk_start..chunk_end];
+        for chunk_start in (0..total_docs).step_by(BATCH_SIZE) {
+            let chunk_end = (chunk_start + BATCH_SIZE).min(total_docs);
 
-                if chunk.is_empty() {
-                    continue;
-                }
+            // Get the first doc_id as the batch key
+            let batch_key = internal_ids.value(chunk_start);
 
-                // The key is the first doc_id in this batch
-                let batch_key = chunk[0].0;
+            // Slice the batch for this chunk
+            let chunk_batch = merged_batch.slice(chunk_start, chunk_end - chunk_start);
 
-                // Merge all rows in this chunk into one RecordBatch
-                let batches_to_merge: Vec<RecordBatch> = chunk
-                    .iter()
-                    .map(|(doc_id, batch)| {
-                        // Mark deleted documents as NULL
-                        if deleted.contains(*doc_id) {
-                            self.mark_batch_as_deleted(batch)
-                        } else {
-                            batch.clone()
-                        }
-                    })
-                    .collect();
-
-                // Concatenate into single batch
-                if let Ok(merged_batch) = concat_batches(&schema, &batches_to_merge) {
-                    reorganized_batches.push((batch_key, merged_batch));
-                }
-            }
+            reorganized_batches.push((batch_key, chunk_batch));
         }
 
         let batch_count = reorganized_batches.len();

@@ -207,7 +207,7 @@ pub trait IndexWriter: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn field_type(&self) -> FieldType;
     fn write(&self, data: &RecordBatch) -> CoreResult<()>;
-    fn mget_internal_id(&self, pk_filter: &RwLock<RoaringBitmap>, column: &ArrayRef) -> Vec<u32>;
+    fn mget_internal_id(&self, column: &ArrayRef) -> Vec<u32>;
     fn as_any(&self) -> &dyn Any;
 }
 

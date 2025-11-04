@@ -202,11 +202,8 @@ impl Partition {
     pub fn flush(&self, check: bool) -> CoreResult<u64> {
         let mut current = self.current_segment.write().unwrap();
 
-        if check {
-            // Check if current segment has data
-            if current.doc_count() >= self.schema.persist_policy.max_docs_per_segment {
-                return Ok(0);
-            }
+        if check && current.doc_count() < self.schema.persist_policy.max_docs_per_segment {
+            return Ok(0);
         }
 
         // 1. Get current segment info
@@ -514,7 +511,6 @@ impl Partition {
         drop(current_segment);
 
         if should_flush {
-            // double check need flush
             if let Err(e) = self.flush(true) {
                 log::error!("flush has error :[{:?}]", e);
             }
@@ -547,5 +543,96 @@ impl Partition {
     /// 获取 Partition ID
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// 停止 Partition 并确保所有数据持久化
+    ///
+    /// 执行步骤：
+    /// 1. Flush 当前活跃的 segment 到 frozen list
+    /// 2. 持久化所有未持久化的 segments
+    /// 3. 等待所有持久化操作完成
+    pub fn stop(&self) {
+        println!(
+            "\n[Partition {}] Stopping and persisting all data...",
+            self.id
+        );
+
+        // 1. Flush current active segment (force flush even if not full)
+        let current_count = self.current_segment.read().unwrap().doc_count();
+        if current_count > 0 {
+            println!(
+                "[Partition {}] Flushing current segment ({} records)...",
+                self.id, current_count
+            );
+
+            if let Err(e) = self.flush(false) {
+                eprintln!(
+                    "[Partition {}] Failed to flush current segment: {:?}",
+                    self.id, e
+                );
+            } else {
+                println!(
+                    "[Partition {}] Current segment flushed successfully",
+                    self.id
+                );
+            }
+        } else {
+            println!(
+                "[Partition {}] Current segment is empty, no need to flush",
+                self.id
+            );
+        }
+
+        // 2. Get all unpersisted segments
+        let unpersisted = self.get_unpersisted_segments();
+        let unpersisted_count = unpersisted.len();
+
+        if unpersisted_count == 0 {
+            println!("[Partition {}] All segments already persisted", self.id);
+            return;
+        }
+
+        println!(
+            "[Partition {}] Found {} unpersisted segments, starting persist...",
+            self.id, unpersisted_count
+        );
+
+        // 3. Persist all unpersisted segments
+        match self.persist_unpersisted_segments() {
+            Ok(persisted_ids) => {
+                println!(
+                    "[Partition {}] Successfully persisted {} segments: {:?}",
+                    self.id,
+                    persisted_ids.len(),
+                    persisted_ids
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[Partition {}] Failed to persist some segments: {:?}",
+                    self.id, e
+                );
+            }
+        }
+
+        // 4. Final verification
+        let remaining_unpersisted = self.get_unpersisted_segments();
+        if remaining_unpersisted.is_empty() {
+            println!("[Partition {}] ✅ All data persisted successfully", self.id);
+        } else {
+            eprintln!(
+                "[Partition {}] ⚠️  Warning: {} segments still not persisted",
+                self.id,
+                remaining_unpersisted.len()
+            );
+        }
+
+        println!(
+            "[Partition {}] Stop completed. Total segments: {} (frozen: {}, persisted: {})",
+            self.id,
+            self.frozen_count() + 1, // +1 for current segment
+            self.frozen_count(),
+            self.persisted_count()
+        );
     }
 }

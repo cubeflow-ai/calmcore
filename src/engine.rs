@@ -399,11 +399,107 @@ impl Engine {
                 .await;
         }
     }
+
+    /// 优雅停止 Engine 并确保所有数据持久化
+    ///
+    /// 执行步骤：
+    /// 1. 停止持久化后台任务
+    /// 2. 对每个 Partition 调用 stop() 确保数据持久化
+    /// 3. 等待所有持久化操作完成
+    pub async fn stop(&self) {
+        println!("\n╔════════════════════════════════════════════════════╗");
+        println!("║           Engine Stopping - Saving Data           ║");
+        println!("╚════════════════════════════════════════════════════╝");
+
+        // 1. 发送关闭信号给持久化任务
+        let _ = self.persist_tx.send(PersistRequest::Shutdown);
+
+        // 2. 等待持久化任务完成
+        {
+            let mut handle_opt = self.persist_task_handle.lock().await;
+            if let Some(handle) = handle_opt.take() {
+                println!("[Engine] Waiting for persist task to shutdown...");
+                let _ = handle.await;
+                println!("[Engine] Persist task shutdown completed");
+            }
+        }
+
+        // 3. 获取所有 Partition 并调用它们的 stop
+        let partition_list: Vec<(u64, Arc<Partition>)> = {
+            let parts = self.partitions.read().await;
+            parts.iter().map(|(id, p)| (*id, p.clone())).collect()
+        };
+
+        let partition_count = partition_list.len();
+        println!("[Engine] Stopping {} partitions...", partition_count);
+
+        // 4. 并发停止所有 Partition（使用 blocking 线程池）
+        let handles: Vec<_> = partition_list
+            .into_iter()
+            .map(|(id, partition)| {
+                tokio::task::spawn_blocking(move || {
+                    partition.stop();
+                    id
+                })
+            })
+            .collect();
+
+        // 5. 等待所有 Partition 停止完成
+        let mut success_count = 0;
+        let mut failed_count = 0;
+
+        for handle in handles {
+            match handle.await {
+                Ok(partition_id) => {
+                    println!("[Engine] Partition {} stopped successfully", partition_id);
+                    success_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("[Engine] Partition stop failed: {:?}", e);
+                    failed_count += 1;
+                }
+            }
+        }
+
+        // 6. 统计信息
+        let stats = self.stats().await;
+
+        println!("\n╔════════════════════════════════════════════════════╗");
+        println!("║              Engine Stop Summary                   ║");
+        println!("╚════════════════════════════════════════════════════╝");
+        println!(
+            "  Partitions stopped: {}/{}",
+            success_count, partition_count
+        );
+        if failed_count > 0 {
+            println!("  ⚠️  Failed: {}", failed_count);
+        }
+        println!("  Total documents: {}", stats.total_doc_count);
+        println!("  Total frozen segments: {}", stats.total_frozen_segments);
+        println!(
+            "  Unpersisted segments: {}",
+            stats.total_unpersisted_segments
+        );
+
+        if stats.total_unpersisted_segments == 0 {
+            println!("\n  ✅ All data persisted successfully!");
+        } else {
+            println!(
+                "\n  ⚠️  Warning: {} segments not persisted",
+                stats.total_unpersisted_segments
+            );
+        }
+
+        println!("\n[Engine] Stop completed.");
+    }
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
         // 发送关闭信号
         let _ = self.persist_tx.send(PersistRequest::Shutdown);
+        // 注意: Drop 是同步的，无法 await stop()
+        // 建议用户在 drop 前显式调用 engine.stop().await
+        println!("[Engine] Dropping - if data not saved, call engine.stop().await first!");
     }
 }
