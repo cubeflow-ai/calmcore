@@ -7,18 +7,22 @@ use std::{
 };
 
 use arrow::array::RecordBatch;
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use tokio::sync::mpsc;
 
 use crate::{
     schema::Schema,
-    segment::Segment,
-    utils::error::{CoreError, CoreResult},
+    segment::{self, Segment},
+    utils::{
+        self, arrow_utils,
+        error::{self, CoreError, CoreResult},
+    },
 };
 
-pub struct WriteInfo(pub Vec<Arc<Segment>>, pub Vec<(usize, Vec<u32>)>);
+pub struct WriteInfo(pub Vec<(Arc<Segment>, Vec<u32>)>);
 
 /// 持久化通知回调
-pub type PersistNotifyCallback = Option<mpsc::UnboundedSender<u64>>;
+pub type PersistNotifyCallback = mpsc::UnboundedSender<u64>;
 
 pub struct Partition {
     id: u64,
@@ -33,44 +37,15 @@ pub struct Partition {
     read_lock: RwLock<()>,
     write_lock: Mutex<()>,
     segment_id_counter: AtomicU64,
-    // 非主键字段的索引模式
-    index_mode: crate::segment::FieldIndexMode,
-    // 持久化通知通道（通知 Engine）
     persist_notify: PersistNotifyCallback,
 }
 
 impl Partition {
-    pub fn new(id: u32, base_dir: PathBuf, schema: Schema) -> Self {
-        Self::new_with_mode(
-            id,
-            base_dir,
-            schema,
-            crate::segment::FieldIndexMode::Sync,
-            None,
-        )
-    }
-
-    pub fn new_with_notify(
+    pub fn new(
         id: u32,
         base_dir: PathBuf,
         schema: Schema,
         persist_notify: mpsc::UnboundedSender<u64>,
-    ) -> Self {
-        Self::new_with_mode(
-            id,
-            base_dir,
-            schema,
-            crate::segment::FieldIndexMode::Sync,
-            Some(persist_notify),
-        )
-    }
-
-    pub fn new_with_mode(
-        id: u32,
-        base_dir: PathBuf,
-        schema: Schema,
-        index_mode: crate::segment::FieldIndexMode,
-        persist_notify: PersistNotifyCallback,
     ) -> Self {
         let schema = Arc::new(schema);
         Partition {
@@ -82,25 +57,144 @@ impl Partition {
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
             segment_id_counter: AtomicU64::new(0),
-            index_mode,
             persist_notify,
         }
     }
 
-    pub fn upsert_json(&self, _data: &[serde_json::Value]) -> CoreResult<Vec<u64>> {
-        todo!()
+    pub fn upsert_json(&self, data: &[serde_json::Value]) -> CoreResult<Vec<u64>> {
+        // 将 JSON 数据转换为 RecordBatch
+        let batch = arrow_utils::json_to_record_batch(data, &self.schema)?;
+        // 调用现有的 upsert 方法
+        self.upsert(batch)
     }
 
-    pub fn upsert_parquet(&self, _path: &Path) {
-        todo!()
+    /// 通过主键查询，返回 RecordBatch
+    pub fn get_by_pk(&self, pk_values: &[&str]) -> CoreResult<Option<RecordBatch>> {
+        // 检查是否有主键
+        let _pk_name = self.schema.primary_key.as_ref().ok_or_else(|| {
+            CoreError::InvalidParam("Schema does not have a primary key".to_string())
+        })?;
+
+        if pk_values.is_empty() {
+            return Ok(None);
+        }
+
+        // 构建查询用的主键数组
+        use arrow::array::{ArrayRef, StringArray};
+
+        let pk_array = Arc::new(StringArray::from(
+            pk_values.iter().map(|s| Some(*s)).collect::<Vec<_>>(),
+        )) as ArrayRef;
+
+        // 计算主键 hash
+        let pk_hash = arrow_utils::array_to_hash(&pk_array);
+
+        // 在所有 segments 中查找
+        let _read_guard = self.read_lock.read().unwrap();
+
+        let mut found_segments = Vec::new();
+        let mut found_internal_ids = Vec::new();
+
+        // 先查询 current segment
+        {
+            let current_segment = self.current_segment.read().unwrap();
+            if let Some(ids) = current_segment.mget_internal_id(&pk_hash, &pk_array) {
+                if !ids.is_empty() {
+                    // 需要克隆 segment 的 Arc 引用
+                    // 因为 current_segment 被 RwLock 保护，我们不能直接克隆它
+                    // 所以我们收集内部 ID，稍后再读取数据
+                    found_internal_ids.push((true, ids)); // true 表示是 current segment
+                }
+            }
+        }
+
+        // 查询 frozen segments
+        let frozen_segments = self.frozen_segments.read().unwrap();
+        for (_, segment) in frozen_segments.iter() {
+            if let Some(ids) = segment.mget_internal_id(&pk_hash, &pk_array) {
+                if !ids.is_empty() {
+                    found_segments.push(segment.clone());
+                    found_internal_ids.push((false, ids)); // false 表示是 frozen segment
+                }
+            }
+        }
+        drop(frozen_segments);
+
+        // 如果没找到任何记录
+        if found_internal_ids.is_empty() {
+            return Ok(None);
+        }
+
+        // 从各个 segment 中读取数据并合并
+        let mut all_batches = Vec::new();
+
+        // 处理 current segment 的结果
+        for (is_current, ids) in found_internal_ids.iter() {
+            if *is_current {
+                // 从 current segment 读取
+                let current_segment = self.current_segment.read().unwrap();
+                if let Some(batch) = current_segment.get_documents(ids)? {
+                    all_batches.push(batch);
+                }
+            }
+        }
+
+        // 处理 frozen segments 的结果
+        let mut frozen_idx = 0;
+        for (is_current, ids) in found_internal_ids.iter() {
+            if !*is_current {
+                // 从对应的 frozen segment 读取
+                if frozen_idx < found_segments.len() {
+                    if let Some(batch) = found_segments[frozen_idx].get_documents(ids)? {
+                        all_batches.push(batch);
+                    }
+                    frozen_idx += 1;
+                }
+            }
+        }
+
+        // 合并所有 RecordBatch
+        if all_batches.is_empty() {
+            return Ok(None);
+        }
+
+        if all_batches.len() == 1 {
+            return Ok(Some(all_batches.into_iter().next().unwrap()));
+        }
+
+        // 多个 batch 需要合并
+        let schema = all_batches[0].schema();
+        let merged = arrow::compute::concat_batches(&schema, &all_batches)
+            .map_err(|e| CoreError::Internal(format!("Failed to merge batches: {}", e)))?;
+
+        Ok(Some(merged))
     }
 
     pub fn upsert(&self, data: RecordBatch) -> CoreResult<Vec<u64>> {
-        // TODO: implement upsert logic with pk_hash and deduplication
-        let pk_hash = None;
-        let info = None;
+        match self.schema.primary_key.as_ref() {
+            Some(pk) => {
+                let column = data.column_by_name(pk).ok_or_else(|| {
+                    CoreError::InvalidParam(format!("primary key:{:?} doesn't exist in data", pk))
+                })?;
 
-        self.write(&data, pk_hash, info)
+                let pk_hash = arrow_utils::array_to_hash(column);
+
+                let _write_guard = self.write_lock.lock().unwrap();
+                let segments = self.frozen_segments.read().unwrap().clone();
+
+                let dels: Vec<(Arc<Segment>, Vec<u32>)> = segments
+                    .par_iter()
+                    .filter_map(|(_, segment)| {
+                        segment
+                            .mget_internal_id(pk_hash.as_ref(), column)
+                            .and_then(|ids| Some((segment.clone(), ids)))
+                    })
+                    .collect();
+
+                self.write(&data, Some(pk_hash), Some(WriteInfo(dels)))
+            }
+            None => self.write(&data, None, None),
+        }
     }
 
     /// Flush current active segment to frozen list (non-blocking write)
@@ -142,18 +236,8 @@ impl Partition {
             segments.push((seg_id, old_segment_arc.clone()));
         }
 
-        println!(
-            "Segment {} flushed (内存中，未持久化). New active segment created with start: {}",
-            seg_id, next_start
-        );
-
-        // 4. flush 后通知 Engine 检查是否需要持久化
-        // Engine 会根据策略决定是否真正执行 persist
-        if self.schema.persist_policy.check_on_flush {
-            if let Some(ref tx) = self.persist_notify {
-                let _ = tx.send(self.id);
-            }
-        }
+        // 4. flush notify Engine to check for persist
+        self.persist_notify.send(self.id);
 
         Ok(seg_id)
     }
@@ -320,7 +404,12 @@ impl Partition {
         let partition_path = format!("{}/partition-{}", base_dir_str, id);
         if !std::path::Path::new(&partition_path).exists() {
             // No persisted data, create new partition
-            return Ok(Self::new(id, base_dir, schema.as_ref().clone()));
+            return Ok(Self::new(
+                id,
+                base_dir,
+                schema.as_ref().clone(),
+                persist_notify,
+            ));
         }
 
         // 1.5. Crash recovery: Clean up incomplete persists and complete file replacements
@@ -395,7 +484,6 @@ impl Partition {
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
             segment_id_counter: AtomicU64::new(deprecated_counter),
-            index_mode: crate::segment::FieldIndexMode::Sync,
             persist_notify,
         })
     }
@@ -410,7 +498,7 @@ impl Partition {
 
         // 写入数据
         let result = current_segment
-            .write(data, pk_hash, info, &self.read_lock, self.index_mode)
+            .write(data, pk_hash, info, &self.read_lock)
             .map(|ids| {
                 ids.into_iter()
                     .map(|v| v as u64 + current_segment.start)
@@ -427,10 +515,8 @@ impl Partition {
 
         if should_flush {
             // double check need flush
-            let _ = self.flush(true);
-            // flush 后通知 Engine 检查持久化
-            if let Some(ref tx) = self.persist_notify {
-                let _ = tx.send(self.id);
+            if let Err(e) = self.flush(true) {
+                log::error!("flush has error :[{:?}]", e);
             }
         }
 

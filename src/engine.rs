@@ -118,8 +118,7 @@ impl Engine {
     /// 创建新的 Partition
     pub async fn create_partition(&self, id: u32, schema: Schema) -> Arc<Partition> {
         let partition_dir = self.config.data_dir.join(format!("partition-{}", id));
-        let partition =
-            Partition::new_with_notify(id, partition_dir, schema, self.partition_notify_tx.clone());
+        let partition = Partition::new(id, partition_dir, schema, self.partition_notify_tx.clone());
 
         let partition = Arc::new(partition);
         self.add_partition(partition.clone()).await;
@@ -138,12 +137,8 @@ impl Engine {
     /// 加载 Partition（从磁盘恢复）
     pub async fn load_partition(&self, id: u32, schema: Schema) -> CoreResult<Arc<Partition>> {
         let partition_dir = self.config.data_dir.join(format!("partition-{}", id));
-        let partition = Partition::load(
-            id,
-            partition_dir,
-            schema,
-            Some(self.partition_notify_tx.clone()),
-        )?;
+        let partition =
+            Partition::load(id, partition_dir, schema, self.partition_notify_tx.clone())?;
 
         let partition = Arc::new(partition);
         self.add_partition(partition.clone()).await;

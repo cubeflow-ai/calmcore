@@ -10,9 +10,6 @@ pub struct PersistPolicy {
 
     /// 时间阈值（segment 存活超过此时间触发持久化）
     pub max_segment_age: Duration,
-
-    /// 是否在 flush 时立即检查持久化
-    pub check_on_flush: bool,
 }
 
 impl Default for PersistPolicy {
@@ -20,7 +17,6 @@ impl Default for PersistPolicy {
         Self {
             max_docs_per_segment: 100_000,             // 10万条文档
             max_segment_age: Duration::from_secs(300), // 5分钟
-            check_on_flush: true,
         }
     }
 }
@@ -37,5 +33,37 @@ pub struct Schema {
 impl Schema {
     pub(crate) fn add_field(&mut self, field: field::FieldOption) {
         self.fields.push(field);
+    }
+
+    /// 将当前 Schema 转换为 Arrow Schema
+    pub fn to_arrow_schema(&self) -> std::sync::Arc<arrow::datatypes::Schema> {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use std::sync::Arc;
+
+        let mut arrow_fields = Vec::new();
+
+        for field in &self.fields {
+            let (data_type, nullable) = match field {
+                field::FieldOption::Keyword { is_array, .. } => {
+                    if *is_array {
+                        (
+                            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                            true,
+                        )
+                    } else {
+                        (DataType::Utf8, true)
+                    }
+                }
+                field::FieldOption::I32 { .. } => (DataType::Int32, true),
+                field::FieldOption::I64 { .. } => (DataType::Int64, true),
+                field::FieldOption::U32 { .. } => (DataType::UInt32, true),
+                field::FieldOption::F32 { .. } => (DataType::Float32, true),
+                field::FieldOption::F64 { .. } => (DataType::Float64, true),
+            };
+
+            arrow_fields.push(Field::new(field.name(), data_type, nullable));
+        }
+
+        Arc::new(ArrowSchema::new(arrow_fields))
     }
 }

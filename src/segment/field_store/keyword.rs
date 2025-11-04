@@ -187,8 +187,36 @@ impl IndexWriter for Keyword {
         FieldType::Keyword
     }
 
-    fn mget_internal_id(&self, pk_filter: &RwLock<RoaringBitmap>, column: &ArrayRef) -> Vec<u32> {
-        todo!()
+    fn mget_internal_id(&self, _pk_filter: &RwLock<RoaringBitmap>, column: &ArrayRef) -> Vec<u32> {
+        use arrow::array::Array;
+
+        // 注意：pk_filter 存储的是主键的 hash 值，而不是文档 ID
+        // 在这个方法中，我们直接从倒排索引查询文档 ID，不需要和 pk_filter 做交集
+        // pk_filter 已经在 Segment::mget_internal_id 中用于快速过滤 segment 了
+
+        // 将 column 转换为 StringArray
+        let string_array = arrow_downcast!(column, StringArray);
+
+        let mut result_ids = Vec::new();
+        let indexs = self.indexs.read().unwrap();
+
+        // 对每个主键值查询其内部 ID
+        for i in 0..string_array.len() {
+            if string_array.is_null(i) {
+                continue;
+            }
+
+            // 标准化字符串（根据 case_sensitive 配置）
+            let key = self.normalize_string(string_array.value(i));
+
+            // 在倒排索引中查找这个 key
+            if let Some(bitmap) = indexs.get_bitmap(&key) {
+                // 将结果添加到返回列表（这里的 bitmap 存储的就是文档 ID）
+                result_ids.extend(bitmap.iter());
+            }
+        }
+
+        result_ids
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -245,9 +273,9 @@ impl PkWriter for Keyword {
         }
 
         // mark other segment dels
-        if let Some(WriteInfo(segments, del_list)) = info {
-            for (i, ids) in del_list {
-                segments[i].mark_del(ids);
+        if let Some(WriteInfo(segments_and_ids)) = info {
+            for (segment, ids) in segments_and_ids {
+                segment.mark_del(ids);
             }
         }
 

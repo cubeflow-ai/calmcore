@@ -94,7 +94,6 @@ impl Segment {
         pk_hash: Option<Vec<u32>>,
         info: Option<WriteInfo>,
         lock: &RwLock<()>,
-        index_mode: FieldIndexMode,
     ) -> CoreResult<Vec<u32>> {
         // add id column
         let mut columns = Vec::with_capacity(data.schema().fields().len() + 1);
@@ -143,23 +142,17 @@ impl Segment {
             .unwrap()
             .put(start_id, new_data.clone());
 
-        // 非主键字段索引：根据模式决定同步或异步（当前异步留空位实现）
-        if matches!(index_mode, FieldIndexMode::Sync) {
-            let pk_name = self.schema.primary_key.as_deref();
-            let fields = self.fields.read().unwrap();
-            for f in fields.iter() {
-                if let Some(pk) = pk_name {
-                    if f.name() == pk {
-                        continue;
-                    }
-                }
-                if let Err(e) = f.write(&new_data) {
-                    eprintln!("index write field {:?} failed: {:?}", f.name(), e);
+        let pk_name = self.schema.primary_key.as_deref();
+        let fields = self.fields.read().unwrap();
+        for f in fields.iter() {
+            if let Some(pk) = pk_name {
+                if f.name() == pk {
+                    continue;
                 }
             }
-        } else {
-            // TODO(calm): 异步索引（非主键）下沉到后台线程
-            // 由于当前 Segment 未以 Arc 形式持有，跨线程写入需要进一步改造。
+            if let Err(e) = f.write(&new_data) {
+                eprintln!("index write field {:?} failed: {:?}", f.name(), e);
+            }
         }
 
         Ok(result)
@@ -209,17 +202,8 @@ impl Segment {
     /// Get internal ids by primary key hash and primary key column
     /// if not found, return None, never return empty vector
     /// internal id is the row number in the segment + start
-    #[allow(dead_code)]
-    pub(crate) fn mget_internal_id(
-        &self,
-        pk_hash: Option<&Vec<u32>>,
-        column: &ArrayRef,
-    ) -> Option<Vec<u32>> {
-        let pk_hash = pk_hash.unwrap();
-
-        println!("==========={}", self.pk_bloomfilter.read().unwrap().len());
-
-        //id filter first
+    pub fn mget_internal_id(&self, pk_hash: &[u32], column: &ArrayRef) -> Option<Vec<u32>> {
+        // 使用 bloomfilter 进行预过滤，快速判断主键是否可能存在于当前 segment
         let active = pk_hash
             .iter()
             .any(|v| self.pk_bloomfilter.read().unwrap().contains(*v));
