@@ -1,7 +1,6 @@
 // mod num_array;
 pub mod num_ser;
 mod reader;
-pub mod value_codec;
 mod writer;
 pub mod zigzag;
 

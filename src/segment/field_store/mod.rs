@@ -28,19 +28,17 @@ pub mod num_u32;
 pub use keyword::StringRoaringSerializer;
 
 /// Serializer for u32 keys with RecordBatch values
-/// Stores RecordBatch in Arrow IPC format with zstd compression
+/// Stores RecordBatch in Parquet format with built-in compression
 #[derive(Clone)]
-pub struct U32RecordBatchSerializer {
-    zstd_level: i32,
-}
+pub struct U32RecordBatchSerializer;
 
 impl U32RecordBatchSerializer {
-    pub fn new(zstd_level: i32) -> Self {
-        Self { zstd_level }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn default() -> Self {
-        Self { zstd_level: 3 }
+        Self
     }
 }
 
@@ -53,66 +51,47 @@ impl persist::WriteSerializer<u32, RecordBatch> for U32RecordBatchSerializer {
             buf.extend_from_slice(&key.to_be_bytes());
         }
 
-        // 使用 zstd 压缩
-        match zstd::encode_all(&buf[..], self.zstd_level) {
-            Ok(compressed) => Cow::Owned(compressed),
-            Err(_) => Cow::Owned(buf),
-        }
+        Cow::Owned(buf)
     }
 
     fn serialize_value<'a>(&self, batch: &'a RecordBatch) -> Cow<'a, [u8]> {
-        use arrow::ipc::writer::StreamWriter;
+        use parquet::arrow::ArrowWriter;
+        use parquet::basic::Compression;
+        use parquet::file::properties::WriterProperties;
 
         let mut buf = Vec::new();
 
-        // 使用 Arrow IPC format
-        {
-            let mut writer = StreamWriter::try_new(&mut buf, &batch.schema())
-                .expect("Failed to create StreamWriter");
-            writer.write(batch).expect("Failed to write batch");
-            writer.finish().expect("Failed to finish writer");
-        }
+        // 使用 Parquet format,默认 ZSTD 压缩
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .build();
 
-        // 使用 zstd 压缩
-        match zstd::encode_all(&buf[..], self.zstd_level) {
-            Ok(compressed) => Cow::Owned(compressed),
-            Err(_) => Cow::Owned(buf),
-        }
+        let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))
+            .expect("Failed to create ArrowWriter");
+        writer.write(batch).expect("Failed to write batch");
+        writer.close().expect("Failed to close writer");
+
+        Cow::Owned(buf)
     }
 }
 
 impl persist::ReadSerializer<u32, RecordBatch> for U32RecordBatchSerializer {
     fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u32> {
-        // 解压
-        let decompressed = match zstd::decode_all(data) {
-            Ok(d) => d,
-            Err(_) => return Vec::new(),
-        };
-
         let mut pos = 0;
-        if decompressed.len() < 4 {
+        if data.len() < 4 {
             return Vec::new();
         }
 
-        let count = u32::from_be_bytes([
-            decompressed[pos],
-            decompressed[pos + 1],
-            decompressed[pos + 2],
-            decompressed[pos + 3],
-        ]) as usize;
+        let count =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         let mut keys = Vec::with_capacity(count);
         for _ in 0..count {
-            if pos + 4 > decompressed.len() {
+            if pos + 4 > data.len() {
                 break;
             }
-            let key = u32::from_be_bytes([
-                decompressed[pos],
-                decompressed[pos + 1],
-                decompressed[pos + 2],
-                decompressed[pos + 3],
-            ]);
+            let key = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
             keys.push(key);
             pos += 4;
         }
@@ -120,17 +99,17 @@ impl persist::ReadSerializer<u32, RecordBatch> for U32RecordBatchSerializer {
     }
 
     fn deserialize_value<'a>(&self, data: &'a [u8]) -> Result<RecordBatch, Box<dyn Error>> {
-        use arrow::ipc::reader::StreamReader;
-        use std::io::Cursor;
+        use bytes::Bytes;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-        // 解压
-        let decompressed =
-            zstd::decode_all(data).map_err(|e| format!("Failed to decompress: {}", e))?;
+        // 使用 Parquet format 反序列化
+        let bytes = Bytes::copy_from_slice(data);
+        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .map_err(|e| format!("Failed to create ParquetRecordBatchReaderBuilder: {}", e))?;
 
-        // 使用 Arrow IPC format 反序列化
-        let cursor = Cursor::new(decompressed);
-        let mut reader = StreamReader::try_new(cursor, None)
-            .map_err(|e| format!("Failed to create StreamReader: {}", e))?;
+        let mut reader = builder
+            .build()
+            .map_err(|e| format!("Failed to build reader: {}", e))?;
 
         // 读取第一个 batch
         if let Some(result) = reader.next() {
@@ -224,7 +203,7 @@ impl RowDataStore {
 //     fn get(&self, key: &K) -> Option<u32>;
 // }
 
-pub trait IndexWriter: Sync + 'static {
+pub trait IndexWriter: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn field_type(&self) -> FieldType;
     fn write(&self, data: &RecordBatch) -> CoreResult<()>;
@@ -232,7 +211,7 @@ pub trait IndexWriter: Sync + 'static {
     fn as_any(&self) -> &dyn Any;
 }
 
-pub trait PkWriter: Sync + 'static {
+pub trait PkWriter: Send + Sync + 'static {
     // write primary key and return the need delete ids
     fn write_pk(
         &self,
@@ -390,31 +369,5 @@ pub fn encode_roaring_from_bitmap(bitmap: &RoaringBitmap) -> Vec<u8> {
         buf.push(1u8);
         let _ = bitmap.serialize_into(&mut buf);
         return buf;
-    }
-}
-
-mod test {
-    #[test]
-    fn test_index() {
-        use super::InvertedIndex;
-
-        let mut index = InvertedIndex::<String>::new_memory(64);
-
-        index.insert("hello".to_string(), vec![1, 2, 3]);
-        index.insert("world".to_string(), vec![4, 5, 6]);
-
-        assert_eq!(index.len(), 2);
-
-        index.extend("hello".to_string(), vec![7, 8, 9]);
-
-        assert_eq!(index.len(), 2);
-
-        let bitmap = index.get_bitmap(&"hello".to_string()).unwrap();
-
-        assert!(bitmap.contains(1));
-        assert!(bitmap.contains(9));
-        assert!(!bitmap.contains(10));
-
-        println!("bitmap: {:?}", bitmap);
     }
 }

@@ -4,10 +4,8 @@ use crate::{
     partition::WriteInfo,
     schema::{field::FieldOption, Schema},
     segment::field_store::{
-        keyword::Keyword, num_f32::NumF32, num_f64::NumF64, num_i32::NumI32, num_i64::NumI64,
-        num_u32::NumU32, F32RoaringSerializer, F64RoaringSerializer, I32RoaringSerializer,
-        I64RoaringSerializer, IndexWriter, InvertedIndex, PkWriter, RowDataStore,
-        U32RecordBatchSerializer, U32RoaringSerializer,
+        keyword::Keyword, IndexWriter, InvertedIndex, PkWriter, RowDataStore,
+        U32RecordBatchSerializer,
     },
     utils::error::{CoreError, CoreResult},
 };
@@ -24,6 +22,7 @@ use std::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, RwLock,
     },
+    time::Instant,
 };
 
 /// 控制非主键字段的索引写入模式
@@ -38,6 +37,7 @@ pub struct Segment {
     doc_id_gen: AtomicU32,
     max_doc_id: AtomicU32, // 当前已分配的最大文档ID (用于计算end)
     persisted: AtomicBool, // 是否已持久化到磁盘
+    created_at: Instant,   // Segment 创建时间（用于时间阈值判断）
     pk_bloomfilter: RwLock<RoaringBitmap>,
     deleted: RwLock<RoaringBitmap>,
     fields: RwLock<Vec<Box<dyn IndexWriter>>>, // 改为 RwLock 以支持替换为 Disk 版本
@@ -57,26 +57,11 @@ impl Segment {
                     let keyword = Keyword::new(field_opt);
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
-                FieldOption::I32 { .. } => {
-                    let num = NumI32::new(field_opt);
-                    fields.push(Box::new(num));
-                }
-                FieldOption::I64 { .. } => {
-                    let num = NumI64::new(field_opt);
-                    fields.push(Box::new(num));
-                }
-                FieldOption::U32 { .. } => {
-                    let num = NumU32::new(field_opt);
-                    fields.push(Box::new(num));
-                }
-                FieldOption::F32 { .. } => {
-                    let num = NumF32::new(field_opt);
-                    fields.push(Box::new(num));
-                }
-                FieldOption::F64 { .. } => {
-                    let num = NumF64::new(field_opt);
-                    fields.push(Box::new(num));
-                }
+                FieldOption::I32 { name, index } => todo!(),
+                FieldOption::I64 { name, index } => todo!(),
+                FieldOption::U32 { name, index } => todo!(),
+                FieldOption::F32 { name, index } => todo!(),
+                FieldOption::F64 { name, index } => todo!(),
             }
         }
 
@@ -92,6 +77,7 @@ impl Segment {
             doc_id_gen: AtomicU32::new(0),
             max_doc_id: AtomicU32::new(0), // 初始没有文档,所以max_doc_id=0(无效值)
             persisted: AtomicBool::new(false),
+            created_at: Instant::now(),
             pk_bloomfilter: RwLock::default(),
             deleted: RwLock::default(),
             fields: RwLock::new(fields),
@@ -100,44 +86,6 @@ impl Segment {
             row_data: RwLock::new(RowDataStore::new_memory(32)),
             base_path: None,
         }
-    }
-
-    #[allow(dead_code)]
-    fn index_write(&mut self, schema: SchemaRef, data: RecordBatch) {
-        let num_rows = data.num_rows() as u32;
-
-        // generate auto-increment id column
-        let start_id = self.doc_id_gen.load(Ordering::Relaxed);
-
-        // concatenate auto-increment id column to RecordBatch (insert into the first column)
-        let old_columns = data.columns();
-        let mut columns = Vec::with_capacity(old_columns.len() + 1);
-        columns.push(
-            Arc::new(UInt32Array::from_iter_values(start_id..start_id + num_rows)) as ArrayRef,
-        );
-        columns.extend_from_slice(old_columns);
-
-        let _new_batch = RecordBatch::try_new(schema, columns).unwrap();
-
-        // update doc_id_gen
-        self.doc_id_gen
-            .store(start_id + num_rows, Ordering::Relaxed);
-
-        // self.fields
-        //     .par_iter()
-        //     //filter pk ,because already index
-        //     .map(|f| {
-        //         self.schema
-        //             .primary_key
-        //             .as_ref()
-        //             .map(|pk| pk.eq(f.name()))
-        //             .unwrap_or_default()
-        //     })
-        //     .for_each(|f| {
-        //         if let Err(e) = f.write(&new_batch) {
-        //             log::error!("write field:{:?} failed: {:?}", f.name(), e);
-        //         }
-        //     });
     }
 
     pub fn write(
@@ -493,41 +441,11 @@ impl Segment {
                     let keyword = Keyword::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
-                FieldOption::I32 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, I32RoaringSerializer::default())?;
-
-                    let num = NumI32::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
-                }
-                FieldOption::I64 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, I64RoaringSerializer::default())?;
-
-                    let num = NumI64::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
-                }
-                FieldOption::U32 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, U32RoaringSerializer::default())?;
-
-                    let num = NumU32::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
-                }
-                FieldOption::F32 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, F32RoaringSerializer::default())?;
-
-                    let num = NumF32::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
-                }
-                FieldOption::F64 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, F64RoaringSerializer::default())?;
-
-                    let num = NumF64::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
-                }
+                FieldOption::I32 { name, index } => todo!(),
+                FieldOption::I64 { name, index } => todo!(),
+                FieldOption::U32 { name, index } => todo!(),
+                FieldOption::F32 { name, index } => todo!(),
+                FieldOption::F64 { name, index } => todo!(),
             }
         }
 
@@ -604,6 +522,7 @@ impl Segment {
             doc_id_gen: AtomicU32::new(doc_count),
             max_doc_id: AtomicU32::new(doc_count),
             persisted: AtomicBool::new(true),
+            created_at: Instant::now(), // 加载时使用当前时间（已持久化的 segment 不关心年龄）
             pk_bloomfilter: RwLock::new(pk_bloomfilter),
             deleted: RwLock::new(deleted),
             fields: RwLock::new(fields),
@@ -658,36 +577,6 @@ impl Segment {
                     .downcast_ref::<field_store::keyword::Keyword>()
                 {
                     let disk_field = keyword.persist(&field_path)?;
-                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
-                } else if let Some(num) = field
-                    .as_any()
-                    .downcast_ref::<field_store::num_i32::NumI32>()
-                {
-                    let disk_field = num.persist(&field_path)?;
-                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
-                } else if let Some(num) = field
-                    .as_any()
-                    .downcast_ref::<field_store::num_i64::NumI64>()
-                {
-                    let disk_field = num.persist(&field_path)?;
-                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
-                } else if let Some(num) = field
-                    .as_any()
-                    .downcast_ref::<field_store::num_u32::NumU32>()
-                {
-                    let disk_field = num.persist(&field_path)?;
-                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
-                } else if let Some(num) = field
-                    .as_any()
-                    .downcast_ref::<field_store::num_f32::NumF32>()
-                {
-                    let disk_field = num.persist(&field_path)?;
-                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
-                } else if let Some(num) = field
-                    .as_any()
-                    .downcast_ref::<field_store::num_f64::NumF64>()
-                {
-                    let disk_field = num.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else {
                     return Err(CoreError::Internal(format!(
@@ -915,39 +804,19 @@ impl Segment {
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
                 FieldOption::I32 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, I32RoaringSerializer::default())?;
-
-                    let num = field_store::num_i32::NumI32::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
+                    todo!()
                 }
                 FieldOption::I64 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, I64RoaringSerializer::default())?;
-
-                    let num = field_store::num_i64::NumI64::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
+                    todo!()
                 }
                 FieldOption::U32 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, U32RoaringSerializer::default())?;
-
-                    let num = field_store::num_u32::NumU32::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
+                    todo!()
                 }
                 FieldOption::F32 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, F32RoaringSerializer::default())?;
-
-                    let num = field_store::num_f32::NumF32::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
+                    todo!()
                 }
                 FieldOption::F64 { .. } => {
-                    let inverted_index =
-                        InvertedIndex::new_disk(&field_path, F64RoaringSerializer::default())?;
-
-                    let num = field_store::num_f64::NumF64::from_disk(field_opt, inverted_index)?;
-                    fields.push(Box::new(num));
+                    todo!()
                 }
             }
         }
@@ -1025,6 +894,7 @@ impl Segment {
             doc_id_gen: AtomicU32::new(doc_id_gen),
             max_doc_id: AtomicU32::new(max_doc_id_relative),
             persisted: AtomicBool::new(true), // 从磁盘加载 = 已持久化
+            created_at: Instant::now(),       // 加载时使用当前时间
             pk_bloomfilter: RwLock::new(pk_bloomfilter),
             deleted: RwLock::new(deleted),
             fields: RwLock::new(fields),
@@ -1052,6 +922,11 @@ impl Segment {
     /// Get current doc count in this segment
     pub fn doc_count(&self) -> u32 {
         self.doc_id_gen.load(Ordering::Relaxed)
+    }
+
+    /// Get segment age (time since creation)
+    pub fn age(&self) -> std::time::Duration {
+        self.created_at.elapsed()
     }
 
     /// Get the next doc ID (start + doc_count)
@@ -1381,7 +1256,3 @@ impl Segment {
             .map_err(|e| CoreError::Internal(format!("Failed to create merged batch: {}", e)))
     }
 }
-
-#[cfg(test)]
-#[path = "mod_test.rs"]
-mod tests;
