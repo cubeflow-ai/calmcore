@@ -130,13 +130,21 @@ async fn main() {
 
                 // 显示查询结果的部分数据
                 if batch.num_rows() > 0 {
-                    use arrow::array::Array;
+                    use datafusion::arrow::array::{Array, Float64Array, Int64Array, StringArray};
                     if let Some(name_col) = batch.column_by_name("name") {
-                        if let Some(name_array) = name_col
-                            .as_any()
-                            .downcast_ref::<arrow::array::StringArray>()
-                        {
+                        if let Some(name_array) = name_col.as_any().downcast_ref::<StringArray>() {
                             println!("       数据: name={}", name_array.value(0));
+                        }
+                    }
+                    if let Some(age_col) = batch.column_by_name("age") {
+                        if let Some(age_array) = age_col.as_any().downcast_ref::<Int64Array>() {
+                            println!("       数据: age={}", age_array.value(0));
+                        }
+                    }
+                    if let Some(score_col) = batch.column_by_name("score") {
+                        if let Some(score_array) = score_col.as_any().downcast_ref::<Float64Array>()
+                        {
+                            println!("       数据: score={:.3}", score_array.value(0));
                         }
                     }
                 }
@@ -204,6 +212,29 @@ async fn main() {
     );
     println!("       - QPS: {:.0}", test_count as f64 / stress_duration);
 
+    // 测试数值字段的显示
+    println!("\n    数值字段验证：检查 I64 和 F64 类型...");
+    if let Ok(Some(batch)) = partition.get_by_pk(&["user_0000000000"]) {
+        use datafusion::arrow::array::{Array, Float64Array, Int64Array};
+
+        // 检查 age (I64)
+        if let Some(age_col) = batch.column_by_name("age") {
+            if let Some(age_array) = age_col.as_any().downcast_ref::<Int64Array>() {
+                println!("    ✅ age (I64) 类型验证成功: {}", age_array.value(0));
+            }
+        }
+
+        // 检查 score (F64)
+        if let Some(score_col) = batch.column_by_name("score") {
+            if let Some(score_array) = score_col.as_any().downcast_ref::<Float64Array>() {
+                println!(
+                    "    ✅ score (F64) 类型验证成功: {:.3}",
+                    score_array.value(0)
+                );
+            }
+        }
+    }
+
     println!("\n{}", "=".repeat(80));
     println!("✨ 测试完成！\n");
     println!("📊 性能总结:");
@@ -222,6 +253,12 @@ async fn main() {
         "   ✅ 平均查询延迟: {:.3} ms",
         (stress_duration * 1000.0) / test_count as f64
     );
+    println!("\n📝 字段类型:");
+    println!("   • id: Keyword (主键)");
+    println!("   • name: Keyword");
+    println!("   • age: I64 (整数类型)");
+    println!("   • city: Keyword");
+    println!("   • score: F64 (浮点类型)");
     println!();
 }
 
@@ -245,12 +282,9 @@ fn create_schema() -> Schema {
                 persist_option: None,
                 case_sensitive: true,
             },
-            FieldOption::Keyword {
-                name: "age".to_string(), // 改为字符串类型
+            FieldOption::I64 {
+                name: "age".to_string(), // I64 类型
                 index: true,
-                is_array: false,
-                persist_option: None,
-                case_sensitive: true,
             },
             FieldOption::Keyword {
                 name: "city".to_string(),
@@ -259,12 +293,9 @@ fn create_schema() -> Schema {
                 persist_option: None,
                 case_sensitive: true,
             },
-            FieldOption::Keyword {
-                name: "score".to_string(), // 改为字符串类型
+            FieldOption::F64 {
+                name: "score".to_string(), // F64 类型
                 index: true,
-                is_array: false,
-                persist_option: None,
-                case_sensitive: true,
             },
         ],
         persist_policy: PersistPolicy {
@@ -279,15 +310,15 @@ fn create_json_batch(start_id: usize, count: usize) -> Vec<serde_json::Value> {
     let cities = vec!["北京", "上海", "广州", "深圳", "杭州"];
 
     for i in start_id..start_id + count {
-        let age = 20 + (i % 60);
+        let age = 20 + (i % 60) as i64;
         let score = (i % 100) as f64 + (i as f64 % 1000.0) / 1000.0;
 
         let json_obj = json!({
             "id": format!("user_{:010}", i),
             "name": format!("用户{}", i),
-            "age": age.to_string(),  // 转为字符串
+            "age": age,  // I64 类型
             "city": cities[i % 5],
-            "score": format!("{:.3}", score),  // 转为字符串
+            "score": score,  // F64 类型
         });
         batch.push(json_obj);
     }

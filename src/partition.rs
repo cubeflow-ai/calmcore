@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use arrow::array::RecordBatch;
+use datafusion::arrow::{self as arrow, array::RecordBatch};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use tokio::sync::mpsc;
 
@@ -80,7 +80,7 @@ impl Partition {
         }
 
         // 构建查询用的主键数组
-        use arrow::array::{ArrayRef, StringArray};
+        use datafusion::arrow::array::{ArrayRef, StringArray};
 
         let pk_array = Arc::new(StringArray::from(
             pk_values.iter().map(|s| Some(*s)).collect::<Vec<_>>(),

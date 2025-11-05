@@ -6,7 +6,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use arrow::array::{ArrayRef, RecordBatch};
+use datafusion::arrow::array::{ArrayRef, RecordBatch};
+use datafusion::parquet;
 use mem_btree::{
     persist::{self, num_ser},
     BTree,
@@ -17,16 +18,189 @@ use roaring::RoaringBitmap;
 use crate::{partition::WriteInfo, schema::field::FieldType, utils::error::CoreResult};
 
 pub mod keyword;
-pub mod num_f32;
+// pub mod num_f32; // TODO: implement later
 pub mod num_f64;
-pub mod num_i32;
+// pub mod num_i32; // TODO: implement later
 pub mod num_i64;
-pub mod num_u32;
+// pub mod num_u32; // TODO: implement later
 // pub mod num_u64; // removed per design: u64 field not needed currently
 
 // Re-export StringRoaringSerializer from keyword module
 pub use keyword::StringRoaringSerializer;
 
+/// Serializer for i64 keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct I64RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl I64RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+
+    pub fn default() -> Self {
+        Self { zstd_level: 3 }
+    }
+}
+
+impl persist::ReadSerializer<i64, RoaringBitmap> for I64RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i64> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+
+        for _ in 0..key_count {
+            if pos + 8 > data_to_parse.len() {
+                break;
+            }
+            let key = i64::from_be_bytes([
+                data_to_parse[pos],
+                data_to_parse[pos + 1],
+                data_to_parse[pos + 2],
+                data_to_parse[pos + 3],
+                data_to_parse[pos + 4],
+                data_to_parse[pos + 5],
+                data_to_parse[pos + 6],
+                data_to_parse[pos + 7],
+            ]);
+            result.push(key);
+            pos += 8;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<i64, RoaringBitmap> for I64RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<i64>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+
+        for key in keys {
+            uncompressed.extend_from_slice(&key.to_be_bytes());
+        }
+
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
+/// Serializer for f64 keys with RoaringBitmap values
+/// Note: This serializer works with raw f64 values for disk storage
+#[derive(Clone)]
+pub struct F64RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl F64RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+
+    pub fn default() -> Self {
+        Self { zstd_level: 3 }
+    }
+}
+
+// Need to export OrderedF64 wrapper from num_f64 module
+use num_f64::OrderedF64;
+
+impl persist::ReadSerializer<OrderedF64, RoaringBitmap> for F64RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<OrderedF64> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+
+        for _ in 0..key_count {
+            if pos + 8 > data_to_parse.len() {
+                break;
+            }
+            let key = f64::from_be_bytes([
+                data_to_parse[pos],
+                data_to_parse[pos + 1],
+                data_to_parse[pos + 2],
+                data_to_parse[pos + 3],
+                data_to_parse[pos + 4],
+                data_to_parse[pos + 5],
+                data_to_parse[pos + 6],
+                data_to_parse[pos + 7],
+            ]);
+            result.push(OrderedF64(key));
+            pos += 8;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<OrderedF64, RoaringBitmap> for F64RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<OrderedF64>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+
+        for key in keys {
+            uncompressed.extend_from_slice(&key.0.to_be_bytes());
+        }
+
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
 /// Serializer for u32 keys with RecordBatch values
 /// Stores RecordBatch in Parquet format with built-in compression
 #[derive(Clone)]
@@ -258,6 +432,17 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
         }
     }
 
+    pub(crate) fn append_ids(&mut self, k: K, ids: Vec<u32>) {
+        if let InvertedIndex::Memory(tree) = self {
+            match tree.get(&k) {
+                Some(v) => v.write().unwrap().extend(ids),
+                None => _ = tree.put(k, Arc::new(RwLock::new(ids))),
+            }
+        } else {
+            panic!("cannot insert to disk index");
+        }
+    }
+
     pub(crate) fn insert(
         &mut self,
         k: K,
@@ -279,6 +464,28 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
             InvertedIndex::Memory(btree) => btree.get(k).map(|v| {
                 RoaringBitmap::from_sorted_iter(v.read().unwrap().iter().copied()).unwrap()
             }),
+        }
+    }
+
+    pub(crate) fn range_query(&self, start: &K, end: &K) -> RoaringBitmap {
+        let mut result = RoaringBitmap::new();
+        match self {
+            InvertedIndex::Disk(_r) => {
+                // TODO: Disk range query not implemented yet
+                // Need TreeReader to support range iteration
+                result
+            }
+            InvertedIndex::Memory(btree) => {
+                // For memory index, iterate all keys and filter
+                for item in btree.iter() {
+                    let (key, ids_lock, _ttl) = &*item;
+                    if key >= start && key <= end {
+                        let ids = ids_lock.read().unwrap();
+                        result |= RoaringBitmap::from_sorted_iter(ids.iter().copied()).unwrap();
+                    }
+                }
+                result
+            }
         }
     }
 

@@ -1,4 +1,5 @@
 pub mod field;
+pub mod compute;
 
 use std::time::Duration;
 
@@ -36,8 +37,8 @@ impl Schema {
     }
 
     /// 将当前 Schema 转换为 Arrow Schema
-    pub fn to_arrow_schema(&self) -> std::sync::Arc<arrow::datatypes::Schema> {
-        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+    pub fn to_arrow_schema(&self) -> std::sync::Arc<datafusion::arrow::datatypes::Schema> {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
         use std::sync::Arc;
 
         let mut arrow_fields = Vec::new();
@@ -54,10 +55,7 @@ impl Schema {
                         (DataType::Utf8, true)
                     }
                 }
-                field::FieldOption::I32 { .. } => (DataType::Int32, true),
                 field::FieldOption::I64 { .. } => (DataType::Int64, true),
-                field::FieldOption::U32 { .. } => (DataType::UInt32, true),
-                field::FieldOption::F32 { .. } => (DataType::Float32, true),
                 field::FieldOption::F64 { .. } => (DataType::Float64, true),
             };
 

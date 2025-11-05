@@ -4,7 +4,10 @@ use std::{
 };
 
 use ahash::AHasher;
-use arrow::array::{Array, ArrayRef, RecordBatch, StringArray, UInt32Array};
+use datafusion::arrow::{
+    self as arrow,
+    array::{Array, ArrayRef, RecordBatch, StringArray, UInt32Array},
+};
 
 use crate::{
     arrow_downcast,
@@ -44,7 +47,7 @@ pub fn json_to_record_arrow(
     data: &[serde_json::Value],
     arrow_schema: Arc<arrow::datatypes::Schema>,
 ) -> CoreResult<RecordBatch> {
-    use arrow::json::ReaderBuilder;
+    use datafusion::arrow::json::ReaderBuilder;
     use std::io::Cursor;
 
     if data.is_empty() {

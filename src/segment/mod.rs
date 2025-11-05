@@ -9,11 +9,12 @@ use crate::{
     },
     utils::error::{CoreError, CoreResult},
 };
-use arrow::{
+use bloomfilter::Bloom;
+use datafusion::arrow::{
+    self as arrow,
     array::{ArrayRef, RecordBatch, UInt32Array},
     datatypes::{DataType, Field, SchemaRef},
 };
-use bloomfilter::Bloom;
 use itertools::Itertools;
 use roaring::RoaringBitmap;
 use std::{
@@ -58,11 +59,14 @@ impl Segment {
                     let keyword = Keyword::new(field_opt);
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
-                FieldOption::I32 { name, index } => todo!(),
-                FieldOption::I64 { name, index } => todo!(),
-                FieldOption::U32 { name, index } => todo!(),
-                FieldOption::F32 { name, index } => todo!(),
-                FieldOption::F64 { name, index } => todo!(),
+                FieldOption::I64 { .. } => {
+                    let num_i64 = field_store::num_i64::NumI64::new(field_opt);
+                    fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
+                }
+                FieldOption::F64 { .. } => {
+                    let num_f64 = field_store::num_f64::NumF64::new(field_opt);
+                    fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
+                }
             }
         }
 
@@ -75,7 +79,9 @@ impl Segment {
 
         // 创建 BloomFilter: 预估每个 segment 最多存储的文档数，误判率 1%
         let expected_items = schema.persist_policy.max_docs_per_segment as usize;
-        let bloom = Bloom::new_for_fp_rate(expected_items, 0.01);
+        let bloom = Bloom::new_for_fp_rate(expected_items, 0.01)
+            .map_err(|e| CoreError::Internal(format!("Failed to create bloom filter: {}", e)))
+            .unwrap();
 
         Self {
             start,
@@ -275,7 +281,7 @@ impl Segment {
     ///
     /// This implements lazy loading - only loads the RecordBatch containing the requested doc
     pub fn get_document(&self, doc_id: u32) -> Option<RecordBatch> {
-        use arrow::compute::filter_record_batch;
+        use datafusion::arrow::compute::filter_record_batch;
 
         // Check if document is deleted
         if self.deleted.read().unwrap().contains(doc_id) {
@@ -310,7 +316,7 @@ impl Segment {
     /// Returns a RecordBatch containing only the requested documents
     /// Deleted documents are filtered out
     pub fn get_documents(&self, doc_ids: &[u32]) -> CoreResult<Option<RecordBatch>> {
-        use arrow::compute::concat_batches;
+        use datafusion::arrow::compute::concat_batches;
 
         let deleted = self.deleted.read().unwrap();
 
@@ -375,7 +381,7 @@ impl Segment {
         batch: &RecordBatch,
         deleted: &RoaringBitmap,
     ) -> RecordBatch {
-        use arrow::compute::filter_record_batch;
+        use datafusion::arrow::compute::filter_record_batch;
 
         if deleted.is_empty() {
             return batch.clone();
@@ -445,11 +451,14 @@ impl Segment {
                     let keyword = Keyword::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
-                FieldOption::I32 { name, index } => todo!(),
-                FieldOption::I64 { name, index } => todo!(),
-                FieldOption::U32 { name, index } => todo!(),
-                FieldOption::F32 { name, index } => todo!(),
-                FieldOption::F64 { name, index } => todo!(),
+                FieldOption::I64 { .. } => {
+                    let num_i64 = field_store::num_i64::NumI64::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
+                }
+                FieldOption::F64 { .. } => {
+                    let num_f64 = field_store::num_f64::NumF64::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
+                }
             }
         }
 
@@ -464,41 +473,15 @@ impl Segment {
             let buffer = std::fs::read(&pk_path)
                 .map_err(|e| CoreError::IOError(format!("Failed to read pk_bloomfilter: {}", e)))?;
 
-            // 解析格式: [k_num(4 bytes)][sip_keys(4*16 bytes)][bitmap_len(8 bytes)][bitmap]
-            let mut offset = 0;
-            let k_num = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as u32;
-            offset += 4;
-
-            let mut sip_keys = [(0u64, 0u64); 2];
-            for i in 0..2 {
-                let k0_bytes: [u8; 8] = buffer[offset..offset + 8]
-                    .try_into()
-                    .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
-                let k0 = u64::from_le_bytes(k0_bytes);
-                offset += 8;
-
-                let k1_bytes: [u8; 8] = buffer[offset..offset + 8]
-                    .try_into()
-                    .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
-                let k1 = u64::from_le_bytes(k1_bytes);
-                offset += 8;
-
-                sip_keys[i] = (k0, k1);
-            }
-
-            let bitmap_len_bytes: [u8; 8] = buffer[offset..offset + 8]
-                .try_into()
-                .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
-            let bitmap_len = u64::from_le_bytes(bitmap_len_bytes) as usize;
-            offset += 8;
-
-            let bitmap = buffer[offset..offset + bitmap_len].to_vec();
-
-            Bloom::from_existing(&bitmap, (bitmap_len * 8) as u64, k_num, sip_keys)
+            // Use bloomfilter's built-in deserialization
+            Bloom::from_bytes(buffer).map_err(|e| {
+                CoreError::IOError(format!("Failed to deserialize bloom filter: {}", e))
+            })?
         } else {
             // 如果不存在，创建一个空的 BloomFilter
             let expected_items = schema.persist_policy.max_docs_per_segment as usize;
             Bloom::new_for_fp_rate(expected_items, 0.01)
+                .map_err(|e| CoreError::Internal(format!("Failed to create bloom filter: {}", e)))?
         };
 
         let deleted = if std::path::Path::new(&deleted_path).exists() {
@@ -609,6 +592,18 @@ impl Segment {
                 {
                     let disk_field = keyword.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_i64) = field
+                    .as_any()
+                    .downcast_ref::<field_store::num_i64::NumI64>()
+                {
+                    let disk_field = num_i64.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_f64) = field
+                    .as_any()
+                    .downcast_ref::<field_store::num_f64::NumF64>()
+                {
+                    let disk_field = num_f64.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else {
                     return Err(CoreError::Internal(format!(
                         "Unsupported field type for persist: {}",
@@ -624,28 +619,12 @@ impl Segment {
         // 否则 rename 失败后无法重试（fields 已经是 Disk 类型）
 
         // 2. Persist pk_bloomfilter (to temp directory)
-        let pk_start = std::time::Instant::now();
         {
             let pk_path = format!("{}/pk_bloomfilter", segment_tmp_path);
             let pk_bloom = self.pk_bloomfilter.read().unwrap();
 
-            // BloomFilter 可以转换为字节数组
-            let bitmap = pk_bloom.bitmap();
-            let k_num = pk_bloom.number_of_hash_functions();
-            let sip_keys = pk_bloom.sip_keys();
-
-            // 简单格式: [k_num(4 bytes)][sip_keys(4*16 bytes)][bitmap_len(8 bytes)][bitmap]
-            let mut buffer = Vec::new();
-            buffer.extend_from_slice(&(k_num as u32).to_le_bytes());
-
-            // 序列化两个 sip_key 对
-            for &(k0, k1) in &sip_keys {
-                buffer.extend_from_slice(&k0.to_le_bytes());
-                buffer.extend_from_slice(&k1.to_le_bytes());
-            }
-
-            buffer.extend_from_slice(&(bitmap.len() as u64).to_le_bytes());
-            buffer.extend_from_slice(&bitmap);
+            // Use bloomfilter's built-in serialization (includes header with k_num and seed)
+            let buffer = pk_bloom.to_bytes();
 
             std::fs::write(&pk_path, buffer).map_err(|e| {
                 CoreError::IOError(format!("Failed to write pk_bloomfilter file: {}", e))
@@ -706,7 +685,6 @@ impl Segment {
         }
 
         // 4. Persist row_data using BTree disk format (to temp directory)
-        let rowdata_start = std::time::Instant::now();
         {
             let rowdata_path = format!("{}/rowdata", segment_tmp_path);
             std::fs::create_dir_all(&rowdata_path)
@@ -767,7 +745,6 @@ impl Segment {
         }
 
         // Phase 4: Replace in-memory row_data with disk-based reader
-        let replace_start = std::time::Instant::now();
         {
             let rowdata_path = format!("{}/rowdata", segment_path);
             let disk_row_data =
@@ -818,74 +795,34 @@ impl Segment {
                     let keyword = Keyword::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
-                FieldOption::I32 { .. } => {
-                    todo!()
-                }
                 FieldOption::I64 { .. } => {
-                    todo!()
-                }
-                FieldOption::U32 { .. } => {
-                    todo!()
-                }
-                FieldOption::F32 { .. } => {
-                    todo!()
+                    let num_i64 = field_store::num_i64::NumI64::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
                 }
                 FieldOption::F64 { .. } => {
-                    todo!()
+                    let num_f64 = field_store::num_f64::NumF64::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
                 }
             }
         }
         println!("  Fields loaded in {:?}", start.elapsed());
 
         // 2. Load pk_bloomfilter
-        let pk_start = std::time::Instant::now();
         let pk_path = format!("{}/pk_bloomfilter", segment_path);
         let pk_bloomfilter = if std::path::Path::new(&pk_path).exists() {
             let buffer = std::fs::read(&pk_path)
                 .map_err(|e| CoreError::IOError(format!("Failed to read pk_bloomfilter: {}", e)))?;
 
-            // 解析格式: [k_num(4 bytes)][sip_keys(4*16 bytes)][bitmap_len(8 bytes)][bitmap]
-            let mut offset = 0;
-            let k_num = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as u32;
-            offset += 4;
-
-            let mut sip_keys = [(0u64, 0u64); 2];
-            for i in 0..2 {
-                let k0_bytes: [u8; 8] = buffer[offset..offset + 8]
-                    .try_into()
-                    .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
-                let k0 = u64::from_le_bytes(k0_bytes);
-                offset += 8;
-
-                let k1_bytes: [u8; 8] = buffer[offset..offset + 8]
-                    .try_into()
-                    .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
-                let k1 = u64::from_le_bytes(k1_bytes);
-                offset += 8;
-
-                sip_keys[i] = (k0, k1);
-            }
-
-            let bitmap_len_bytes: [u8; 8] = buffer[offset..offset + 8]
-                .try_into()
-                .map_err(|_| CoreError::IOError("Invalid bloom filter format".to_string()))?;
-            let bitmap_len = u64::from_le_bytes(bitmap_len_bytes) as usize;
-            offset += 8;
-
-            let bitmap = buffer[offset..offset + bitmap_len].to_vec();
-
-            Bloom::from_existing(&bitmap, (bitmap_len * 8) as u64, k_num, sip_keys)
+            // Use bloomfilter's built-in deserialization
+            Bloom::from_bytes(buffer).map_err(|e| {
+                CoreError::IOError(format!("Failed to deserialize bloom filter: {}", e))
+            })?
         } else {
             // 如果不存在，创建一个空的 BloomFilter
             let expected_items = schema.persist_policy.max_docs_per_segment as usize;
             Bloom::new_for_fp_rate(expected_items, 0.01)
+                .map_err(|e| CoreError::Internal(format!("Failed to create bloom filter: {}", e)))?
         };
-        println!(
-            "  PK bloomfilter loaded ({} bits, {} KB) in {:?}",
-            pk_bloomfilter.number_of_bits(),
-            pk_bloomfilter.bitmap().len() / 1024,
-            pk_start.elapsed()
-        );
 
         // 3. Load deleted bitmap (only this segment's deleted file)
         let deleted_start = std::time::Instant::now();
@@ -993,7 +930,7 @@ impl Segment {
         row_data: RowDataStore,
         deleted: &RoaringBitmap,
     ) -> CoreResult<()> {
-        use arrow::compute::concat_batches;
+        use datafusion::arrow::compute::concat_batches;
         use mem_btree::persist::TreeWriter;
 
         // Extract memory BTree from RowDataStore
@@ -1080,9 +1017,9 @@ impl Segment {
 
     /// Mark an entire RecordBatch as deleted (set all columns except internal_id to NULL)
     fn mark_batch_as_deleted(&self, batch: &RecordBatch) -> RecordBatch {
-        use arrow::array::{make_array, ArrayData, ArrayRef};
-        use arrow::buffer::NullBuffer;
-        use arrow::datatypes::{Field, Schema as ArrowSchema};
+        use datafusion::arrow::array::{make_array, ArrayData, ArrayRef};
+        use datafusion::arrow::buffer::NullBuffer;
+        use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 
         let num_rows = batch.num_rows();
 
@@ -1138,9 +1075,9 @@ impl Segment {
         batch: &RecordBatch,
         deleted: &RoaringBitmap,
     ) -> RecordBatch {
-        use arrow::array::{make_array, ArrayData, ArrayRef};
-        use arrow::buffer::NullBuffer;
-        use arrow::datatypes::{Field, Schema as ArrowSchema};
+        use datafusion::arrow::array::{cast, make_array, ArrayData, ArrayRef};
+        use datafusion::arrow::buffer::NullBuffer;
+        use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema, UInt32Type};
 
         // If no deletions, return batch as-is
         if deleted.is_empty() {
@@ -1149,8 +1086,7 @@ impl Segment {
 
         // Get the internal_id column (first column)
         let internal_id_col = batch.column(0);
-        let internal_ids =
-            arrow::array::cast::as_primitive_array::<arrow::datatypes::UInt32Type>(internal_id_col);
+        let internal_ids = cast::as_primitive_array::<UInt32Type>(internal_id_col);
 
         // Check which rows in this batch are deleted
         let mut has_deleted = false;
@@ -1231,7 +1167,7 @@ impl Segment {
         _deleted: &RoaringBitmap,
         schema: &Arc<arrow::datatypes::Schema>,
     ) -> CoreResult<RecordBatch> {
-        use arrow::array::{make_array, ArrayRef, MutableArrayData};
+        use datafusion::arrow::array::{make_array, ArrayRef, MutableArrayData};
 
         // Collect all rows from all batches
         let mut all_columns: Vec<Vec<ArrayRef>> = vec![Vec::new(); schema.fields().len()];
