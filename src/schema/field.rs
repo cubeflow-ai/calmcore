@@ -118,4 +118,13 @@ impl FieldOption {
             _ => true, // 其他类型默认区分大小写
         }
     }
+
+    /// 获取字段类型
+    pub fn field_type(&self) -> FieldType {
+        match self {
+            FieldOption::Keyword { .. } => FieldType::Keyword,
+            FieldOption::I64 { .. } => FieldType::I64,
+            FieldOption::F64 { .. } => FieldType::F64,
+        }
+    }
 }

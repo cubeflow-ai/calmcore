@@ -6,7 +6,7 @@ use roaring::RoaringBitmap;
 use crate::{
     arrow_downcast,
     schema::field::{FieldOption, FieldType},
-    segment::field_store::{IndexWriter, InvertedIndex},
+    segment::field_store::{IndexReader, IndexWriter, InvertedIndex},
     utils::error::{CoreError, CoreResult},
 };
 
@@ -90,9 +90,22 @@ impl NumI64 {
         indexs.get_bitmap(&value)
     }
 
-    pub fn range_query(&self, start: i64, end: i64) -> RoaringBitmap {
+    /// Range query with support for open/closed intervals
+    ///
+    /// # Arguments
+    /// * `start` - Optional start bound
+    /// * `start_inclusive` - Whether start bound is inclusive (>=) or exclusive (>)
+    /// * `end` - Optional end bound
+    /// * `end_inclusive` - Whether end bound is inclusive (<=) or exclusive (<)
+    pub fn range_query(
+        &self,
+        start: Option<i64>,
+        start_inclusive: bool,
+        end: Option<i64>,
+        end_inclusive: bool,
+    ) -> RoaringBitmap {
         let indexs = self.indexs.read().unwrap();
-        indexs.range_query(&start, &end)
+        indexs.range_query(start.as_ref(), start_inclusive, end.as_ref(), end_inclusive)
     }
 }
 
@@ -141,5 +154,56 @@ impl IndexWriter for NumI64 {
 
     fn mget_internal_id(&self, _column: &datafusion::arrow::array::ArrayRef) -> Vec<u32> {
         vec![]
+    }
+}
+
+impl IndexReader for NumI64 {
+    fn name(&self) -> &str {
+        self.field.name()
+    }
+
+    fn field_type(&self) -> FieldType {
+        FieldType::I64
+    }
+
+    fn query(&self, value: &datafusion::scalar::ScalarValue) -> Option<RoaringBitmap> {
+        use datafusion::scalar::ScalarValue;
+
+        match value {
+            ScalarValue::Int64(Some(v)) => {
+                let indexs = self.indexs.read().unwrap();
+                indexs.get_bitmap(v)
+            }
+            _ => None,
+        }
+    }
+
+    fn range(
+        &self,
+        start: &datafusion::scalar::ScalarValue,
+        start_inclusive: bool,
+        end: &datafusion::scalar::ScalarValue,
+        end_inclusive: bool,
+    ) -> Option<RoaringBitmap> {
+        use datafusion::scalar::ScalarValue;
+
+        let indexs = self.indexs.read().unwrap();
+
+        let start_val = match start {
+            ScalarValue::Int64(Some(v)) => Some(*v),
+            _ => None,
+        };
+
+        let end_val = match end {
+            ScalarValue::Int64(Some(v)) => Some(*v),
+            _ => None,
+        };
+
+        Some(indexs.range_query(
+            start_val.as_ref(),
+            start_inclusive,
+            end_val.as_ref(),
+            end_inclusive,
+        ))
     }
 }

@@ -4,7 +4,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use byteorder::WriteBytesExt;
 use datafusion::arrow::array::{ArrayRef, ListArray, RecordBatch, StringArray, UInt32Array};
 use roaring::RoaringBitmap;
 
@@ -12,7 +11,7 @@ use crate::{
     arrow_downcast,
     partition::WriteInfo,
     schema::field::{FieldOption, FieldType},
-    segment::field_store::{IndexWriter, InvertedIndex, PkWriter},
+    segment::field_store::{IndexReader, IndexWriter, InvertedIndex, PkWriter},
     utils::error::{CoreError, CoreResult},
 };
 
@@ -232,7 +231,7 @@ impl PkWriter for Keyword {
     ) -> CoreResult<HashSet<u32>> {
         let mut cur_dels = HashSet::new();
 
-        let pk = data.column_by_name(self.name()).ok_or_else(|| {
+        let pk = data.column_by_name(self.field.name()).ok_or_else(|| {
             CoreError::Internal(format!(
                 "field:{:?} not found in recordbatch",
                 self.field.name()
@@ -284,83 +283,37 @@ impl PkWriter for Keyword {
     }
 }
 
-/// 磁盘用：String -> RoaringBitmap 的序列化器
-#[derive(Clone)]
-pub struct StringRoaringSerializer {
-    zstd_level: i32,
-}
-
-impl StringRoaringSerializer {
-    pub fn new(zstd_level: i32) -> Self {
-        Self { zstd_level }
+impl IndexReader for Keyword {
+    fn name(&self) -> &str {
+        self.field.name()
     }
-    pub fn default() -> Self {
-        Self { zstd_level: 3 }
-    }
-}
 
-impl mem_btree::persist::ReadSerializer<String, RoaringBitmap> for StringRoaringSerializer {
-    fn deserialize_value<'a>(
+    fn field_type(&self) -> FieldType {
+        FieldType::Keyword
+    }
+
+    fn query(&self, value: &datafusion::scalar::ScalarValue) -> Option<RoaringBitmap> {
+        use datafusion::scalar::ScalarValue;
+
+        match value {
+            ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
+                let normalized_key = self.normalize_string(s);
+                let indexs = self.indexs.read().unwrap();
+                indexs.get_bitmap(&normalized_key)
+            }
+            _ => None,
+        }
+    }
+
+    fn range(
         &self,
-        data: &'a [u8],
-    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
-        super::decode_roaring_from_bytes(data)
-    }
-
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<String> {
-        if data.is_empty() {
-            return Vec::new();
-        }
-        let data_to_parse = match zstd::decode_all(data) {
-            Ok(d) => d,
-            Err(_) => return Vec::new(),
-        };
-        let mut result = Vec::new();
-        let mut pos = 0;
-        if data_to_parse.len() < 2 {
-            return result;
-        }
-        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
-        pos += 2;
-        for _ in 0..key_count {
-            if pos >= data_to_parse.len() {
-                break;
-            }
-            let len = mem_btree::persist::zigzag::read_u32(&data_to_parse, &mut pos) as usize;
-            if pos + len > data_to_parse.len() {
-                break;
-            }
-            match String::from_utf8(data_to_parse[pos..pos + len].to_vec()) {
-                Ok(key) => result.push(key),
-                Err(_) => break,
-            }
-            pos += len;
-        }
-        result
-    }
-}
-
-impl mem_btree::persist::WriteSerializer<String, RoaringBitmap> for StringRoaringSerializer {
-    fn serialize_keys<'a>(&self, keys: &'a Vec<String>) -> std::borrow::Cow<'a, [u8]> {
-        let mut uncompressed = Vec::new();
-        // 写入 key 的个数（u16 varint 更短，这里复用 BigEndian u16 保持一致性）
-        uncompressed
-            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
-            .expect("write u16 failed");
-
-        for key in keys {
-            let key_bytes = key.as_bytes();
-            mem_btree::persist::zigzag::write_u32(key_bytes.len() as u32, &mut uncompressed)
-                .expect("write zigzag u32 failed");
-            uncompressed.extend_from_slice(key_bytes);
-        }
-
-        let compressed =
-            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
-        std::borrow::Cow::Owned(compressed)
-    }
-
-    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> std::borrow::Cow<'a, [u8]> {
-        std::borrow::Cow::Owned(super::encode_roaring_from_bitmap(value))
+        _start: &datafusion::scalar::ScalarValue,
+        _start_inclusive: bool,
+        _end: &datafusion::scalar::ScalarValue,
+        _end_inclusive: bool,
+    ) -> Option<RoaringBitmap> {
+        // Keyword fields don't support range queries
+        // String comparison ranges are typically not useful for keyword fields
+        None
     }
 }

@@ -97,7 +97,10 @@ where
     }
 
     /// Returns an iterator over all key-value pairs
-    pub(crate) fn iter(&self) -> TreeIterator<'_, K, R> {
+    ///
+    /// Note: The iterator is currently not fully implemented (returns None immediately)
+    /// TODO: Implement full tree traversal
+    pub fn iter(&self) -> TreeIterator<'_, K, R> {
         TreeIterator::new(self)
     }
 
@@ -365,10 +368,14 @@ enum SearchResult {
 }
 
 /// Iterator over tree entries
-#[allow(dead_code)]
+///
+/// Similar to memory BTree::Iter, uses a stack to track traversal state.
+/// Stack contains (node_offset, key_index) pairs where:
+/// - node_offset: position in mmap'd node file
+/// - key_index: current index within that node (-1 means not started)
 pub struct TreeIterator<'a, K, R> {
     reader: &'a TreeReader<K, R>,
-    stack: Vec<(usize, usize)>, // (node_offset, key_index)
+    stack: Vec<(usize, i32)>, // (node_offset, key_index) - using i32 like memory version
     finished: bool,
 }
 
@@ -377,10 +384,70 @@ where
     K: Clone + PartialOrd,
 {
     fn new(reader: &'a TreeReader<K, R>) -> Self {
+        let mut stack = Vec::new();
+        if !reader.is_empty() {
+            // Start from root with index -1 (not yet accessed)
+            stack.push((reader.root_offset as usize, -1i32));
+        }
         Self {
             reader,
-            stack: Vec::new(),
+            stack,
             finished: reader.is_empty(),
+        }
+    }
+
+    /// Seek to the first key >= target key
+    /// After seek, next() will return the first key >= target
+    pub fn seek(&mut self, key: &K) {
+        self.stack.clear();
+        self.finished = false;
+
+        if self.reader.is_empty() {
+            self.finished = true;
+            return;
+        }
+
+        let mut offset = self.reader.root_offset as usize;
+
+        // Traverse tree to find the position
+        loop {
+            let (is_leaf, keys_data, offsets) = match self.reader.read_node_at(offset) {
+                Ok(node) => node,
+                Err(_) => {
+                    self.finished = true;
+                    return;
+                }
+            };
+
+            let keys = self.reader.reader_ser.deserialize_keys(&keys_data);
+
+            if is_leaf {
+                // Leaf node: find first key >= search key
+                let mut index = 0;
+                for (i, k) in keys.iter().enumerate() {
+                    if k >= key {
+                        index = i;
+                        break;
+                    }
+                    index = i + 1;
+                }
+                // Push with index - 1 because next() will increment it
+                self.stack.push((offset, index as i32 - 1));
+                return;
+            } else {
+                // Index node: find which child to follow
+                let mut child_idx = 0;
+                for (i, k) in keys.iter().enumerate() {
+                    if k <= key {
+                        child_idx = i;
+                    } else {
+                        break;
+                    }
+                }
+
+                self.stack.push((offset, child_idx as i32));
+                offset = offsets[child_idx] as usize;
+            }
         }
     }
 }
@@ -396,12 +463,50 @@ where
             return None;
         }
 
-        // TODO: Implement tree traversal
-        // This requires maintaining a stack of (node, index) pairs
-        // and navigating through the tree structure
+        // Similar to memory BTree iterator logic
+        loop {
+            let (offset, mut index) = self.stack.pop()?;
+            index += 1;
 
-        self.finished = true;
-        None
+            // Read node at current offset
+            let (is_leaf, keys_data, offsets) = match self.reader.read_node_at(offset) {
+                Ok(node) => node,
+                Err(_) => {
+                    self.finished = true;
+                    return None;
+                }
+            };
+
+            let keys = self.reader.reader_ser.deserialize_keys(&keys_data);
+
+            // Check if we've exhausted this node
+            if index >= keys.len() as i32 {
+                continue; // Pop next item from stack
+            }
+
+            // Push current position back onto stack
+            self.stack.push((offset, index));
+
+            if is_leaf {
+                // Leaf node: return the item at this index
+                let key = keys[index as usize].clone();
+
+                // Calculate value offset range
+                let start = offsets[index as usize];
+                let end = if (index as usize) + 1 < offsets.len() {
+                    offsets[index as usize + 1]
+                } else {
+                    self.reader.data.len() as i64
+                };
+
+                let value = self.reader.read_value_at(start, end);
+                return Some(std::sync::Arc::new((key, value, None)));
+            } else {
+                // Index node: push next child onto stack
+                let child_offset = offsets[index as usize] as usize;
+                self.stack.push((child_offset, -1));
+            }
+        }
     }
 }
 
@@ -492,6 +597,138 @@ mod tests {
         assert_eq!(reader.get(&1000), None);
 
         println!("✅ All get operations successful!");
+    }
+
+    #[test]
+    fn test_reader_iterator() {
+        let test_dir = PathBuf::from("/tmp/test_tree_reader_iterator");
+        std::fs::remove_dir_all(&test_dir).ok();
+
+        // Write test data
+        let mut tree = BTree::new(32);
+        for i in 0..50i64 {
+            tree.put(i, i * 2);
+        }
+
+        TreeWriter::new(test_dir.clone(), 128, 0)
+            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), tree.iter())
+            .unwrap();
+
+        // Read back and test iterator
+        let reader = TreeReader::new(&test_dir, Box::new(I64Serializer {})).unwrap();
+
+        println!("Testing full iteration...");
+        let mut iter = reader.iter();
+        let mut count = 0;
+        let mut last_key = -1i64;
+
+        while let Some(item) = iter.next() {
+            let (key, value, _ttl) = &*item;
+            println!("  Iterated: key={}, value={}", key, value);
+
+            // Verify keys are in order
+            assert!(*key > last_key, "Keys should be in ascending order");
+            last_key = *key;
+
+            // Verify value is correct
+            assert_eq!(*value, *key * 2, "Value mismatch for key {}", key);
+            count += 1;
+        }
+
+        assert_eq!(count, 50, "Should iterate over all 50 items");
+        println!("✅ Iterator test passed: iterated {} items", count);
+    }
+
+    #[test]
+    fn test_reader_iterator_seek() {
+        let test_dir = PathBuf::from("/tmp/test_tree_reader_seek");
+        std::fs::remove_dir_all(&test_dir).ok();
+
+        // Write test data
+        let mut tree = BTree::new(32);
+        for i in 0..100i64 {
+            tree.put(i, i * 10);
+        }
+
+        TreeWriter::new(test_dir.clone(), 128, 0)
+            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), tree.iter())
+            .unwrap();
+
+        let reader = TreeReader::new(&test_dir, Box::new(I64Serializer {})).unwrap();
+
+        // Test seek to middle
+        println!("Testing seek to 50...");
+        let mut iter = reader.iter();
+        iter.seek(&50);
+
+        if let Some(item) = iter.next() {
+            let (key, value, _) = &*item;
+            println!("  After seek(50): key={}, value={}", key, value);
+            assert_eq!(*key, 50, "Should start at key 50");
+            assert_eq!(*value, 500, "Value should be 500");
+        } else {
+            panic!("Seek failed to position iterator");
+        }
+
+        // Continue iteration
+        let mut count = 1;
+        while let Some(item) = iter.next() {
+            let (key, _value, _) = &*item;
+            assert!(*key > 50, "Keys after 50 should be > 50");
+            count += 1;
+        }
+        assert_eq!(count, 50, "Should have 50 items from 50 to 99");
+
+        // Test seek to non-existent key (should position at next higher)
+        println!("Testing seek to 25 (exists)...");
+        let mut iter = reader.iter();
+        iter.seek(&25);
+        if let Some(item) = iter.next() {
+            let (key, _, _) = &*item;
+            assert_eq!(*key, 25, "Should start at key 25");
+        }
+
+        println!("✅ Seek test passed");
+    }
+
+    #[test]
+    fn test_reader_range_query() {
+        let test_dir = PathBuf::from("/tmp/test_tree_reader_range");
+        std::fs::remove_dir_all(&test_dir).ok();
+
+        // Write test data
+        let mut tree = BTree::new(32);
+        for i in 0..100i64 {
+            tree.put(i, i * 3);
+        }
+
+        TreeWriter::new(test_dir.clone(), 128, 0)
+            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), tree.iter())
+            .unwrap();
+
+        let reader = TreeReader::new(&test_dir, Box::new(I64Serializer {})).unwrap();
+
+        // Test range [30, 40)
+        println!("Testing range query [30, 40)...");
+        let mut iter = reader.iter();
+        iter.seek(&30);
+
+        let mut keys = Vec::new();
+        while let Some(item) = iter.next() {
+            let (key, value, _) = &*item;
+            if *key >= 40 {
+                break; // Stop at 40
+            }
+            assert_eq!(*value, *key * 3, "Value mismatch");
+            keys.push(*key);
+        }
+
+        println!("  Found keys: {:?}", keys);
+        assert_eq!(keys.len(), 10, "Should have 10 keys in range [30, 40)");
+        assert_eq!(keys[0], 30);
+        assert_eq!(keys[9], 39);
+
+        println!("✅ Range query test passed");
     }
 
     // Large dataset tests removed - will be added back when needed

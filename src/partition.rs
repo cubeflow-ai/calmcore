@@ -25,15 +25,13 @@ pub struct WriteInfo(pub Vec<(Arc<Segment>, Vec<u32>)>);
 pub type PersistNotifyCallback = mpsc::UnboundedSender<u64>;
 
 pub struct Partition {
-    id: u64,
-    // 当前活跃 segment (可写)
+    pub id: u64,
     current_segment: RwLock<Segment>,
-    // 已冻结的 segments (只读)
-    // Field 内部区分 Memory/Disk，row_data 内部区分 Memory/Disk
-    // pk_bloomfilter 和 deleted 始终在内存
     frozen_segments: RwLock<Vec<(u64, Arc<Segment>)>>, // (seg_id, segment)
     base_dir: PathBuf,
     schema: Arc<Schema>,
+    schema_write: Arc<datafusion::arrow::datatypes::Schema>,
+    schema_read: Arc<datafusion::arrow::datatypes::Schema>,
     read_lock: RwLock<()>,
     write_lock: Mutex<()>,
     segment_id_counter: AtomicU64,
@@ -42,14 +40,16 @@ pub struct Partition {
 
 impl Partition {
     pub fn new(
-        id: u32,
+        id: u64,
         base_dir: PathBuf,
         schema: Schema,
         persist_notify: mpsc::UnboundedSender<u64>,
     ) -> Self {
         let schema = Arc::new(schema);
+        let schema_write = Arc::new(schema.to_arrow_schema());
+        let schema_read = Arc::new(schema.to_arrow_schema());
         Partition {
-            id: id as u64,
+            id,
             base_dir,
             schema: schema.clone(),
             current_segment: RwLock::new(Segment::new(0, schema)),
@@ -385,7 +385,7 @@ impl Partition {
 
     /// Load a partition from disk
     pub fn load(
-        id: u32,
+        id: u64,
         base_dir: PathBuf,
         schema: Schema,
         persist_notify: PersistNotifyCallback,

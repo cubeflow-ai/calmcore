@@ -6,8 +6,11 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use datafusion::arrow::array::{ArrayRef, RecordBatch};
 use datafusion::parquet;
+use datafusion::{
+    arrow::array::{ArrayRef, RecordBatch},
+    scalar::ScalarValue,
+};
 use mem_btree::{
     persist::{self, num_ser},
     BTree,
@@ -24,9 +27,6 @@ pub mod num_f64;
 pub mod num_i64;
 // pub mod num_u32; // TODO: implement later
 // pub mod num_u64; // removed per design: u64 field not needed currently
-
-// Re-export StringRoaringSerializer from keyword module
-pub use keyword::StringRoaringSerializer;
 
 /// Serializer for i64 keys with RoaringBitmap values
 #[derive(Clone)]
@@ -201,6 +201,90 @@ impl persist::WriteSerializer<OrderedF64, RoaringBitmap> for F64RoaringSerialize
         Cow::Owned(encode_roaring_from_bitmap(value))
     }
 }
+
+/// Serializer for String keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct StringRoaringSerializer {
+    zstd_level: i32,
+}
+
+impl StringRoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+
+    pub fn default() -> Self {
+        Self { zstd_level: 3 }
+    }
+}
+
+impl persist::ReadSerializer<String, RoaringBitmap> for StringRoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<String> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        let mut result = Vec::new();
+        let mut pos = 0;
+        if data_to_parse.len() < 2 {
+            return result;
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        pos += 2;
+        for _ in 0..key_count {
+            if pos >= data_to_parse.len() {
+                break;
+            }
+            let len = persist::zigzag::read_u32(&data_to_parse, &mut pos) as usize;
+            if pos + len > data_to_parse.len() {
+                break;
+            }
+            match String::from_utf8(data_to_parse[pos..pos + len].to_vec()) {
+                Ok(key) => result.push(key),
+                Err(_) => break,
+            }
+            pos += len;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<String, RoaringBitmap> for StringRoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<String>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+
+        for key in keys {
+            let key_bytes = key.as_bytes();
+            persist::zigzag::write_u32(key_bytes.len() as u32, &mut uncompressed)
+                .expect("write zigzag u32 failed");
+            uncompressed.extend_from_slice(key_bytes);
+        }
+
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
 /// Serializer for u32 keys with RecordBatch values
 /// Stores RecordBatch in Parquet format with built-in compression
 #[derive(Clone)]
@@ -373,9 +457,26 @@ impl RowDataStore {
     }
 }
 
-// pub trait PrimaryKey<K> {
-//     fn get(&self, key: &K) -> Option<u32>;
-// }
+pub trait IndexReader: Send + Sync + 'static {
+    fn name(&self) -> &str;
+    fn field_type(&self) -> FieldType;
+    fn query(&self, value: &ScalarValue) -> Option<RoaringBitmap>;
+
+    /// Range query with support for open/closed intervals
+    ///
+    /// # Arguments
+    /// * `start` - Start bound value
+    /// * `start_inclusive` - Whether start bound is inclusive (>=) or exclusive (>)
+    /// * `end` - End bound value
+    /// * `end_inclusive` - Whether end bound is inclusive (<=) or exclusive (<)
+    fn range(
+        &self,
+        start: &ScalarValue,
+        start_inclusive: bool,
+        end: &ScalarValue,
+        end_inclusive: bool,
+    ) -> Option<RoaringBitmap>;
+}
 
 pub trait IndexWriter: Send + Sync + 'static {
     fn name(&self) -> &str;
@@ -467,19 +568,121 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
         }
     }
 
-    pub(crate) fn range_query(&self, start: &K, end: &K) -> RoaringBitmap {
+    /// Range query with support for open/closed intervals
+    ///
+    /// # Arguments
+    /// * `start` - Optional start bound (None means no lower bound)
+    /// * `start_inclusive` - Whether start bound is inclusive (>=) or exclusive (>)
+    /// * `end` - Optional end bound (None means no upper bound)
+    /// * `end_inclusive` - Whether end bound is inclusive (<=) or exclusive (<)
+    ///
+    /// # Examples
+    /// - `range_query(Some(10), true, Some(20), true)` -> [10, 20]
+    /// - `range_query(Some(10), false, Some(20), true)` -> (10, 20]
+    /// - `range_query(Some(10), true, Some(20), false)` -> [10, 20)
+    /// - `range_query(Some(10), false, Some(20), false)` -> (10, 20)
+    pub(crate) fn range_query(
+        &self,
+        start: Option<&K>,
+        start_inclusive: bool,
+        end: Option<&K>,
+        end_inclusive: bool,
+    ) -> RoaringBitmap {
         let mut result = RoaringBitmap::new();
         match self {
-            InvertedIndex::Disk(_r) => {
-                // TODO: Disk range query not implemented yet
-                // Need TreeReader to support range iteration
+            InvertedIndex::Disk(reader) => {
+                // Use TreeIterator with seek optimization for efficient range query
+                let mut iter = reader.iter();
+
+                // Seek to start position if specified
+                if let Some(s) = start {
+                    iter.seek(s);
+                }
+
+                // Iterate through keys in range
+                for item in iter {
+                    let (key, bitmap, _ttl) = &*item;
+
+                    // Check start bound
+                    let start_ok = match start {
+                        Some(s) => {
+                            if start_inclusive {
+                                key >= s // [s, ...)
+                            } else {
+                                key > s // (s, ...)
+                            }
+                        }
+                        None => true, // No lower bound
+                    };
+
+                    // Check end bound
+                    let end_ok = match end {
+                        Some(e) => {
+                            if end_inclusive {
+                                key <= e // (..., e]
+                            } else {
+                                key < e // (..., e)
+                            }
+                        }
+                        None => true, // No upper bound
+                    };
+
+                    // Early termination: if key exceeds end bound, stop iterating
+                    if !end_ok {
+                        break;
+                    }
+
+                    if start_ok {
+                        result |= bitmap;
+                    }
+                }
                 result
             }
             InvertedIndex::Memory(btree) => {
-                // For memory index, iterate all keys and filter
-                for item in btree.iter() {
+                // For memory index, use seek to efficiently position iterator at start
+                // This avoids scanning from the beginning of the tree
+                let mut iter = btree.iter();
+
+                // Seek to start position if specified
+                if let Some(s) = start {
+                    iter.seek(s);
+                }
+
+                // Iterate through keys in range
+                while let Some(item) = iter.next() {
                     let (key, ids_lock, _ttl) = &*item;
-                    if key >= start && key <= end {
+
+                    // Check start bound
+                    let start_ok = match start {
+                        Some(s) => {
+                            if start_inclusive {
+                                key >= s // [s, ...)
+                            } else {
+                                key > s // (s, ...)
+                            }
+                        }
+                        None => true, // No lower bound
+                    };
+
+                    // Check end bound
+                    let end_ok = match end {
+                        Some(e) => {
+                            if end_inclusive {
+                                key <= e // (..., e]
+                            } else {
+                                key < e // (..., e)
+                            }
+                        }
+                        None => true, // No upper bound
+                    };
+
+                    // Early termination: if key exceeds end bound, stop iterating
+                    // This is important for performance as keys are sorted
+                    if !end_ok {
+                        break;
+                    }
+
+                    if start_ok {
                         let ids = ids_lock.read().unwrap();
                         result |= RoaringBitmap::from_sorted_iter(ids.iter().copied()).unwrap();
                     }

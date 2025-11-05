@@ -6,7 +6,7 @@ use roaring::RoaringBitmap;
 use crate::{
     arrow_downcast,
     schema::field::{FieldOption, FieldType},
-    segment::field_store::{IndexWriter, InvertedIndex},
+    segment::field_store::{IndexReader, IndexWriter, InvertedIndex},
     utils::error::{CoreError, CoreResult},
 };
 
@@ -117,16 +117,6 @@ impl NumF64 {
             indexs: RwLock::new(disk_index),
         })
     }
-
-    pub fn query(&self, value: f64) -> Option<RoaringBitmap> {
-        let indexs = self.indexs.read().unwrap();
-        indexs.get_bitmap(&OrderedF64(value))
-    }
-
-    pub fn range_query(&self, start: f64, end: f64) -> RoaringBitmap {
-        let indexs = self.indexs.read().unwrap();
-        indexs.range_query(&OrderedF64(start), &OrderedF64(end))
-    }
 }
 
 impl IndexWriter for NumF64 {
@@ -177,5 +167,54 @@ impl IndexWriter for NumF64 {
 
     fn mget_internal_id(&self, _column: &datafusion::arrow::array::ArrayRef) -> Vec<u32> {
         vec![]
+    }
+}
+
+impl IndexReader for NumF64 {
+    fn query(&self, value: &datafusion::scalar::ScalarValue) -> Option<RoaringBitmap> {
+        if let datafusion::scalar::ScalarValue::Float64(Some(v)) = value {
+            let indexs = self.indexs.read().unwrap();
+            indexs.get_bitmap(&OrderedF64(*v))
+        } else {
+            None
+        }
+    }
+
+    fn range(
+        &self,
+        start: &datafusion::scalar::ScalarValue,
+        start_inclusive: bool,
+        end: &datafusion::scalar::ScalarValue,
+        end_inclusive: bool,
+    ) -> Option<RoaringBitmap> {
+        use datafusion::scalar::ScalarValue::Float64;
+
+        let indexs = self.indexs.read().unwrap();
+
+        let start_key = match start {
+            Float64(Some(s)) => Some(OrderedF64(*s)),
+            _ => None,
+        };
+
+        let end_key = match end {
+            Float64(Some(e)) => Some(OrderedF64(*e)),
+            _ => None,
+        };
+
+        // Use range_query with open/closed interval support
+        Some(indexs.range_query(
+            start_key.as_ref(),
+            start_inclusive,
+            end_key.as_ref(),
+            end_inclusive,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        self.field.name()
+    }
+
+    fn field_type(&self) -> FieldType {
+        self.field.field_type()
     }
 }

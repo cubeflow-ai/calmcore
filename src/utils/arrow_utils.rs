@@ -7,11 +7,11 @@ use ahash::AHasher;
 use datafusion::arrow::{
     self as arrow,
     array::{Array, ArrayRef, RecordBatch, StringArray, UInt32Array},
+    datatypes::Schema,
 };
 
 use crate::{
     arrow_downcast,
-    schema::Schema,
     utils::error::{CoreError, CoreResult},
 };
 
@@ -38,9 +38,9 @@ pub fn array_to_hash(arr: &ArrayRef) -> Vec<u32> {
 /// 将 JSON 数组转换为 RecordBatch (优化：减少内存分配和拷贝)
 pub fn json_to_record_batch(
     data: &[serde_json::Value],
-    schema: &Schema,
+    schema: Arc<Schema>,
 ) -> CoreResult<RecordBatch> {
-    json_to_record_arrow(data, schema.to_arrow_schema())
+    json_to_record_arrow(data, schema)
 }
 
 pub fn json_to_record_arrow(

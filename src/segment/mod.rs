@@ -1,11 +1,13 @@
 mod field_store;
 
+// Re-export field_store types that are used publicly
+pub use field_store::{IndexReader, IndexWriter};
+
 use crate::{
     partition::WriteInfo,
     schema::{field::FieldOption, Schema},
     segment::field_store::{
-        keyword::Keyword, IndexWriter, InvertedIndex, PkWriter, RowDataStore,
-        U32RecordBatchSerializer,
+        keyword::Keyword, InvertedIndex, PkWriter, RowDataStore, U32RecordBatchSerializer,
     },
     utils::error::{CoreError, CoreResult},
 };
