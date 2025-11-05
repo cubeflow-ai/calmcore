@@ -1,6 +1,6 @@
 # BloomFilter 优化实施总结
 
-## ✅ 优化完成！
+## ✅ 优化完成
 
 成功将 CalmCore 的主键过滤从 `RoaringBitmap` 改为真正的 `BloomFilter`。
 
@@ -57,6 +57,7 @@ bincode = "1.3"  # 用于序列化辅助
 ### 2. 数据结构变更
 
 **之前**:
+
 ```rust
 pub struct Segment {
     pk_bloomfilter: RwLock<RoaringBitmap>,  // 存储所有主键哈希值
@@ -64,6 +65,7 @@ pub struct Segment {
 ```
 
 **之后**:
+
 ```rust
 pub struct Segment {
     pk_bloomfilter: RwLock<Bloom<u32>>,  // 真正的 BloomFilter
@@ -79,6 +81,7 @@ let bloom = Bloom::new_for_fp_rate(expected_items, 0.01);
 ```
 
 **配置说明**:
+
 - `expected_items`: 50万条（segment 大小限制）
 - `false_positive_rate`: 0.01 (1% 误判率)
 - 实际空间: 585 KB / segment
@@ -86,11 +89,13 @@ let bloom = Bloom::new_for_fp_rate(expected_items, 0.01);
 ### 4. 插入逻辑
 
 **之前**:
+
 ```rust
 self.pk_bloomfilter.write().unwrap().extend(hashes);
 ```
 
 **之后**:
+
 ```rust
 let mut bloom = self.pk_bloomfilter.write().unwrap();
 for hash in hashes {
@@ -101,6 +106,7 @@ for hash in hashes {
 ### 5. 查询逻辑
 
 **之前**:
+
 ```rust
 let active = pk_hash
     .iter()
@@ -108,6 +114,7 @@ let active = pk_hash
 ```
 
 **之后**:
+
 ```rust
 let bloom = self.pk_bloomfilter.read().unwrap();
 let active = pk_hash.iter().any(|v| bloom.check(v));  // O(k) 常数时间
@@ -116,6 +123,7 @@ let active = pk_hash.iter().any(|v| bloom.check(v));  // O(k) 常数时间
 ### 6. 持久化格式
 
 自定义二进制格式:
+
 ```
 [k_num(4 bytes)]         // 哈希函数数量
 [sip_keys(4*16 bytes)]   // SipHash keys (2对)
@@ -124,6 +132,7 @@ let active = pk_hash.iter().any(|v| bloom.check(v));  // O(k) 常数时间
 ```
 
 **代码**:
+
 ```rust
 let bitmap = pk_bloom.bitmap();
 let k_num = pk_bloom.number_of_hash_functions();
@@ -160,11 +169,13 @@ Bloom::from_existing(&bitmap, (bitmap_len * 8) as u64, k_num, sip_keys)
 移除了 field-level 的 pk_filter 参数：
 
 **之前**:
+
 ```rust
 fn mget_internal_id(&self, pk_filter: &RwLock<RoaringBitmap>, column: &ArrayRef) -> Vec<u32>;
 ```
 
 **之后**:
+
 ```rust
 fn mget_internal_id(&self, column: &ArrayRef) -> Vec<u32>;
 ```
@@ -198,7 +209,7 @@ fn mget_internal_id(&self, column: &ArrayRef) -> Vec<u32>;
 ### 4. 内存优化
 
 - **运行时内存**: 降低 61%
-- **对大规模数据**: 
+- **对大规模数据**:
   - 100 segments: 150 MB → 58 MB (节省 92 MB)
   - 1000 segments: 1.5 GB → 585 MB (节省 915 MB)
 
@@ -272,6 +283,7 @@ fn mget_internal_id(&self, column: &ArrayRef) -> Vec<u32>;
 ### 1. Fields 索引优化（新瓶颈）
 
 现在 Fields 索引序列化占持久化时间的 85-90%，可以考虑：
+
 - 并行序列化多个字段
 - 优化倒排索引的序列化格式
 - 添加增量持久化
@@ -279,16 +291,19 @@ fn mget_internal_id(&self, column: &ArrayRef) -> Vec<u32>;
 ### 2. BloomFilter 参数调优
 
 当前配置:
+
 - 误判率: 1%
 - 空间: 585 KB/segment
 
 可以测试:
+
 - 0.1% 误判率 → 更少误判，稍大空间
 - 5% 误判率 → 更小空间，更多误判
 
 ### 3. 自适应 BloomFilter
 
 根据实际数据量动态调整:
+
 ```rust
 let actual_doc_count = self.doc_count();
 let bloom = if actual_doc_count < 100_000 {

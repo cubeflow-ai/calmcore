@@ -214,13 +214,24 @@ impl Segment {
     pub fn mget_internal_id(&self, pk_hash: &[u32], column: &ArrayRef) -> Option<Vec<u32>> {
         // 使用 BloomFilter 进行预过滤，快速判断主键是否可能存在于当前 segment
         let bloom = self.pk_bloomfilter.read().unwrap();
-        let active = pk_hash.iter().any(|v| bloom.check(v));
-        drop(bloom);
+        let active = pk_hash
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| bloom.check(v))
+            .map(|(i, _)| i as u32) // 转换为 u32
+            .collect_vec();
+        drop(bloom); // 提前释放 RwLock
 
         // not found any id in this segment
-        if !active {
+        if active.is_empty() {
             return None;
         }
+
+        // 使用 arrow::compute::take 根据索引过滤 column
+        let indices = arrow::array::UInt32Array::from(active);
+        let filtered_column = arrow::compute::take(column.as_ref(), &indices, None)
+            .map_err(|e| CoreError::Internal(format!("Failed to take column: {}", e)))
+            .ok()?;
 
         let index = *self
             .field_index
@@ -229,7 +240,7 @@ impl Segment {
 
         let ids = {
             let fields = self.fields.read().unwrap();
-            let ids = fields[index].mget_internal_id(column);
+            let ids = fields[index].mget_internal_id(&filtered_column);
 
             let del_guard = self.deleted.read().unwrap();
 
@@ -591,8 +602,6 @@ impl Segment {
                 let field_name = field.name();
                 let field_path = format!("{}/field-{}", segment_tmp_path, field_name);
 
-                println!("  Persisting field: {}", field_name);
-
                 // Try to downcast and persist based on field type
                 if let Some(keyword) = field
                     .as_any()
@@ -611,9 +620,8 @@ impl Segment {
             new_fields
         }; // Release read lock here
 
-        // Now acquire write lock
-        *self.fields.write().unwrap() = new_fields;
-        println!("  Fields persisted in {:?}", start.elapsed());
+        // 注意：暂时不替换 fields，等 rename 成功后再替换
+        // 否则 rename 失败后无法重试（fields 已经是 Disk 类型）
 
         // 2. Persist pk_bloomfilter (to temp directory)
         let pk_start = std::time::Instant::now();
@@ -642,17 +650,9 @@ impl Segment {
             std::fs::write(&pk_path, buffer).map_err(|e| {
                 CoreError::IOError(format!("Failed to write pk_bloomfilter file: {}", e))
             })?;
-
-            println!(
-                "  PK bloomfilter persisted ({} bits, {} KB) in {:?}",
-                pk_bloom.number_of_bits(),
-                bitmap.len() / 1024,
-                pk_start.elapsed()
-            );
         }
 
         // 3. Persist deleted bitmap (current segment, to temp directory)
-        let deleted_start = std::time::Instant::now();
         {
             let deleted_path = format!("{}/deleted", segment_tmp_path);
             let deleted = self.deleted.read().unwrap();
@@ -663,12 +663,6 @@ impl Segment {
             deleted.serialize_into(&mut file).map_err(|e| {
                 CoreError::IOError(format!("Failed to serialize deleted bitmap: {}", e))
             })?;
-
-            println!(
-                "  Deleted bitmap persisted ({} entries) in {:?}",
-                deleted.len(),
-                deleted_start.elapsed()
-            );
         }
 
         // 3.5. Persist historical segment deletes (snapshot at this moment, to temp directory)
@@ -726,8 +720,6 @@ impl Segment {
             self.persist_row_data(&rowdata_path, row_data_clone, &deleted)?;
         };
 
-        println!("  Row data persisted in {:?}", rowdata_start.elapsed());
-
         // 5. Save segment metadata (to temp directory)
         let meta_path = format!("{}/meta.json", segment_tmp_path);
         let meta = serde_json::json!({
@@ -738,25 +730,21 @@ impl Segment {
         std::fs::write(&meta_path, meta.to_string())
             .map_err(|e| CoreError::IOError(format!("Failed to write segment meta: {}", e)))?;
 
-        println!("  All data written to temp directory");
-
-        // Phase 2: Atomic rename
-        println!(
-            "  Phase 2: Atomic rename {} → {}",
-            segment_tmp_path, segment_path
-        );
+        // Phase 2: Atomic rename (only after all data is written)
         std::fs::rename(&segment_tmp_path, &segment_path).map_err(|e| {
             CoreError::IOError(format!(
                 "Failed to rename temp directory: {}. Temp dir preserved for recovery.",
                 e
             ))
         })?;
-        println!("  Rename completed ✓");
+
+        // 🔑 关键：只有 rename 成功后才替换 fields 和 row_data
+        // 这样 rename 失败时还可以重试
+        *self.fields.write().unwrap() = new_fields;
 
         // Phase 3: Replace historical deleted files back to their segments
         if !history_snapshot.is_empty() {
             println!("  Phase 3: Replacing historical deleted files");
-            let replace_start = std::time::Instant::now();
 
             for (hist_start, hist_end, _deleted_bitmap) in &history_snapshot {
                 let source_path =
@@ -776,15 +764,9 @@ impl Segment {
                     println!("    Replaced segment-{}-{}/deleted ✓", hist_start, hist_end);
                 }
             }
-
-            println!(
-                "  Historical files replaced in {:?}",
-                replace_start.elapsed()
-            );
         }
 
         // Phase 4: Replace in-memory row_data with disk-based reader
-        println!("  Phase 4: Replacing memory row_data with disk reader");
         let replace_start = std::time::Instant::now();
         {
             let rowdata_path = format!("{}/rowdata", segment_path);
@@ -792,10 +774,6 @@ impl Segment {
                 RowDataStore::new_disk(&rowdata_path, U32RecordBatchSerializer::default())?;
             *self.row_data.write().unwrap() = disk_row_data;
         }
-        println!(
-            "  Row_data replaced with disk reader in {:?}",
-            replace_start.elapsed()
-        );
 
         // 标记为已持久化
         self.persisted.store(true, Ordering::Relaxed);
@@ -1028,8 +1006,6 @@ impl Segment {
             }
         };
 
-        println!("  Reorganizing row data into fixed-size batches...");
-
         // Step 1: Collect all batches (avoid extracting individual rows)
         let mut all_batches: Vec<RecordBatch> = Vec::new();
         for item in memory_tree.iter() {
@@ -1047,11 +1023,6 @@ impl Segment {
         let schema = all_batches[0].schema();
         let merged_batch = concat_batches(&schema, &all_batches)
             .map_err(|e| CoreError::Internal(format!("Failed to merge batches: {}", e)))?;
-
-        println!(
-            "    Total rows in merged batch: {}",
-            merged_batch.num_rows()
-        );
 
         // Step 2: Reorganize into fixed-size batches (1000 docs per batch for better performance)
         const BATCH_SIZE: usize = 1000;

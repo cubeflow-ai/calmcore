@@ -42,12 +42,9 @@ impl TreeWriter {
         serializer: Box<dyn WriteSerializer<K, V>>,
         iter: impl Iterator<Item = crate::Item<K, V>>,
     ) -> Result<()> {
-        println!("persist tree len:{}", len);
         if !self.dir.exists() {
             std::fs::create_dir_all(&self.dir)?;
         }
-
-        println!("===============persist tree len:{}", self.dir.exists());
 
         let node_file = BufWriter::new(
             OpenOptions::new()
@@ -66,7 +63,6 @@ impl TreeWriter {
         let mut cw = ChunkWriter::new(self.chunk_size, &serializer, node_file, self.key_len, len)?;
         data_file.write_all(MAGIC_VERSION)?;
 
-        let write_start = std::time::Instant::now();
         let mut offset_tracker = MAGIC_VERSION.len() as i64; // Track offset manually instead of calling stream_position()
 
         for (i, item) in iter.enumerate() {
@@ -75,16 +71,7 @@ impl TreeWriter {
             let value_bytes = serializer.serialize_value(&item.1);
             data_file.write_all(&value_bytes)?;
             offset_tracker += value_bytes.len() as i64;
-
-            if i % 1_000_000 == 0 && i > 0 {
-                println!(
-                    "  Written {} million records in {:?}",
-                    i / 1_000_000,
-                    write_start.elapsed()
-                );
-            }
         }
-        println!("Writing data completed in {:?}", write_start.elapsed());
 
         data_file.flush()?;
 
@@ -174,6 +161,10 @@ where
 
     fn add_key_offset(&mut self, k: &K, offset: i64) -> Result<()> {
         if self.current.keys.len() >= self.chunk_size {
+            // Add the ending offset for the last key in current chunk
+            // This allows calculating value size as: offsets[i+1] - offsets[i]
+            self.current.offsets.push(offset);
+
             // move current to second level
             self.release_chunk()?;
         }

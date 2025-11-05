@@ -347,25 +347,42 @@ impl Engine {
             segments_to_persist.len()
         );
 
-        // 启动持久化任务
-        let handle = tokio::task::spawn_blocking(move || {
+        // 启动持久化任务并异步等待完成
+        let active_tasks_clone = active_tasks.clone();
+        let handle = tokio::spawn(async move {
             // 在阻塞线程池中执行持久化
-            match partition.persist_unpersisted_segments() {
-                Ok(persisted_ids) => {
+            let result =
+                tokio::task::spawn_blocking(move || partition.persist_unpersisted_segments()).await;
+
+            match result {
+                Ok(Ok(persisted_ids)) => {
                     println!(
                         "[Engine] Partition {} persist completed: {} segments",
                         partition_id,
                         persisted_ids.len()
                     );
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     eprintln!(
                         "[Engine] Partition {} persist failed: {:?}",
                         partition_id, e
                     );
                 }
+                Err(e) => {
+                    eprintln!(
+                        "[Engine] Partition {} persist task panicked: {:?}",
+                        partition_id, e
+                    );
+                }
             }
-            // 不返回值，只需要 ()
+
+            // 持久化完成后立即从 active_tasks 中移除
+            let mut tasks = active_tasks_clone.lock().await;
+            tasks.remove(&partition_id);
+            println!(
+                "[Engine] Partition {} removed from active tasks",
+                partition_id
+            );
         });
 
         // 记录任务
@@ -373,15 +390,6 @@ impl Engine {
             let mut tasks = active_tasks.lock().await;
             tasks.insert(partition_id, handle);
         }
-
-        // 异步清理已完成的任务
-        let active_tasks_cleanup = active_tasks.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            let mut tasks = active_tasks_cleanup.lock().await;
-            tasks.retain(|_, handle| !handle.is_finished());
-        });
     }
 
     /// 处理所有 Partition 的持久化
