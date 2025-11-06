@@ -500,10 +500,6 @@ impl ExecutionPlan for SegmentExec {
                         &datafusion::arrow::record_batch::RecordBatchOptions::new()
                             .with_row_count(Some(row_indices.len())),
                     ) {
-                        println!(
-                            "[DEBUG] Created empty-schema batch with {} rows",
-                            row_indices.len()
-                        );
                         result_batches.push(batch);
                     }
                 } else {
@@ -536,10 +532,6 @@ impl ExecutionPlan for SegmentExec {
         }
 
         // 创建流
-        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
-        println!("[DEBUG] SegmentExec returning {} batches with {} total rows", 
-                 result_batches.len(), total_rows);
-        
         let stream = stream::iter(result_batches.into_iter().map(Ok));
 
         Ok(Box::pin(SegmentStream {

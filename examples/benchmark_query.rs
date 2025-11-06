@@ -1,6 +1,6 @@
 use calm::{
     partition::Partition,
-    schema::{compute::PartitionTableProvider, field::FieldOption, Schema},
+    schema::{compute::PartitionTableProvider, field::FieldOption, PersistPolicy, Schema},
 };
 use datafusion::{
     arrow::{
@@ -44,7 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 index: true,
             },
         ],
-        persist_policy: Default::default(),
+        persist_policy: PersistPolicy {
+            max_docs_per_segment: 1_000_000, // 每个segment最多100万条记录
+            ..Default::default()
+        },
     };
 
     let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
@@ -78,7 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parquet_has_data = parquet_file.exists();
 
     // 4. 数据生成逻辑
-    let total_records = 1_000_000; // 改成100万数据
+    let total_records = 100_000; // 100K数据（快速验证）
+    let segment_size = 100_000; // 每10万一个segment
     let batch_size = 10_000;
     let num_batches = total_records / batch_size;
 
@@ -108,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             partition.frozen_count()
         );
     } else {
-        println!("Generating 1,000,000 records...\n");
+        println!("Generating 100,000 records (1 segment × 100K records)...\n");
 
         if !calm_has_data {
             println!("Creating Calm partition data...");
@@ -167,6 +171,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 插入到 Calm Partition
             if !calm_has_data {
                 temp_partition.upsert(batch.clone())?;
+
+                // 每100万条flush一次（创建一个新segment）
+                let records_inserted = (batch_idx + 1) * batch_size;
+                if records_inserted % segment_size == 0 {
+                    println!(
+                        "  ✓ Inserted {} records, flushing segment...",
+                        records_inserted
+                    );
+                    temp_partition.flush(false)?;
+                }
             }
 
             if (batch_idx + 1) % 100 == 0 {
@@ -362,8 +376,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "SELECT COUNT(*) as total FROM {} ",
         ),
         (
-            "Q2: Point query by ID (id = 500000)",
-            "SELECT * FROM {} WHERE id = 500000",
+            "Q2: Point query by ID (id = 50000)",
+            "SELECT * FROM {} WHERE id = 50000",
         ),
         (
             "Q3: Simple filter (category = 'A')",

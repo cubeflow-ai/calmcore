@@ -220,33 +220,23 @@ impl TableProvider for PartitionTableProvider {
         // Add current segment (only if non-empty)
         {
             let current_segment = self.partition.get_current_segment();
-            let doc_count = current_segment.doc_count();
-            println!("[DEBUG] Current segment doc_count: {}", doc_count);
-            if doc_count > 0 {
+            if current_segment.doc_count() > 0 {
                 let scanner = self.create_segment_scanner(&*current_segment)?;
                 let plan = scanner.create_execution_plan(filters, projection)?;
                 segment_plans.push(plan);
-                println!("[DEBUG] Added current segment to plans");
             }
         }
 
         // Add frozen segments
         {
             let frozen_segments = self.partition.get_frozen_segments();
-            println!("[DEBUG] Frozen segments count: {}", frozen_segments.len());
 
             for (_seg_id, segment) in frozen_segments.iter() {
-                println!(
-                    "[DEBUG] Adding frozen segment with {} docs",
-                    segment.doc_count()
-                );
                 let scanner = self.create_segment_scanner(segment)?;
                 let plan = scanner.create_execution_plan(filters, projection)?;
                 segment_plans.push(plan);
             }
         }
-
-        println!("[DEBUG] Total segment plans: {}", segment_plans.len());
 
         // Handle empty partition case
         if segment_plans.is_empty() {
@@ -261,9 +251,10 @@ impl TableProvider for PartitionTableProvider {
         }
 
         // Create Union plan for multiple segments
-        // Use the schema from the first segment plan (which is the projected schema)
-        let union_schema = segment_plans[0].schema();
-        let union_plan = PartitionUnionExec::new(segment_plans, union_schema);
+        // 使用DataFusion内置的UnionExec
+        use datafusion::physical_plan::union::UnionExec;
+
+        let union_plan = UnionExec::new(segment_plans);
         Ok(Arc::new(union_plan))
     }
 }
