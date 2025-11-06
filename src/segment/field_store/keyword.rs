@@ -20,6 +20,15 @@ pub struct Keyword {
     indexs: RwLock<super::InvertedIndex<String>>,
 }
 
+impl Clone for Keyword {
+    fn clone(&self) -> Self {
+        Self {
+            field: self.field.clone(),
+            indexs: RwLock::new(self.indexs.read().unwrap().clone()),
+        }
+    }
+}
+
 impl Keyword {
     pub fn new(field: &FieldOption) -> Self {
         Self {

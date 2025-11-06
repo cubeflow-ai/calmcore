@@ -1,14 +1,12 @@
-mod field_store;
+pub mod field_store;
 
 // Re-export field_store types that are used publicly
-pub use field_store::{IndexReader, IndexWriter};
+pub use field_store::{IndexReader, IndexWriter, RowDataStore};
 
 use crate::{
     partition::WriteInfo,
     schema::{field::FieldOption, Schema},
-    segment::field_store::{
-        keyword::Keyword, InvertedIndex, PkWriter, RowDataStore, U32RecordBatchSerializer,
-    },
+    segment::field_store::{keyword::Keyword, PkWriter, U32RecordBatchSerializer},
     utils::error::{CoreError, CoreResult},
 };
 use bloomfilter::Bloom;
@@ -921,6 +919,111 @@ impl Segment {
     /// Get the count of deleted documents
     pub fn deleted_count(&self) -> u64 {
         self.deleted.read().unwrap().len() as u64
+    }
+
+    /// Get the fields (IndexWriter) vector
+    /// This is used by PartitionTableProvider to convert IndexWriter to IndexReader
+    pub fn get_fields(&self) -> std::sync::RwLockReadGuard<'_, Vec<Box<dyn IndexWriter>>> {
+        self.fields.read().unwrap()
+    }
+
+    /// Get cloned IndexReaders from this segment
+    /// Returns HashMap of field_name -> Box<dyn IndexReader>
+    /// This is fast because InvertedIndex is clone-friendly (Arc internally)
+    pub fn get_index_readers(&self) -> ahash::HashMap<String, Box<dyn IndexReader>> {
+        use ahash::{HashMap, HashMapExt};
+        use field_store::{keyword::Keyword, num_f64::NumF64, num_i64::NumI64};
+
+        let fields = self.fields.read().unwrap();
+        let mut readers = HashMap::new();
+
+        for field_writer in fields.iter() {
+            let name = field_writer.name().to_string();
+
+            // Downcast and clone the concrete type
+            if let Some(keyword) = field_writer.as_any().downcast_ref::<Keyword>() {
+                readers.insert(name, Box::new(keyword.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_i64) = field_writer.as_any().downcast_ref::<NumI64>() {
+                readers.insert(name, Box::new(num_i64.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<NumF64>() {
+                readers.insert(name, Box::new(num_f64.clone()) as Box<dyn IndexReader>);
+            }
+        }
+
+        readers
+    }
+
+    /// Query a field by exact value using the segment's index
+    /// Returns bitmap of matching document IDs
+    pub fn query_field(
+        &self,
+        field_name: &str,
+        value: &datafusion::scalar::ScalarValue,
+    ) -> Option<RoaringBitmap> {
+        use field_store::{keyword::Keyword, num_f64::NumF64, num_i64::NumI64};
+
+        let fields = self.fields.read().unwrap();
+        let index = self.field_index.get(field_name)?;
+        let field_writer = fields.get(*index)?;
+
+        // Downcast to concrete type and call IndexReader::query
+        if let Some(keyword) = field_writer.as_any().downcast_ref::<Keyword>() {
+            <Keyword as IndexReader>::query(keyword, value)
+        } else if let Some(num_i64) = field_writer.as_any().downcast_ref::<NumI64>() {
+            <NumI64 as IndexReader>::query(num_i64, value)
+        } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<NumF64>() {
+            <NumF64 as IndexReader>::query(num_f64, value)
+        } else {
+            None
+        }
+    }
+
+    /// Range query on a field using the segment's index
+    /// Returns bitmap of matching document IDs
+    pub fn query_field_range(
+        &self,
+        field_name: &str,
+        start: &datafusion::scalar::ScalarValue,
+        start_inclusive: bool,
+        end: &datafusion::scalar::ScalarValue,
+        end_inclusive: bool,
+    ) -> Option<RoaringBitmap> {
+        use field_store::{keyword::Keyword, num_f64::NumF64, num_i64::NumI64};
+
+        let fields = self.fields.read().unwrap();
+        let index = self.field_index.get(field_name)?;
+        let field_writer = fields.get(*index)?;
+
+        // Downcast to concrete type and call IndexReader::range
+        if let Some(keyword) = field_writer.as_any().downcast_ref::<Keyword>() {
+            <Keyword as IndexReader>::range(keyword, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_i64) = field_writer.as_any().downcast_ref::<NumI64>() {
+            <NumI64 as IndexReader>::range(num_i64, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<NumF64>() {
+            <NumF64 as IndexReader>::range(num_f64, start, start_inclusive, end, end_inclusive)
+        } else {
+            None
+        }
+    }
+
+    /// Check if a field has an index
+    pub fn has_field_index(&self, field_name: &str) -> bool {
+        self.field_index.contains_key(field_name)
+    }
+
+    /// Get all indexed field names
+    pub fn get_indexed_fields(&self) -> Vec<String> {
+        self.field_index.keys().cloned().collect()
+    }
+
+    /// Get a clone of the deleted bitmap
+    pub fn get_deleted(&self) -> RoaringBitmap {
+        self.deleted.read().unwrap().clone()
+    }
+
+    /// Get a clone of the row data
+    pub fn get_row_data(&self) -> RowDataStore {
+        self.row_data.read().unwrap().clone()
     }
 
     /// Persist row_data to disk using BTree format (same as keyword index)

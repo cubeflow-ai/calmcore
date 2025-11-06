@@ -1,177 +1,176 @@
 use std::{any::Any, sync::Arc};
 
-use crate::segment::{IndexReader, Segment};
-use ahash::HashMap;
-use async_trait::async_trait;
-use datafusion::scalar::ScalarValue;
 use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::Session,
     datasource::{TableProvider, TableType},
-    error::Result as DFResult,
-    execution::SendableRecordBatchStream,
+    error::{DataFusionError, Result},
+    execution::{SendableRecordBatchStream, TaskContext},
     logical_expr::{Expr, TableProviderFilterPushDown},
-    physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan},
+    physical_expr::EquivalenceProperties,
+    physical_plan::{
+        execution_plan::{Boundedness, EmissionType},
+        DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    },
 };
-use roaring::RoaringBitmap;
 
-type PartitionRef = Arc<crate::partition::Partition>;
+use crate::partition::Partition;
 
-pub struct SegmentTableProvider {
-    partition: PartitionRef,
-    schema: SchemaRef,
-    index_readers: HashMap<String, Box<dyn IndexReader>>,
+use super::segment_scanner::SegmentScanner;
+
+/// 判断表达式是否可以被索引精确处理
+/// 返回 (can_handle, is_exact)
+///
+/// 被 PartitionTableProvider 用于 supports_filters_pushdown()
+fn can_handle_expr(
+    expr: &Expr,
+    index_readers: &ahash::HashMap<String, Box<dyn crate::segment::IndexReader>>,
+) -> (bool, bool) {
+    match expr {
+        // BETWEEN 表达式
+        Expr::Between(between) => {
+            if let Expr::Column(column) = &*between.expr {
+                // 检查字段是否有索引
+                if index_readers.contains_key(&column.name) {
+                    // 检查 low 和 high 是否都是字面量
+                    let low_is_literal = matches!(&*between.low, Expr::Literal(_, _));
+                    let high_is_literal = matches!(&*between.high, Expr::Literal(_, _));
+
+                    if low_is_literal && high_is_literal && !between.negated {
+                        return (true, true); // 可以精确处理
+                    }
+                }
+            }
+            (false, false) // 无法处理
+        }
+
+        // 二元表达式
+        Expr::BinaryExpr(binary) => {
+            use datafusion::logical_expr::Operator;
+
+            // AND/OR 的处理
+            match binary.op {
+                Operator::And => {
+                    let (left_ok, left_exact) = can_handle_expr(&binary.left, index_readers);
+                    let (right_ok, right_exact) = can_handle_expr(&binary.right, index_readers);
+
+                    // AND: 两边都能处理才能处理，只要有一边不精确就不精确
+                    return if left_ok && right_ok {
+                        (true, left_exact && right_exact)
+                    } else if left_ok || right_ok {
+                        // 一边能处理，一边不能 → 可以处理但不精确
+                        (true, false)
+                    } else {
+                        (false, false)
+                    };
+                }
+                Operator::Or => {
+                    let (left_ok, left_exact) = can_handle_expr(&binary.left, index_readers);
+                    let (right_ok, right_exact) = can_handle_expr(&binary.right, index_readers);
+
+                    // OR: 只要有一边不能处理，就不精确（需要返回全量）
+                    return if left_ok && right_ok {
+                        (true, left_exact && right_exact)
+                    } else {
+                        // 有一边无法处理 → 不精确（返回全量 + DataFusion 再过滤）
+                        (true, false)
+                    };
+                }
+                _ => {}
+            }
+
+            // 比较运算符: col op value
+            if let Expr::Column(column) = &*binary.left {
+                // 检查字段是否有索引
+                if !index_readers.contains_key(&column.name) {
+                    return (false, false);
+                }
+
+                // 检查右边是否是字面量
+                if let Expr::Literal(_, _) = &*binary.right {
+                    match binary.op {
+                        Operator::Eq
+                        | Operator::Gt
+                        | Operator::GtEq
+                        | Operator::Lt
+                        | Operator::LtEq => {
+                            return (true, true); // 可以精确处理
+                        }
+                        _ => return (false, false),
+                    }
+                }
+
+                // 右边是列引用: col1 = col2 → 无法处理
+                if matches!(&*binary.right, Expr::Column(_)) {
+                    return (false, false);
+                }
+            }
+
+            (false, false)
+        }
+
+        // 其他表达式暂不支持
+        _ => (false, false),
+    }
 }
 
-impl std::fmt::Debug for SegmentTableProvider {
+/// PartitionTableProvider: DataFusion TableProvider for a Partition
+///
+/// A Partition contains multiple segments (1 current + N frozen). This provider
+/// creates a SegmentTableProvider for each segment and unions their results.
+///
+/// Strategy: Union All - no deduplication (per user requirement)
+pub struct PartitionTableProvider {
+    partition: Arc<Partition>,
+    schema: SchemaRef,
+}
+
+impl std::fmt::Debug for PartitionTableProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SegmentTableProvider")
-            .field("partition", &self.partition.id)
+        f.debug_struct("PartitionTableProvider")
+            .field("partition_id", &self.partition.id())
+            .field("schema", &self.schema)
             .finish()
     }
 }
-impl SegmentTableProvider {
-    pub fn new(
-        partition: PartitionRef,
-        index_readers: HashMap<String, Box<dyn IndexReader>>,
-    ) -> Self {
-        Self {
-            partition,
+
+impl PartitionTableProvider {
+    pub fn new(partition: Arc<Partition>) -> Self {
+        let schema = partition.arrow_schema.clone();
+        Self { partition, schema }
+    }
+
+    /// Create SegmentScanner for a segment
+    /// Simply extracts the needed data from Segment and constructs SegmentScanner
+    fn create_segment_scanner(&self, segment: &crate::segment::Segment) -> Result<SegmentScanner> {
+        // Get cloned index readers from segment (fast - Arc internally)
+        let index_readers = segment.get_index_readers();
+
+        // Commented for cleaner logs
+        // println!("[DEBUG] create_segment_scanner: index_readers keys = {:?}", index_readers.keys().collect::<Vec<_>>());
+
+        // Get doc_count
+        let doc_count = segment.doc_count();
+
+        // Get cloned deleted bitmap (fast - compressed bitmap)
+        let deleted = segment.get_deleted();
+
+        // Get cloned row_data (fast - either Arc or BTree with Arc values)
+        let row_data = segment.get_row_data();
+
+        // Create SegmentScanner with extracted data
+        Ok(SegmentScanner::new(
+            self.schema.clone(),
+            row_data,
             index_readers,
-            schema: todo!(),
-        }
-    }
-
-    fn expr_to_bitmap(&self, expr: &Expr) -> Option<RoaringBitmap> {
-        match expr {
-            // BETWEEN 表达式: col BETWEEN start AND end
-            Expr::Between(between) => {
-                if let Expr::Column(column) = &*between.expr {
-                    let field_name = &column.name;
-
-                    if let (Expr::Literal(low, _), Expr::Literal(high, _)) =
-                        (&*between.low, &*between.high)
-                    {
-                        // BETWEEN 是闭区间 [low, high]
-                        // NOT BETWEEN 的话需要取反
-                        let bitmap = self.query_range(field_name, low, true, high, true)?;
-                        return Some(if between.negated {
-                            // NOT BETWEEN: 返回补集
-                            // 这需要知道全集，暂时返回 None
-                            return None;
-                        } else {
-                            bitmap
-                        });
-                    }
-                }
-                None
-            }
-
-            // 二元表达式: col > value, col = value 等
-            Expr::BinaryExpr(binary) => {
-                use datafusion::logical_expr::Operator;
-
-                // 先处理 AND/OR 逻辑运算
-                match binary.op {
-                    Operator::And => {
-                        let left = self.expr_to_bitmap(&binary.left)?;
-                        let right = self.expr_to_bitmap(&binary.right)?;
-                        return Some(left & right);
-                    }
-                    Operator::Or => {
-                        let left = self.expr_to_bitmap(&binary.left)?;
-                        let right = self.expr_to_bitmap(&binary.right)?;
-                        return Some(left | right);
-                    }
-                    _ => {}
-                }
-
-                if let Expr::Column(column) = &*binary.left {
-                    let field_name = &column.name;
-
-                    match &*binary.right {
-                        Expr::Literal(scalar_value, _) => {
-                            match binary.op {
-                                Operator::Eq => {
-                                    return self.query_equal(field_name, scalar_value);
-                                }
-                                // col > value -> range(value, false, +∞, true)
-                                Operator::Gt => {
-                                    return self.query_range(
-                                        field_name,
-                                        scalar_value,
-                                        false,
-                                        &ScalarValue::Null,
-                                        true,
-                                    );
-                                }
-                                // col >= value -> range(value, true, +∞, true)
-                                Operator::GtEq => {
-                                    return self.query_range(
-                                        field_name,
-                                        scalar_value,
-                                        true,
-                                        &ScalarValue::Null,
-                                        true,
-                                    );
-                                }
-                                // col < value -> range(-∞, true, value, false)
-                                Operator::Lt => {
-                                    return self.query_range(
-                                        field_name,
-                                        &ScalarValue::Null,
-                                        true,
-                                        scalar_value,
-                                        false,
-                                    );
-                                }
-                                // col <= value -> range(-∞, true, value, true)
-                                Operator::LtEq => {
-                                    return self.query_range(
-                                        field_name,
-                                        &ScalarValue::Null,
-                                        true,
-                                        scalar_value,
-                                        true,
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-    fn query_equal(
-        &self,
-        field_name: &str,
-        value: &datafusion::scalar::ScalarValue,
-    ) -> Option<RoaringBitmap> {
-        self.index_readers
-            .get(field_name)
-            .and_then(|reader| reader.query(value))
-    }
-
-    fn query_range(
-        &self,
-        field_name: &str,
-        start: &ScalarValue,
-        start_inclusive: bool,
-        end: &ScalarValue,
-        end_inclusive: bool,
-    ) -> Option<RoaringBitmap> {
-        self.index_readers
-            .get(field_name)
-            .and_then(|reader| reader.range(start, start_inclusive, end, end_inclusive))
+            doc_count,
+            deleted,
+        ))
     }
 }
 
-#[async_trait]
-impl TableProvider for SegmentTableProvider {
+#[async_trait::async_trait]
+impl TableProvider for PartitionTableProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -184,87 +183,130 @@ impl TableProvider for SegmentTableProvider {
         TableType::Base
     }
 
-    /// 关键方法: DataFusion 会调用这个方法,并传入 filters (WHERE 条件)
-    async fn scan(
-        &self,
-        _state: &dyn Session,
-        _projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        _limit: Option<usize>,
-    ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        // // 1. 解析 filters,构建 bitmap
-        // let mut result_bitmap = RoaringBitmap::new();
-        // result_bitmap.insert_range(0..self.segment.doc_count() as u32);
-
-        // for filter in filters {
-        //     if let Some(bitmap) = self.expr_to_bitmap(filter) {
-        //         result_bitmap &= bitmap;
-        //     }
-        // }
-
-        // println!("\n=== Filter Pushdown ===");
-        // println!("Filters: {:#?}", filters);
-        // println!("Matched doc_ids: {} docs", result_bitmap.len());
-
-        // // 2. 创建 ExecutionPlan
-        // let exec = SegmentExec::new(self.segment.clone(), self.schema.clone(), result_bitmap);
-
-        // Ok(Arc::new(exec))
-        todo!("实现 scan - 返回 ExecutionPlan")
-    }
-
-    /// 告诉 DataFusion 我们支持 filter pushdown
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
-    ) -> DFResult<Vec<TableProviderFilterPushDown>> {
-        Ok(vec![TableProviderFilterPushDown::Exact; filters.len()])
+    ) -> Result<Vec<TableProviderFilterPushDown>> {
+        // 获取 current segment 的索引能力来判断
+        // 所有 segments 共享相同的 schema 和索引配置,所以检查一个即可
+        let current_segment = self.partition.get_current_segment();
+        let index_readers = current_segment.get_index_readers();
+
+        Ok(filters
+            .iter()
+            .map(|expr| {
+                let (can_handle, is_exact) = can_handle_expr(expr, &index_readers);
+                if !can_handle {
+                    TableProviderFilterPushDown::Unsupported
+                } else if is_exact {
+                    TableProviderFilterPushDown::Exact
+                } else {
+                    TableProviderFilterPushDown::Inexact
+                }
+            })
+            .collect())
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        // Debug output commented for cleaner logs
+        // println!("[DEBUG] PartitionTableProvider::scan called");
+        // println!("[DEBUG] Filters: {:?}", filters);
+        // println!("[DEBUG] Projection: {:?}", projection);
+
+        // Collect execution plans from all segments (current + frozen)
+        let mut segment_plans: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
+
+        // Add current segment (only if non-empty)
+        {
+            let current_segment = self.partition.get_current_segment();
+            if current_segment.doc_count() > 0 {
+                let scanner = self.create_segment_scanner(&*current_segment)?;
+                let plan = scanner.create_execution_plan(filters, projection)?;
+                segment_plans.push(plan);
+            }
+        }
+
+        // Add frozen segments
+        {
+            let frozen_segments = self.partition.get_frozen_segments();
+
+            for (_seg_id, segment) in frozen_segments.iter() {
+                let scanner = self.create_segment_scanner(segment)?;
+                let plan = scanner.create_execution_plan(filters, projection)?;
+                segment_plans.push(plan);
+            }
+        }
+
+        // Handle empty partition case
+        if segment_plans.is_empty() {
+            return Err(DataFusionError::Internal(
+                "Partition has no data".to_string(),
+            ));
+        }
+
+        // If only one segment, return its plan directly
+        if segment_plans.len() == 1 {
+            return Ok(segment_plans.into_iter().next().unwrap());
+        }
+
+        // Create Union plan for multiple segments
+        // Use the schema from the first segment plan (which is the projected schema)
+        let union_schema = segment_plans[0].schema();
+        let union_plan = PartitionUnionExec::new(segment_plans, union_schema);
+        Ok(Arc::new(union_plan))
     }
 }
 
-/// SegmentExec - 自定义的 ExecutionPlan
+/// PartitionUnionExec: ExecutionPlan that unions multiple segment execution plans
 ///
-/// 只扫描 matched_docs bitmap 中的 doc_ids
-struct SegmentExec {
-    segment: Arc<Segment>,
+/// This is similar to DataFusion's UnionExec but specialized for our use case
+struct PartitionUnionExec {
+    inputs: Vec<Arc<dyn ExecutionPlan>>,
     schema: SchemaRef,
-    matched_docs: RoaringBitmap,
+    properties: PlanProperties,
 }
 
-impl SegmentExec {
-    fn new(segment: Arc<Segment>, schema: SchemaRef, matched_docs: RoaringBitmap) -> Self {
+impl PartitionUnionExec {
+    fn new(inputs: Vec<Arc<dyn ExecutionPlan>>, schema: SchemaRef) -> Self {
+        // Create properties
+        let eq_properties = EquivalenceProperties::new(schema.clone());
+        let partitioning = Partitioning::UnknownPartitioning(inputs.len());
+        let emission_type = EmissionType::Final;
+        let boundedness = Boundedness::Bounded;
+
+        let properties =
+            PlanProperties::new(eq_properties, partitioning, emission_type, boundedness);
+
         Self {
-            segment,
+            inputs,
             schema,
-            matched_docs,
+            properties,
         }
     }
 }
-
-impl std::fmt::Debug for SegmentExec {
+impl std::fmt::Debug for PartitionUnionExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SegmentExec")
-            .field("schema", &self.schema)
-            .field("matched_docs_count", &self.matched_docs.len())
+        f.debug_struct("PartitionUnionExec")
+            .field("num_segments", &self.inputs.len())
             .finish()
     }
 }
 
-impl std::fmt::Display for SegmentExec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SegmentExec: matched_docs={}", self.matched_docs.len())
-    }
-}
-
-impl DisplayAs for SegmentExec {
+impl DisplayAs for PartitionUnionExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "SegmentExec: matched_docs={}", self.matched_docs.len())
+        write!(f, "PartitionUnionExec: segments={}", self.inputs.len())
     }
 }
 
-impl ExecutionPlan for SegmentExec {
+impl ExecutionPlan for PartitionUnionExec {
     fn name(&self) -> &str {
-        "SegmentExec"
+        "PartitionUnionExec"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -275,27 +317,40 @@ impl ExecutionPlan for SegmentExec {
         self.schema.clone()
     }
 
-    fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
-        todo!("实现 properties - 返回执行计划的属性")
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        // 这是叶子节点,没有子节点
-        vec![]
+        self.inputs.iter().collect()
     }
 
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        Ok(self)
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(PartitionUnionExec::new(
+            children,
+            self.schema.clone(),
+        )))
     }
 
     fn execute(
         &self,
-        _partition: usize,
-        _context: Arc<datafusion::execution::TaskContext>,
-    ) -> DFResult<SendableRecordBatchStream> {
-        todo!("实现 execute - 返回 RecordBatchStream,只扫描 matched_docs")
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        // Execute the corresponding segment plan
+        if partition >= self.inputs.len() {
+            return Err(DataFusionError::Execution(format!(
+                "Invalid partition index: {} (total segments: {})",
+                partition,
+                self.inputs.len()
+            )));
+        }
+
+        // Each partition corresponds to one segment
+        // Execute partition 0 of that segment (each segment has only 1 partition)
+        self.inputs[partition].execute(0, context)
     }
 }

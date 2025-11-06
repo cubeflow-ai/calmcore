@@ -42,7 +42,6 @@ impl Schema {
         use std::sync::Arc;
 
         let mut arrow_fields = Vec::new();
-        arrow_fields.push(Field::new(field.name(), data_type, nullable));
 
         for field in &self.fields {
             let (data_type, nullable) = match field {

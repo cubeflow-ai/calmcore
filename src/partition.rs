@@ -30,8 +30,7 @@ pub struct Partition {
     frozen_segments: RwLock<Vec<(u64, Arc<Segment>)>>, // (seg_id, segment)
     base_dir: PathBuf,
     schema: Arc<Schema>,
-    schema_write: Arc<datafusion::arrow::datatypes::Schema>,
-    schema_read: Arc<datafusion::arrow::datatypes::Schema>,
+    pub arrow_schema: Arc<datafusion::arrow::datatypes::Schema>,
     read_lock: RwLock<()>,
     write_lock: Mutex<()>,
     segment_id_counter: AtomicU64,
@@ -46,12 +45,12 @@ impl Partition {
         persist_notify: mpsc::UnboundedSender<u64>,
     ) -> Self {
         let schema = Arc::new(schema);
-        let schema_write = Arc::new(schema.to_arrow_schema());
-        let schema_read = Arc::new(schema.to_arrow_schema());
+        let arrow_schema = schema.to_arrow_schema();
         Partition {
             id,
             base_dir,
             schema: schema.clone(),
+            arrow_schema,
             current_segment: RwLock::new(Segment::new(0, schema)),
             frozen_segments: RwLock::new(vec![]),
             read_lock: RwLock::new(()),
@@ -63,7 +62,7 @@ impl Partition {
 
     pub fn upsert_json(&self, data: &[serde_json::Value]) -> CoreResult<Vec<u64>> {
         // 将 JSON 数据转换为 RecordBatch
-        let batch = arrow_utils::json_to_record_batch(data, &self.schema)?;
+        let batch = arrow_utils::json_to_record_batch(data, self.arrow_schema.clone())?;
         // 调用现有的 upsert 方法
         self.upsert(batch)
     }
@@ -472,10 +471,12 @@ impl Partition {
         // It's no longer used since segments are identified by their start_id
         let deprecated_counter = next_start; // Use start_id as counter for now
 
+        let arrow_schema = schema.to_arrow_schema();
         Ok(Partition {
             id: id as u64,
             base_dir,
             schema,
+            arrow_schema,
             current_segment: RwLock::new(current_segment),
             frozen_segments: RwLock::new(frozen_segments),
             read_lock: RwLock::new(()),
@@ -543,6 +544,18 @@ impl Partition {
     /// 获取 Partition ID
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Get read-only access to the current segment
+    /// Used by PartitionTableProvider for query execution
+    pub fn get_current_segment(&self) -> std::sync::RwLockReadGuard<'_, Segment> {
+        self.current_segment.read().unwrap()
+    }
+
+    /// Get read-only access to the frozen segments
+    /// Used by PartitionTableProvider for query execution
+    pub fn get_frozen_segments(&self) -> std::sync::RwLockReadGuard<'_, Vec<(u64, Arc<Segment>)>> {
+        self.frozen_segments.read().unwrap()
     }
 
     /// 停止 Partition 并确保所有数据持久化

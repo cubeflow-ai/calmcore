@@ -48,6 +48,15 @@ pub struct NumF64 {
     indexs: RwLock<InvertedIndex<OrderedF64>>,
 }
 
+impl Clone for NumF64 {
+    fn clone(&self) -> Self {
+        Self {
+            field: self.field.clone(),
+            indexs: RwLock::new(self.indexs.read().unwrap().clone()),
+        }
+    }
+}
+
 impl NumF64 {
     pub fn new(field: &FieldOption) -> Self {
         Self {
