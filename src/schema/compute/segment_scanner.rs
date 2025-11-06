@@ -407,6 +407,7 @@ impl ExecutionPlan for SegmentExec {
         _context: Arc<datafusion::execution::TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         use futures::stream;
+        use std::collections::HashMap;
 
         // 创建一个简单的流，从 matched_docs 中读取数据
         let projected_schema = self.projected_schema.clone();
@@ -414,53 +415,132 @@ impl ExecutionPlan for SegmentExec {
         let doc_ids: Vec<u32> = self.matched_docs.iter().collect();
         let projection = self.projection.clone();
 
-        // 将 doc_ids 按批次读取并应用投影
-        // Note: RowDataStore 使用 batch 的 start_id 作为 key,
-        // 所以需要使用 floor() 来找到包含某个 doc_id 的 batch
-        let batches: Vec<RecordBatch> = doc_ids
-            .into_iter()
-            .filter_map(|doc_id| {
-                // 使用 floor() 找到包含 doc_id 的 batch
-                raw_data.floor(&doc_id).and_then(|(batch_start_id, batch)| {
-                    if batch.num_columns() == 0 {
-                        return None;
-                    }
+        // 性能优化：按batch分组doc_ids，避免重复读取同一个batch
+        // 关键优化：doc_ids通常是密集的，所以使用启发式方法减少floor()调用
+        let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
 
-                    // 计算 doc_id 在 batch 中的行索引
-                    let row_index = (doc_id - batch_start_id) as usize;
-                    if row_index >= batch.num_rows() {
-                        return None;
-                    }
+        if !doc_ids.is_empty() {
+            let mut current_batch_start: Option<u32> = None;
+            let mut current_batch_end: Option<u32> = None;
 
-                    // 提取该行的数据并应用投影
-                    // 现在 full_schema 包含 _internal_id,所以可以直接按索引投影
-                    let final_columns = if projected_schema.fields().is_empty() {
-                        // 空 schema (COUNT(*) 等),返回空列
-                        vec![]
-                    } else if let Some(ref indices) = projection {
-                        // 根据投影索引选择列
-                        indices
+            for doc_id in doc_ids {
+                // 检查当前doc_id是否还在已知的batch范围内
+                let in_current_batch = match (current_batch_start, current_batch_end) {
+                    (Some(start), Some(end)) => doc_id >= start && doc_id < end,
+                    _ => false,
+                };
+
+                if !in_current_batch {
+                    // 需要查找新的batch
+                    if let Some((batch_start_id, batch)) = raw_data.floor(&doc_id) {
+                        current_batch_start = Some(batch_start_id);
+                        current_batch_end = Some(batch_start_id + batch.num_rows() as u32);
+                    } else {
+                        continue; // 找不到batch，跳过这个doc_id
+                    }
+                }
+
+                if let Some(batch_start) = current_batch_start {
+                    batch_groups
+                        .entry(batch_start)
+                        .or_insert_with(Vec::new)
+                        .push(doc_id);
+                }
+            }
+        }
+
+        // 2. 对每个batch，一次性读取并提取所有需要的行
+        let mut result_batches: Vec<RecordBatch> = Vec::new();
+
+        println!("[DEBUG] Processing {} batch groups", batch_groups.len());
+
+        for (batch_start_id, doc_ids_in_batch) in batch_groups {
+            if let Some(source_batch) = raw_data.get(&batch_start_id) {
+                println!(
+                    "[DEBUG] Batch {}: {} docs, source has {} rows",
+                    batch_start_id,
+                    doc_ids_in_batch.len(),
+                    source_batch.num_rows()
+                );
+                // 计算每个doc_id在batch中的行索引
+                let mut row_indices: Vec<usize> = doc_ids_in_batch
+                    .iter()
+                    .filter_map(|&doc_id| {
+                        let row_idx = (doc_id - batch_start_id) as usize;
+                        if row_idx < source_batch.num_rows() {
+                            Some(row_idx)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if row_indices.is_empty() {
+                    continue;
+                }
+
+                // 按行索引排序以提高缓存友好性
+                row_indices.sort_unstable();
+
+                // 使用Arrow的take操作批量提取行
+                use datafusion::arrow::array::UInt32Array;
+                use datafusion::arrow::compute::take;
+
+                let indices_array =
+                    UInt32Array::from(row_indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
+
+                // 应用投影并提取行
+                if projected_schema.fields().is_empty() {
+                    // 空 schema (COUNT(*) 等)
+                    // 创建一个包含正确行数但没有列的RecordBatch
+                    use datafusion::arrow::record_batch::RecordBatch;
+                    if let Ok(batch) = RecordBatch::try_new_with_options(
+                        projected_schema.clone(),
+                        vec![],
+                        &datafusion::arrow::record_batch::RecordBatchOptions::new()
+                            .with_row_count(Some(row_indices.len())),
+                    ) {
+                        println!(
+                            "[DEBUG] Created empty-schema batch with {} rows",
+                            row_indices.len()
+                        );
+                        result_batches.push(batch);
+                    }
+                } else {
+                    let final_columns = if let Some(ref proj_indices) = projection {
+                        // 根据投影索引选择列并批量提取行
+                        proj_indices
                             .iter()
-                            .filter_map(|&i| {
-                                batch.columns().get(i).map(|col| col.slice(row_index, 1))
+                            .filter_map(|&col_idx| {
+                                source_batch
+                                    .columns()
+                                    .get(col_idx)
+                                    .and_then(|col| take(col.as_ref(), &indices_array, None).ok())
                             })
                             .collect()
                     } else {
                         // 没有投影，返回所有列(跳过 _internal_id,即索引 0)
-                        batch.columns()[1..]
+                        source_batch.columns()[1..]
                             .iter()
-                            .map(|col| col.slice(row_index, 1))
+                            .filter_map(|col| take(col.as_ref(), &indices_array, None).ok())
                             .collect()
                     };
 
-                    // 使用投影后的 schema 创建 RecordBatch (单行)
-                    RecordBatch::try_new(projected_schema.clone(), final_columns).ok()
-                })
-            })
-            .collect();
+                    // 创建包含多行的 RecordBatch
+                    if let Ok(batch) = RecordBatch::try_new(projected_schema.clone(), final_columns)
+                    {
+                        result_batches.push(batch);
+                    }
+                }
+            }
+        }
 
         // 创建流
-        let stream = stream::iter(batches.into_iter().map(Ok));
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        println!("[DEBUG] SegmentExec returning {} batches with {} total rows", 
+                 result_batches.len(), total_rows);
+        
+        let stream = stream::iter(result_batches.into_iter().map(Ok));
 
         Ok(Box::pin(SegmentStream {
             schema: projected_schema,
