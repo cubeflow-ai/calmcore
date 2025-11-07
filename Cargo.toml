@@ -31,4 +31,6 @@ tokio = { version = "1", features = [
     "sync",
     "time",
     "macros",
+    "net",
 ] }
+msql-srv = "0.11"

@@ -432,7 +432,12 @@ impl ExecutionPlan for SegmentExec {
 
                 if !in_current_batch {
                     // 需要查找新的batch
-                    if let Some((batch_start_id, batch)) = raw_data.floor(&doc_id) {
+                    // 性能优化：只读取第一列 (_internal_id) 来确定范围，避免加载全部列
+                    // 这样在Parquet格式下可以大幅减少I/O
+                    let minimal_projection = Some([0].as_slice()); // 只读取 _internal_id 列
+                    if let Some((batch_start_id, batch)) =
+                        raw_data.floor_with_projection(&doc_id, minimal_projection)
+                    {
                         current_batch_start = Some(batch_start_id);
                         current_batch_end = Some(batch_start_id + batch.num_rows() as u32);
                     } else {
@@ -449,19 +454,34 @@ impl ExecutionPlan for SegmentExec {
             }
         }
 
-        // 2. 对每个batch，一次性读取并提取所有需要的行
+        // 2. 批量读取所有需要的batches (Parquet格式优化)
         let mut result_batches: Vec<RecordBatch> = Vec::new();
 
-        println!("[DEBUG] Processing {} batch groups", batch_groups.len());
+        // 关键优化：批量读取所有RowGroups，而不是逐个读取
+        // 这将I/O次数从N次减少到1次，带来巨大性能提升
+        let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
 
+        // 注意: 如果有投影,我们需要确保包含 _internal_id(索引0),因为它用于batch范围检测
+        // 但在最终结果中我们会过滤掉它
+        let proj_to_use = match &projection {
+            Some(proj_indices) => {
+                // projection 已经包含了需要的列索引(如[1,2,3]),这些是基于内部schema的
+                // 我们只需要传递这些索引即可,不需要添加0
+                // 因为get_batch_with_projection会按照这些索引读取列
+                Some(proj_indices.as_slice())
+            }
+            None => {
+                // COUNT: 只读 _internal_id
+                None // None表示读取所有列
+            }
+        };
+
+        // 批量读取所有batches
+        let source_batches = raw_data.get_batch_with_projection(&batch_keys, proj_to_use);
+
+        // 3. 对每个batch，提取需要的行
         for (batch_start_id, doc_ids_in_batch) in batch_groups {
-            if let Some(source_batch) = raw_data.get(&batch_start_id) {
-                println!(
-                    "[DEBUG] Batch {}: {} docs, source has {} rows",
-                    batch_start_id,
-                    doc_ids_in_batch.len(),
-                    source_batch.num_rows()
-                );
+            if let Some(source_batch) = source_batches.get(&batch_start_id) {
                 // 计算每个doc_id在batch中的行索引
                 let mut row_indices: Vec<usize> = doc_ids_in_batch
                     .iter()
@@ -503,24 +523,65 @@ impl ExecutionPlan for SegmentExec {
                         result_batches.push(batch);
                     }
                 } else {
-                    let final_columns = if let Some(ref proj_indices) = projection {
-                        // 根据投影索引选择列并批量提取行
-                        proj_indices
-                            .iter()
-                            .filter_map(|&col_idx| {
-                                source_batch
-                                    .columns()
-                                    .get(col_idx)
-                                    .and_then(|col| take(col.as_ref(), &indices_array, None).ok())
-                            })
-                            .collect()
-                    } else {
-                        // 没有投影，返回所有列(跳过 _internal_id,即索引 0)
-                        source_batch.columns()[1..]
-                            .iter()
-                            .filter_map(|col| take(col.as_ref(), &indices_array, None).ok())
-                            .collect()
-                    };
+                    let final_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> =
+                        if let Some(ref proj_indices) = projection {
+                            // 投影存在时,需要根据projection索引选择列
+                            // source_batch可能包含_internal_id作为第0列
+                            if source_batch.num_columns() > 0 {
+                                // 检查第一列的名字是否是_internal_id
+                                let schema = source_batch.schema();
+                                let first_col_name = schema.field(0).name();
+
+                                if first_col_name == "_internal_id" {
+                                    // source_batch = [_internal_id, field1, field2, field3, ...]
+                                    // projection索引是基于projected_schema的(不含_internal_id)
+                                    // 所以projection=[0]表示field1,在source_batch中是索引1
+                                    proj_indices
+                                        .iter()
+                                        .filter_map(|&proj_idx| {
+                                            // proj_idx是projected_schema中的索引,需要+1才是source_batch中的索引
+                                            let source_idx = proj_idx;
+                                            if source_idx < source_batch.num_columns() {
+                                                take(
+                                                    source_batch.column(source_idx).as_ref(),
+                                                    &indices_array,
+                                                    None,
+                                                )
+                                                .ok()
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect()
+                                } else {
+                                    // 没有_internal_id,直接使用projection索引
+                                    proj_indices
+                                        .iter()
+                                        .filter_map(|&proj_idx| {
+                                            if proj_idx < source_batch.num_columns() {
+                                                take(
+                                                    source_batch.column(proj_idx).as_ref(),
+                                                    &indices_array,
+                                                    None,
+                                                )
+                                                .ok()
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect()
+                                }
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            // 没有投影，source_batch包含所有列(含_internal_id)
+                            // 返回所有列(跳过 _internal_id,即索引 0)
+                            source_batch.columns()[1..]
+                                .iter()
+                                .filter_map(|col| take(col.as_ref(), &indices_array, None).ok())
+                                .collect()
+                        };
 
                     // 创建包含多行的 RecordBatch
                     if let Ok(batch) = RecordBatch::try_new(projected_schema.clone(), final_columns)

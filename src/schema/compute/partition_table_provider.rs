@@ -355,10 +355,9 @@ impl ExecutionPlan for PartitionUnionExec {
         );
 
         let mut streams = Vec::new();
-        for (i, input) in self.inputs.iter().enumerate() {
+        for (_i, input) in self.inputs.iter().enumerate() {
             let stream = input.execute(0, context.clone())?;
             streams.push(stream);
-            println!("[DEBUG] Added stream {}", i);
         }
 
         // 使用futures::stream::iter将所有流连接起来

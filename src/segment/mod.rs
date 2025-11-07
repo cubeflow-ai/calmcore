@@ -526,8 +526,13 @@ impl Segment {
             .map(|(i, f)| (f.name().to_string(), i))
             .collect();
 
-        // 5. Load row data
-        let row_data = if std::path::Path::new(&row_data_path).exists() {
+        // 5. Load row data (check for Parquet format first, then BTree format)
+        let parquet_path = format!("{}/rowdata.parquet", row_data_path);
+        let row_data = if std::path::Path::new(&parquet_path).exists() {
+            // New format: Parquet file
+            RowDataStore::new_parquet(&parquet_path)?
+        } else if std::path::Path::new(&row_data_path).exists() {
+            // Old format: BTree
             RowDataStore::new_disk(&row_data_path, U32RecordBatchSerializer::default())?
         } else {
             RowDataStore::new_memory(32)
@@ -744,11 +749,17 @@ impl Segment {
             }
         }
 
-        // Phase 4: Replace in-memory row_data with disk-based reader
+        // Phase 4: Replace in-memory row_data with disk-based reader (Parquet or BTree)
         {
             let rowdata_path = format!("{}/rowdata", segment_path);
-            let disk_row_data =
-                RowDataStore::new_disk(&rowdata_path, U32RecordBatchSerializer::default())?;
+            let parquet_path = format!("{}/rowdata.parquet", rowdata_path);
+            let disk_row_data = if std::path::Path::new(&parquet_path).exists() {
+                // New format: Parquet file
+                RowDataStore::new_parquet(&parquet_path)?
+            } else {
+                // Old format: BTree
+                RowDataStore::new_disk(&rowdata_path, U32RecordBatchSerializer::default())?
+            };
             *self.row_data.write().unwrap() = disk_row_data;
         }
 
@@ -861,10 +872,14 @@ impl Segment {
             .map(|(i, f)| (f.name().to_string(), i))
             .collect();
 
-        // 5. Load row_data from disk
+        // 5. Load row_data from disk (check for Parquet format first, then BTree)
         let row_data_path = format!("{}/rowdata", segment_path);
-        let row_data = if std::path::Path::new(&row_data_path).exists() {
-            println!("  Loading row_data from disk: {}", row_data_path);
+        let parquet_path = format!("{}/rowdata.parquet", row_data_path);
+        let row_data = if std::path::Path::new(&parquet_path).exists() {
+            println!("  Loading row_data from Parquet: {}", parquet_path);
+            RowDataStore::new_parquet(&parquet_path)?
+        } else if std::path::Path::new(&row_data_path).exists() {
+            println!("  Loading row_data from BTree: {}", row_data_path);
             RowDataStore::new_disk(&row_data_path, U32RecordBatchSerializer::default())?
         } else {
             println!("  No row_data found, creating empty store");
@@ -1026,9 +1041,10 @@ impl Segment {
         self.row_data.read().unwrap().clone()
     }
 
-    /// Persist row_data to disk using BTree format (same as keyword index)
-    /// Reorganizes data into fixed-size batches (default 100 docs per batch)
-    /// Deleted documents are marked as NULL in the batch
+    /// Persist row_data to disk using Parquet format
+    /// Reorganizes data into fixed-size RowGroups (1000 docs per RowGroup)
+    /// Each RowGroup can be read independently for efficient querying
+    /// Deleted documents have their values (except internal_id) set to NULL to save space
     fn persist_row_data(
         &self,
         rowdata_path: &str,
@@ -1036,23 +1052,27 @@ impl Segment {
         deleted: &RoaringBitmap,
     ) -> CoreResult<()> {
         use datafusion::arrow::compute::concat_batches;
-        use mem_btree::persist::TreeWriter;
+        use datafusion::parquet::arrow::ArrowWriter;
+        use datafusion::parquet::basic::Compression;
+        use datafusion::parquet::file::properties::WriterProperties;
 
         // Extract memory BTree from RowDataStore
         let memory_tree = match row_data {
             RowDataStore::Memory(tree) => tree,
-            RowDataStore::Disk(_) => {
+            RowDataStore::Disk(_) | RowDataStore::Parquet(_) => {
                 return Err(CoreError::Internal(
                     "Cannot persist disk row_data".to_string(),
                 ));
             }
         };
 
-        // Step 1: Collect all batches (avoid extracting individual rows)
+        // Step 1: Collect all batches and process deleted documents
         let mut all_batches: Vec<RecordBatch> = Vec::new();
         for item in memory_tree.iter() {
             let (_key, batch, _ttl) = &*item;
-            all_batches.push(batch.clone());
+            // Process batch to set deleted rows to NULL (except internal_id)
+            let processed_batch = self.process_batch_for_deleted(&batch, deleted);
+            all_batches.push(processed_batch);
         }
 
         // If no data, return early
@@ -1066,7 +1086,15 @@ impl Segment {
         let merged_batch = concat_batches(&schema, &all_batches)
             .map_err(|e| CoreError::Internal(format!("Failed to merge batches: {}", e)))?;
 
-        // Step 2: Reorganize into fixed-size batches (1000 docs per batch for better performance)
+        // Report deleted documents stats
+        if !deleted.is_empty() {
+            println!(
+                "    Processed {} deleted documents (values set to NULL)",
+                deleted.len()
+            );
+        }
+
+        // Step 2: Reorganize into fixed-size batches (1000 docs per RowGroup)
         const BATCH_SIZE: usize = 1000;
         let total_docs = merged_batch.num_rows();
         let mut reorganized_batches: Vec<(u32, RecordBatch)> = Vec::new();
@@ -1076,11 +1104,14 @@ impl Segment {
             merged_batch.column(0),
         );
 
+        let mut row_group_keys: Vec<u32> = Vec::new();
+
         for chunk_start in (0..total_docs).step_by(BATCH_SIZE) {
             let chunk_end = (chunk_start + BATCH_SIZE).min(total_docs);
 
             // Get the first doc_id as the batch key
             let batch_key = internal_ids.value(chunk_start);
+            row_group_keys.push(batch_key);
 
             // Slice the batch for this chunk
             let chunk_batch = merged_batch.slice(chunk_start, chunk_end - chunk_start);
@@ -1090,7 +1121,7 @@ impl Segment {
 
         let batch_count = reorganized_batches.len();
         println!(
-            "    Reorganized into {} batches ({}~{} docs per batch)",
+            "    Reorganized into {} RowGroups ({}~{} docs per RowGroup)",
             batch_count,
             if total_docs < BATCH_SIZE {
                 total_docs
@@ -1100,22 +1131,40 @@ impl Segment {
             BATCH_SIZE
         );
 
-        // Step 3: Persist reorganized batches to disk
-        let iter = reorganized_batches
-            .into_iter()
-            .map(|(key, batch)| Arc::new((key, batch, None)));
+        // Step 3: Persist to Parquet file
+        let parquet_file_path = format!("{}/rowdata.parquet", rowdata_path);
+        let file = std::fs::File::create(&parquet_file_path)
+            .map_err(|e| CoreError::IOError(format!("Failed to create parquet file: {}", e)))?;
 
-        // Persist to disk using TreeWriter
-        let serializer = U32RecordBatchSerializer::default();
-        let writer = TreeWriter::new(
-            std::path::PathBuf::from(rowdata_path),
-            128, // chunk_size for BTree nodes
-            0,   // key_len (0 for u32 keys)
-        );
+        // Configure Parquet writer
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_max_row_group_size(BATCH_SIZE)
+            .set_key_value_metadata(Some(vec![
+                datafusion::parquet::file::metadata::KeyValue::new(
+                    "row_group_keys".to_string(),
+                    Some(serde_json::to_string(&row_group_keys).map_err(|e| {
+                        CoreError::Internal(format!("Failed to serialize row_group_keys: {}", e))
+                    })?),
+                ),
+            ]))
+            .build();
+
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
+            .map_err(|e| CoreError::IOError(format!("Failed to create ArrowWriter: {}", e)))?;
+
+        // Write each batch as a RowGroup
+        for (_key, batch) in reorganized_batches {
+            writer
+                .write(&batch)
+                .map_err(|e| CoreError::IOError(format!("Failed to write batch: {}", e)))?;
+        }
 
         writer
-            .persist::<u32, RecordBatch, RecordBatch>(batch_count, Box::new(serializer), iter)
-            .map_err(|e| CoreError::IOError(e.to_string()))?;
+            .close()
+            .map_err(|e| CoreError::IOError(format!("Failed to close writer: {}", e)))?;
+
+        println!("    Persisted to Parquet: {}", parquet_file_path);
 
         Ok(())
     }
