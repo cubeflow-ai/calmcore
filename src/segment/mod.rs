@@ -106,27 +106,15 @@ impl Segment {
         info: Option<WriteInfo>,
         lock: &RwLock<()>,
     ) -> CoreResult<Vec<u32>> {
-        // add id column
-        let mut columns = Vec::with_capacity(data.schema().fields().len() + 1);
-        columns.push(Field::new("_internal_id", DataType::UInt32, false));
-        columns.extend(data.schema().flattened_fields().into_iter().cloned());
-        let arrow_schema = Arc::new(arrow::datatypes::Schema::new(columns));
-
+        // 直接使用原始数据,不添加 _internal_id 列
         let num_rows = data.num_rows() as u32;
-        // generate auto-increment id column
+        // generate auto-increment id for tracking
         let start_id = self.doc_id_gen.load(Ordering::Relaxed);
-        // concatenate auto-increment id column to RecordBatch (insert into the first column)
-        let old_columns = data.columns();
-        let mut columns = Vec::with_capacity(old_columns.len() + 1);
 
         let result = (start_id..start_id + num_rows).collect_vec();
 
-        columns.push(Arc::new(UInt32Array::from_iter_values(result.iter().cloned())) as ArrayRef);
-        columns.extend_from_slice(old_columns);
-
-        let new_data = RecordBatch::try_new(arrow_schema, columns).unwrap();
-
-        // 更新doc_id_gen和max_doc_id
+        // 使用原始数据,不需要添加id列
+        let new_data = data.clone(); // 更新doc_id_gen和max_doc_id
         let new_gen = start_id + num_rows;
         self.doc_id_gen.store(new_gen, Ordering::Relaxed);
 
@@ -161,7 +149,7 @@ impl Segment {
                     continue;
                 }
             }
-            if let Err(e) = f.write(&new_data) {
+            if let Err(e) = f.write(&new_data, start_id) {
                 eprintln!("index write field {:?} failed: {:?}", f.name(), e);
             }
         }

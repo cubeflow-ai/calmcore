@@ -873,7 +873,7 @@ pub trait IndexReader: Send + Sync + 'static {
 pub trait IndexWriter: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn field_type(&self) -> FieldType;
-    fn write(&self, data: &RecordBatch) -> CoreResult<()>;
+    fn write(&self, data: &RecordBatch, start_id: u32) -> CoreResult<()>;
     fn mget_internal_id(&self, column: &ArrayRef) -> Vec<u32>;
     fn as_any(&self) -> &dyn Any;
 }

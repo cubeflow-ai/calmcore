@@ -119,18 +119,17 @@ impl NumI64 {
 }
 
 impl IndexWriter for NumI64 {
-    fn write(&self, data: &RecordBatch) -> CoreResult<()> {
+    fn write(&self, data: &RecordBatch, start_id: u32) -> CoreResult<()> {
         let Some(arr) = data.column_by_name(&self.field.name()) else {
             return Ok(());
         };
 
         let mut mtp: HashMap<i64, Vec<u32>> = HashMap::new();
 
-        for (value, id) in arrow_downcast!(arr, Int64Array)
-            .iter()
-            .zip(arrow_downcast!(data.column(0), UInt32Array).iter())
-        {
-            if let (Some(value), Some(id)) = (value, id) {
+        // 使用start_id + row_idx 生成文档ID
+        for (row_idx, value) in arrow_downcast!(arr, Int64Array).iter().enumerate() {
+            if let Some(value) = value {
+                let id = start_id + row_idx as u32;
                 if let Some(list) = mtp.get_mut(&value) {
                     if list.last() != Some(&id) {
                         list.push(id);

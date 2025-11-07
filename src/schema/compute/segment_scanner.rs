@@ -54,21 +54,9 @@ impl SegmentScanner {
         valid_docs.insert_range(0..doc_count);
         valid_docs -= &del;
 
-        // 在 schema 前面添加 _internal_id 字段
-        // 这样内部 schema 就与实际数据结构匹配了
-        let schema_with_id = {
-            use datafusion::arrow::datatypes::{DataType, Field, Schema};
-
-            let mut fields = vec![Arc::new(Field::new(
-                "_internal_id",
-                DataType::UInt32,
-                false,
-            ))];
-            fields.extend(schema.fields().iter().map(|f| Arc::clone(f)));
-            Arc::new(Schema::new(fields))
-        };
+        // 直接使用原始schema,不需要添加 _internal_id
         Self {
-            schema: schema_with_id,
+            schema: schema.clone(),
             raw_data,
             index_readers,
             doc_count,
@@ -94,48 +82,32 @@ impl SegmentScanner {
             }
         }
 
-        // 3. 处理投影
-        // 注意: projection 的索引是基于外部 schema (不含 _internal_id)
-        // 需要将其转换为内部 schema (含 _internal_id) 的索引
-        let internal_projection = projection.and_then(|indices| {
-            if indices.is_empty() {
-                // 空投影表示不需要任何列(如 COUNT(*))
-                None
-            } else {
-                // 将外部索引 [0, 1, 2] 转换为内部索引 [1, 2, 3]
-                // 因为内部 schema 第 0 列是 _internal_id
-                Some(indices.iter().map(|&i| i + 1).collect::<Vec<_>>())
-            }
-        });
-
-        // 4. 计算投影后的 schema (基于内部 schema,但不包含 _internal_id)
-        let projected_schema = match &internal_projection {
-            Some(indices) => {
+        // 3. 处理投影 - 直接使用原始索引,不需要转换
+        let projected_schema = match projection {
+            Some(indices) if !indices.is_empty() => {
                 let fields: Vec<_> = indices
                     .iter()
                     .map(|i| self.schema.field(*i).clone())
                     .collect();
                 Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
             }
+            Some(_) => {
+                // 空投影(如 COUNT(*)),返回空 schema
+                Arc::new(datafusion::arrow::datatypes::Schema::empty())
+            }
             None => {
-                if projection.map_or(false, |p| p.is_empty()) {
-                    // 空投影(如 COUNT(*)),返回空 schema
-                    Arc::new(datafusion::arrow::datatypes::Schema::empty())
-                } else {
-                    // 没有投影,返回所有列(但不包括 _internal_id)
-                    let fields: Vec<_> = self.schema.fields()[1..].to_vec();
-                    Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
-                }
+                // 没有投影,返回所有列
+                self.schema.clone()
             }
         };
 
-        // 5. 创建 ExecutionPlan
+        // 4. 创建 ExecutionPlan
         let exec = SegmentExec::new(
             self.raw_data.clone(),
             self.schema.clone(),
             projected_schema,
             result_bitmap,
-            internal_projection,
+            projection.map(|p| p.to_vec()),
         );
 
         Ok(Arc::new(exec))
@@ -461,20 +433,8 @@ impl ExecutionPlan for SegmentExec {
         // 这将I/O次数从N次减少到1次，带来巨大性能提升
         let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
 
-        // 注意: 如果有投影,我们需要确保包含 _internal_id(索引0),因为它用于batch范围检测
-        // 但在最终结果中我们会过滤掉它
-        let proj_to_use = match &projection {
-            Some(proj_indices) => {
-                // projection 已经包含了需要的列索引(如[1,2,3]),这些是基于内部schema的
-                // 我们只需要传递这些索引即可,不需要添加0
-                // 因为get_batch_with_projection会按照这些索引读取列
-                Some(proj_indices.as_slice())
-            }
-            None => {
-                // COUNT: 只读 _internal_id
-                None // None表示读取所有列
-            }
-        };
+        // 直接使用projection,不需要特殊处理
+        let proj_to_use = projection.as_ref().map(|p| p.as_slice());
 
         // 批量读取所有batches
         let source_batches = raw_data.get_batch_with_projection(&batch_keys, proj_to_use);
@@ -525,59 +485,26 @@ impl ExecutionPlan for SegmentExec {
                 } else {
                     let final_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> =
                         if let Some(ref proj_indices) = projection {
-                            // 投影存在时,需要根据projection索引选择列
-                            // source_batch可能包含_internal_id作为第0列
-                            if source_batch.num_columns() > 0 {
-                                // 检查第一列的名字是否是_internal_id
-                                let schema = source_batch.schema();
-                                let first_col_name = schema.field(0).name();
-
-                                if first_col_name == "_internal_id" {
-                                    // source_batch = [_internal_id, field1, field2, field3, ...]
-                                    // projection索引是基于projected_schema的(不含_internal_id)
-                                    // 所以projection=[0]表示field1,在source_batch中是索引1
-                                    proj_indices
-                                        .iter()
-                                        .filter_map(|&proj_idx| {
-                                            // proj_idx是projected_schema中的索引,需要+1才是source_batch中的索引
-                                            let source_idx = proj_idx;
-                                            if source_idx < source_batch.num_columns() {
-                                                take(
-                                                    source_batch.column(source_idx).as_ref(),
-                                                    &indices_array,
-                                                    None,
-                                                )
-                                                .ok()
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect()
-                                } else {
-                                    // 没有_internal_id,直接使用projection索引
-                                    proj_indices
-                                        .iter()
-                                        .filter_map(|&proj_idx| {
-                                            if proj_idx < source_batch.num_columns() {
-                                                take(
-                                                    source_batch.column(proj_idx).as_ref(),
-                                                    &indices_array,
-                                                    None,
-                                                )
-                                                .ok()
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect()
-                                }
-                            } else {
-                                Vec::new()
-                            }
+                            // 有投影时,直接使用projection索引选择列
+                            proj_indices
+                                .iter()
+                                .filter_map(|&proj_idx| {
+                                    if proj_idx < source_batch.num_columns() {
+                                        take(
+                                            source_batch.column(proj_idx).as_ref(),
+                                            &indices_array,
+                                            None,
+                                        )
+                                        .ok()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
                         } else {
-                            // 没有投影，source_batch包含所有列(含_internal_id)
-                            // 返回所有列(跳过 _internal_id,即索引 0)
-                            source_batch.columns()[1..]
+                            // 没有投影,返回所有列
+                            source_batch
+                                .columns()
                                 .iter()
                                 .filter_map(|col| take(col.as_ref(), &indices_array, None).ok())
                                 .collect()

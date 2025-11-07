@@ -133,7 +133,7 @@ impl Keyword {
 }
 
 impl IndexWriter for Keyword {
-    fn write(&self, data: &RecordBatch) -> CoreResult<()> {
+    fn write(&self, data: &RecordBatch, start_id: u32) -> CoreResult<()> {
         let Some(arr) = data.column_by_name(&self.field.name()) else {
             return Ok(());
         };
@@ -141,11 +141,10 @@ impl IndexWriter for Keyword {
         let mut mtp: HashMap<String, Vec<u32>> = HashMap::new();
 
         if self.field.is_array() {
-            for (a, id) in arrow_downcast!(arr, ListArray)
-                .iter()
-                .zip(arrow_downcast!(data.column(0), UInt32Array).iter())
-            {
-                if let (Some(a), Some(id)) = (a, id) {
+            // 对于数组字段,使用start_id + row_idx生成文档ID
+            for (row_idx, a) in arrow_downcast!(arr, ListArray).iter().enumerate() {
+                if let Some(a) = a {
+                    let id = start_id + row_idx as u32;
                     for v in arrow_downcast!(a, StringArray).iter().filter_map(|v| v) {
                         let normalized_key = self.normalize_string(v);
                         if let Some(list) = mtp.get_mut(&normalized_key) {
@@ -159,11 +158,10 @@ impl IndexWriter for Keyword {
                 }
             }
         } else {
-            for (a, id) in arrow_downcast!(arr, StringArray)
-                .iter()
-                .zip(arrow_downcast!(data.column(0), UInt32Array).iter())
-            {
-                if let (Some(v), Some(id)) = (a, id) {
+            // 对于普通字段,使用start_id + row_idx生成文档ID
+            for (row_idx, a) in arrow_downcast!(arr, StringArray).iter().enumerate() {
+                if let Some(v) = a {
+                    let id = start_id + row_idx as u32;
                     let normalized_key = self.normalize_string(v);
                     if let Some(list) = mtp.get_mut(&normalized_key) {
                         if list.last() != Some(&id) {

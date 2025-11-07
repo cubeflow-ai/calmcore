@@ -114,6 +114,28 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             return writer.finish();
         }
 
+        // 检查是否是INSERT/UPDATE/DELETE语句
+        if query_lower.starts_with("insert") {
+            return results.error(
+                ErrorKind::ER_NOT_SUPPORTED_YET,
+                b"INSERT is not yet supported. Please use Partition::upsert() API directly.",
+            );
+        }
+
+        if query_lower.starts_with("update") {
+            return results.error(
+                ErrorKind::ER_NOT_SUPPORTED_YET,
+                b"UPDATE is not yet supported. Please use Partition::upsert() API directly.",
+            );
+        }
+
+        if query_lower.starts_with("delete") {
+            return results.error(
+                ErrorKind::ER_NOT_SUPPORTED_YET,
+                b"DELETE is not yet supported. Please use Partition::delete() API directly.",
+            );
+        }
+
         // 执行SQL查询
         let partition = self.partition.clone();
         let query_str = query.to_string();
@@ -132,13 +154,22 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         match rx.recv() {
             Ok(Ok((schema, batches))) => write_query_result(results, schema, batches),
             Ok(Err(e)) => {
-                let error_msg = format!("Query error: {}", e);
+                // 提供更友好的错误消息
+                let error_msg = if e.contains("table") && e.contains("not found") {
+                    "Table 'data' not found. Available tables: data".to_string()
+                } else if e.contains("column") {
+                    format!("Column error: {}. Please check your column names.", e)
+                } else if e.contains("syntax") || e.contains("SQL") {
+                    format!("SQL syntax error: {}", e)
+                } else {
+                    format!("Query execution failed: {}", e)
+                };
                 results.error(ErrorKind::ER_UNKNOWN_ERROR, error_msg.as_bytes())
             }
-            Err(_) => {
-                let error_msg = "Internal error: failed to receive query result";
-                results.error(ErrorKind::ER_UNKNOWN_ERROR, error_msg.as_bytes())
-            }
+            Err(_) => results.error(
+                ErrorKind::ER_UNKNOWN_ERROR,
+                b"Internal error: Query execution thread failed",
+            ),
         }
     }
 }
@@ -163,10 +194,16 @@ async fn execute_query(
         .map_err(|e| format!("Failed to register table: {}", e))?;
 
     // 执行查询
-    let df = ctx.sql(query).await.map_err(|e| format!("SQL error: {}", e))?;
-    let batches = df.collect().await.map_err(|e| format!("Query execution error: {}", e))?;
+    let df = ctx
+        .sql(query)
+        .await
+        .map_err(|e| format!("SQL error: {}", e))?;
+    let batches = df
+        .collect()
+        .await
+        .map_err(|e| format!("Query execution error: {}", e))?;
 
-    let schema = if batches.is_empty() {
+    let schema = if !batches.is_empty() {
         batches[0].schema()
     } else {
         Arc::new(datafusion::arrow::datatypes::Schema::empty())
@@ -191,7 +228,6 @@ fn write_query_result<W: io::Read + io::Write>(
             let coltype = match field.data_type() {
                 DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
                     ColumnType::MYSQL_TYPE_LONGLONG
-```
                 }
                 DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
                     ColumnType::MYSQL_TYPE_LONGLONG
