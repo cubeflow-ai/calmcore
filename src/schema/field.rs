@@ -1,16 +1,17 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldType {
     Keyword,
-    F32,
-    F64,
+    I8,
+    I16,
     I32,
     I64,
+    U8,
+    U16,
     U32,
     U64,
-    // Text,
-    // Boolean,
-    // Date,
-    // GeoPoint,
+    F32,
+    F64,
+    Boolean,
 }
 
 /// 持久化配置选项

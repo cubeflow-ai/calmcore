@@ -19,16 +19,36 @@ use roaring::RoaringBitmap;
 
 use crate::{partition::WriteInfo, schema::field::FieldType, utils::error::CoreResult};
 
-pub mod keyword;
+// 新的泛型实现
+pub mod generic_index;
+pub mod index_key_impls;
+pub mod ordered_f32;
+pub mod ordered_f64; // OrderedF64 类型定义 // OrderedF32 类型定义
+
+// 其他模块
 pub mod row_data;
-// pub mod num_f32; // TODO: implement later
-pub mod num_f64;
-// pub mod num_i32; // TODO: implement later
-pub mod num_i64;
-// pub mod num_u32; // TODO: implement later
-// pub mod num_u64; // removed per design: u64 field not needed currently
 
 pub use row_data::RowDataStore;
+
+// 导出泛型类型别名
+pub use generic_index::{GenericIndexedField, IndexKey};
+pub use index_key_impls::*;
+pub use ordered_f32::OrderedF32;
+pub use ordered_f64::OrderedF64;
+
+// 类型别名，方便使用
+pub type KeywordField = GenericIndexedField<String>;
+pub type I64Field = GenericIndexedField<i64>;
+pub type U64Field = GenericIndexedField<u64>;
+pub type U32Field = GenericIndexedField<u32>;
+pub type I32Field = GenericIndexedField<i32>;
+pub type F64Field = GenericIndexedField<OrderedF64>;
+pub type F32Field = GenericIndexedField<OrderedF32>;
+pub type U8Field = GenericIndexedField<u8>;
+pub type I8Field = GenericIndexedField<i8>;
+pub type U16Field = GenericIndexedField<u16>;
+pub type I16Field = GenericIndexedField<i16>;
+pub type BooleanField = GenericIndexedField<bool>;
 
 /// Serializer for i64 keys with RoaringBitmap values
 #[derive(Clone)]
@@ -115,6 +135,625 @@ impl persist::WriteSerializer<i64, RoaringBitmap> for I64RoaringSerializer {
     }
 }
 
+/// Serializer for u64 keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct U64RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl U64RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+}
+
+impl persist::ReadSerializer<u64, RoaringBitmap> for U64RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u64> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+        for _ in 0..key_count {
+            if pos + 8 > data_to_parse.len() {
+                break;
+            }
+            let key = u64::from_be_bytes([
+                data_to_parse[pos],
+                data_to_parse[pos + 1],
+                data_to_parse[pos + 2],
+                data_to_parse[pos + 3],
+                data_to_parse[pos + 4],
+                data_to_parse[pos + 5],
+                data_to_parse[pos + 6],
+                data_to_parse[pos + 7],
+            ]);
+            result.push(key);
+            pos += 8;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<u64, RoaringBitmap> for U64RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<u64>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+        for key in keys {
+            uncompressed.extend_from_slice(&key.to_be_bytes());
+        }
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
+/// Serializer for u32 keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct U32RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl U32RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+}
+
+impl persist::ReadSerializer<u32, RoaringBitmap> for U32RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u32> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+        for _ in 0..key_count {
+            if pos + 4 > data_to_parse.len() {
+                break;
+            }
+            let key = u32::from_be_bytes([
+                data_to_parse[pos],
+                data_to_parse[pos + 1],
+                data_to_parse[pos + 2],
+                data_to_parse[pos + 3],
+            ]);
+            result.push(key);
+            pos += 4;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<u32, RoaringBitmap> for U32RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<u32>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+        for key in keys {
+            uncompressed.extend_from_slice(&key.to_be_bytes());
+        }
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
+/// Serializer for u8 keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct U8RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl U8RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+}
+
+impl persist::ReadSerializer<u8, RoaringBitmap> for U8RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u8> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+        for _ in 0..key_count {
+            if pos + 1 > data_to_parse.len() {
+                break;
+            }
+            let key = data_to_parse[pos];
+            result.push(key);
+            pos += 1;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<u8, RoaringBitmap> for U8RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<u8>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+        for key in keys {
+            uncompressed.push(*key);
+        }
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
+/// Serializer for bool keys with RoaringBitmap values
+/// Boolean values are stored as u8 (0 or 1)
+#[derive(Clone)]
+pub struct BooleanRoaringSerializer {
+    zstd_level: i32,
+}
+
+impl BooleanRoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+}
+
+impl persist::ReadSerializer<bool, RoaringBitmap> for BooleanRoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<bool> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+        for _ in 0..key_count {
+            if pos + 1 > data_to_parse.len() {
+                break;
+            }
+            let key = data_to_parse[pos] != 0;
+            result.push(key);
+            pos += 1;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<bool, RoaringBitmap> for BooleanRoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<bool>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+        for key in keys {
+            uncompressed.push(if *key { 1u8 } else { 0u8 });
+        }
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
+/// Serializer for u16 keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct U16RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl U16RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+}
+
+impl persist::ReadSerializer<u16, RoaringBitmap> for U16RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u16> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+        for _ in 0..key_count {
+            if pos + 2 > data_to_parse.len() {
+                break;
+            }
+            let key = u16::from_be_bytes([data_to_parse[pos], data_to_parse[pos + 1]]);
+            result.push(key);
+            pos += 2;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<u16, RoaringBitmap> for U16RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<u16>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+        for key in keys {
+            uncompressed.extend_from_slice(&key.to_be_bytes());
+        }
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
+/// Serializer for i32 keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct I32RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl I32RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+}
+
+impl persist::ReadSerializer<i32, RoaringBitmap> for I32RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i32> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+        for _ in 0..key_count {
+            if pos + 4 > data_to_parse.len() {
+                break;
+            }
+            let key = i32::from_be_bytes([
+                data_to_parse[pos],
+                data_to_parse[pos + 1],
+                data_to_parse[pos + 2],
+                data_to_parse[pos + 3],
+            ]);
+            result.push(key);
+            pos += 4;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<i32, RoaringBitmap> for I32RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<i32>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+        for key in keys {
+            uncompressed.extend_from_slice(&key.to_be_bytes());
+        }
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
+/// Serializer for i8 keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct I8RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl I8RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+}
+
+impl persist::ReadSerializer<i8, RoaringBitmap> for I8RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i8> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+        for _ in 0..key_count {
+            if pos + 1 > data_to_parse.len() {
+                break;
+            }
+            let key = data_to_parse[pos] as i8;
+            result.push(key);
+            pos += 1;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<i8, RoaringBitmap> for I8RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<i8>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+        for key in keys {
+            uncompressed.push(*key as u8);
+        }
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
+/// Serializer for i16 keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct I16RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl I16RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+}
+
+impl persist::ReadSerializer<i16, RoaringBitmap> for I16RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i16> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+        for _ in 0..key_count {
+            if pos + 2 > data_to_parse.len() {
+                break;
+            }
+            let key = i16::from_be_bytes([data_to_parse[pos], data_to_parse[pos + 1]]);
+            result.push(key);
+            pos += 2;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<i16, RoaringBitmap> for I16RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<i16>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+        for key in keys {
+            uncompressed.extend_from_slice(&key.to_be_bytes());
+        }
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
+/// Serializer for f32 keys with RoaringBitmap values
+#[derive(Clone)]
+pub struct F32RoaringSerializer {
+    zstd_level: i32,
+}
+
+impl F32RoaringSerializer {
+    pub fn new(zstd_level: i32) -> Self {
+        Self { zstd_level }
+    }
+}
+
+impl persist::ReadSerializer<OrderedF32, RoaringBitmap> for F32RoaringSerializer {
+    fn deserialize_value<'a>(
+        &self,
+        data: &'a [u8],
+    ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
+        decode_roaring_from_bytes(data)
+    }
+
+    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<OrderedF32> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        let data_to_parse = match zstd::decode_all(data) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        if data_to_parse.len() < 2 {
+            return Vec::new();
+        }
+        let key_count = u16::from_be_bytes([data_to_parse[0], data_to_parse[1]]) as usize;
+        let mut result = Vec::with_capacity(key_count);
+        let mut pos = 2;
+        for _ in 0..key_count {
+            if pos + 4 > data_to_parse.len() {
+                break;
+            }
+            let key = f32::from_be_bytes([
+                data_to_parse[pos],
+                data_to_parse[pos + 1],
+                data_to_parse[pos + 2],
+                data_to_parse[pos + 3],
+            ]);
+            result.push(OrderedF32(key));
+            pos += 4;
+        }
+        result
+    }
+}
+
+impl persist::WriteSerializer<OrderedF32, RoaringBitmap> for F32RoaringSerializer {
+    fn serialize_keys<'a>(&self, keys: &'a Vec<OrderedF32>) -> Cow<'a, [u8]> {
+        use byteorder::WriteBytesExt;
+        let mut uncompressed = Vec::new();
+        uncompressed
+            .write_u16::<byteorder::BigEndian>(keys.len() as u16)
+            .expect("write u16 failed");
+        for key in keys {
+            uncompressed.extend_from_slice(&key.0.to_be_bytes());
+        }
+        let compressed =
+            zstd::encode_all(&uncompressed[..], self.zstd_level).unwrap_or(uncompressed);
+        Cow::Owned(compressed)
+    }
+
+    fn serialize_value<'a>(&self, value: &'a RoaringBitmap) -> Cow<'a, [u8]> {
+        Cow::Owned(encode_roaring_from_bitmap(value))
+    }
+}
+
 /// Serializer for f64 keys with RoaringBitmap values
 /// Note: This serializer works with raw f64 values for disk storage
 #[derive(Clone)]
@@ -132,8 +771,8 @@ impl F64RoaringSerializer {
     }
 }
 
-// Need to export OrderedF64 wrapper from num_f64 module
-use num_f64::OrderedF64;
+// OrderedF64 is now available from the ordered_f64 module
+// (already imported at the top of this file)
 
 impl persist::ReadSerializer<OrderedF64, RoaringBitmap> for F64RoaringSerializer {
     fn deserialize_value<'a>(

@@ -6,7 +6,7 @@ pub use field_store::{IndexReader, IndexWriter, RowDataStore};
 use crate::{
     partition::WriteInfo,
     schema::{field::FieldOption, Schema},
-    segment::field_store::{keyword::Keyword, PkWriter, U32RecordBatchSerializer},
+    segment::field_store::{F64Field, I64Field, KeywordField, PkWriter, U32RecordBatchSerializer},
     utils::error::{CoreError, CoreResult},
 };
 use bloomfilter::Bloom;
@@ -56,15 +56,15 @@ impl Segment {
         for field_opt in &schema.fields {
             match field_opt {
                 FieldOption::Keyword { .. } => {
-                    let keyword = Keyword::new(field_opt);
+                    let keyword = KeywordField::new(field_opt);
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
                 FieldOption::I64 { .. } => {
-                    let num_i64 = field_store::num_i64::NumI64::new(field_opt);
+                    let num_i64 = I64Field::new(field_opt);
                     fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
                 }
                 FieldOption::F64 { .. } => {
-                    let num_f64 = field_store::num_f64::NumF64::new(field_opt);
+                    let num_f64 = F64Field::new(field_opt);
                     fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
                 }
             }
@@ -169,13 +169,16 @@ impl Segment {
 
         match pk_field.field_type() {
             FieldType::Keyword => {
-                let pk_writer = pk_field.as_any().downcast_ref::<Keyword>().ok_or_else(|| {
-                    CoreError::Internal(format!(
-                        "field:{:?} field_type:{:?} does not implement PkWriter",
-                        pk_field.name(),
-                        pk_field.field_type()
-                    ))
-                })?;
+                let pk_writer = pk_field
+                    .as_any()
+                    .downcast_ref::<KeywordField>()
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "field:{:?} field_type:{:?} does not implement PkWriter",
+                            pk_field.name(),
+                            pk_field.field_type()
+                        ))
+                    })?;
 
                 let del = pk_writer.write_pk(data, info, lock)?;
                 if !del.is_empty() {
@@ -459,15 +462,15 @@ impl Segment {
             match field_opt {
                 FieldOption::Keyword { .. } => {
                     // Create disk-based Keyword
-                    let keyword = Keyword::from_disk(field_opt, &field_path)?;
+                    let keyword = KeywordField::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
                 FieldOption::I64 { .. } => {
-                    let num_i64 = field_store::num_i64::NumI64::from_disk(field_opt, &field_path)?;
+                    let num_i64 = I64Field::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
                 }
                 FieldOption::F64 { .. } => {
-                    let num_f64 = field_store::num_f64::NumF64::from_disk(field_opt, &field_path)?;
+                    let num_f64 = F64Field::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
                 }
             }
@@ -589,7 +592,7 @@ impl Segment {
         std::fs::create_dir_all(&segment_tmp_path)
             .map_err(|e| CoreError::IOError(format!("Failed to create temp segment dir: {}", e)))?;
 
-        println!("Persisting segment to: {} (temp)", segment_tmp_path);
+        log::debug!("Persisting segment to: {} (temp)", segment_tmp_path);
 
         // 1. Persist each field's inverted index (to temp directory)
         let start = std::time::Instant::now();
@@ -602,22 +605,13 @@ impl Segment {
                 let field_path = format!("{}/field-{}", segment_tmp_path, field_name);
 
                 // Try to downcast and persist based on field type
-                if let Some(keyword) = field
-                    .as_any()
-                    .downcast_ref::<field_store::keyword::Keyword>()
-                {
+                if let Some(keyword) = field.as_any().downcast_ref::<KeywordField>() {
                     let disk_field = keyword.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
-                } else if let Some(num_i64) = field
-                    .as_any()
-                    .downcast_ref::<field_store::num_i64::NumI64>()
-                {
+                } else if let Some(num_i64) = field.as_any().downcast_ref::<I64Field>() {
                     let disk_field = num_i64.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
-                } else if let Some(num_f64) = field
-                    .as_any()
-                    .downcast_ref::<field_store::num_f64::NumF64>()
-                {
+                } else if let Some(num_f64) = field.as_any().downcast_ref::<F64Field>() {
                     let disk_field = num_f64.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else {
@@ -777,7 +771,7 @@ impl Segment {
         // 标记为已持久化
         self.persisted.store(true, Ordering::Relaxed);
 
-        println!("Segment persist completed in {:?}", start.elapsed());
+        log::debug!("Segment persist completed in {:?}", start.elapsed());
 
         Ok(())
     }
@@ -814,15 +808,15 @@ impl Segment {
             match field_opt {
                 FieldOption::Keyword { .. } => {
                     // Create disk-based Keyword
-                    let keyword = Keyword::from_disk(field_opt, &field_path)?;
+                    let keyword = KeywordField::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
                 FieldOption::I64 { .. } => {
-                    let num_i64 = field_store::num_i64::NumI64::from_disk(field_opt, &field_path)?;
+                    let num_i64 = I64Field::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
                 }
                 FieldOption::F64 { .. } => {
-                    let num_f64 = field_store::num_f64::NumF64::from_disk(field_opt, &field_path)?;
+                    let num_f64 = F64Field::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
                 }
             }
@@ -958,7 +952,6 @@ impl Segment {
     /// This is fast because InvertedIndex is clone-friendly (Arc internally)
     pub fn get_index_readers(&self) -> ahash::HashMap<String, Box<dyn IndexReader>> {
         use ahash::{HashMap, HashMapExt};
-        use field_store::{keyword::Keyword, num_f64::NumF64, num_i64::NumI64};
 
         let fields = self.fields.read().unwrap();
         let mut readers = HashMap::new();
@@ -967,11 +960,11 @@ impl Segment {
             let name = field_writer.name().to_string();
 
             // Downcast and clone the concrete type
-            if let Some(keyword) = field_writer.as_any().downcast_ref::<Keyword>() {
+            if let Some(keyword) = field_writer.as_any().downcast_ref::<KeywordField>() {
                 readers.insert(name, Box::new(keyword.clone()) as Box<dyn IndexReader>);
-            } else if let Some(num_i64) = field_writer.as_any().downcast_ref::<NumI64>() {
+            } else if let Some(num_i64) = field_writer.as_any().downcast_ref::<I64Field>() {
                 readers.insert(name, Box::new(num_i64.clone()) as Box<dyn IndexReader>);
-            } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<NumF64>() {
+            } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<F64Field>() {
                 readers.insert(name, Box::new(num_f64.clone()) as Box<dyn IndexReader>);
             }
         }
@@ -986,19 +979,17 @@ impl Segment {
         field_name: &str,
         value: &datafusion::scalar::ScalarValue,
     ) -> Option<RoaringBitmap> {
-        use field_store::{keyword::Keyword, num_f64::NumF64, num_i64::NumI64};
-
         let fields = self.fields.read().unwrap();
         let index = self.field_index.get(field_name)?;
         let field_writer = fields.get(*index)?;
 
         // Downcast to concrete type and call IndexReader::query
-        if let Some(keyword) = field_writer.as_any().downcast_ref::<Keyword>() {
-            <Keyword as IndexReader>::query(keyword, value)
-        } else if let Some(num_i64) = field_writer.as_any().downcast_ref::<NumI64>() {
-            <NumI64 as IndexReader>::query(num_i64, value)
-        } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<NumF64>() {
-            <NumF64 as IndexReader>::query(num_f64, value)
+        if let Some(keyword) = field_writer.as_any().downcast_ref::<KeywordField>() {
+            <KeywordField as IndexReader>::query(keyword, value)
+        } else if let Some(num_i64) = field_writer.as_any().downcast_ref::<I64Field>() {
+            <I64Field as IndexReader>::query(num_i64, value)
+        } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<F64Field>() {
+            <F64Field as IndexReader>::query(num_f64, value)
         } else {
             None
         }
@@ -1014,19 +1005,23 @@ impl Segment {
         end: &datafusion::scalar::ScalarValue,
         end_inclusive: bool,
     ) -> Option<RoaringBitmap> {
-        use field_store::{keyword::Keyword, num_f64::NumF64, num_i64::NumI64};
-
         let fields = self.fields.read().unwrap();
         let index = self.field_index.get(field_name)?;
         let field_writer = fields.get(*index)?;
 
         // Downcast to concrete type and call IndexReader::range
-        if let Some(keyword) = field_writer.as_any().downcast_ref::<Keyword>() {
-            <Keyword as IndexReader>::range(keyword, start, start_inclusive, end, end_inclusive)
-        } else if let Some(num_i64) = field_writer.as_any().downcast_ref::<NumI64>() {
-            <NumI64 as IndexReader>::range(num_i64, start, start_inclusive, end, end_inclusive)
-        } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<NumF64>() {
-            <NumF64 as IndexReader>::range(num_f64, start, start_inclusive, end, end_inclusive)
+        if let Some(keyword) = field_writer.as_any().downcast_ref::<KeywordField>() {
+            <KeywordField as IndexReader>::range(
+                keyword,
+                start,
+                start_inclusive,
+                end,
+                end_inclusive,
+            )
+        } else if let Some(num_i64) = field_writer.as_any().downcast_ref::<I64Field>() {
+            <I64Field as IndexReader>::range(num_i64, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<F64Field>() {
+            <F64Field as IndexReader>::range(num_f64, start, start_inclusive, end, end_inclusive)
         } else {
             None
         }

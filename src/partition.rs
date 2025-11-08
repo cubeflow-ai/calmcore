@@ -217,7 +217,7 @@ impl Partition {
             (seg_id, current.next_doc_id(), current.total_count())
         };
 
-        println!("Flushing segment {} with {} records", seg_id, total_count);
+        log::info!("Flushing segment {} with {} records", seg_id, total_count);
 
         // 2. Replace current with new segment (this is the only blocking part)
         let old_segment = {
@@ -258,8 +258,8 @@ impl Partition {
             return Ok(vec![]);
         }
 
-        println!(
-            "发现 {} 个未持久化的 segments，开始持久化...",
+        log::info!(
+            "Found {} unpersisted segments, starting persist...",
             unpersisted.len()
         );
 
@@ -268,15 +268,19 @@ impl Partition {
             match self.persist_segment(seg_id) {
                 Ok(_) => {
                     persisted_ids.push(seg_id);
-                    println!("  Segment {} 持久化成功", seg_id);
+                    log::debug!("Segment {} persisted successfully", seg_id);
                 }
                 Err(e) => {
-                    eprintln!("  Segment {} 持久化失败: {:?}", seg_id, e);
+                    log::error!("Segment {} persist failed: {:?}", seg_id, e);
                 }
             }
         }
 
-        println!("持久化完成，共 {} 个 segments", persisted_ids.len());
+        log::info!(
+            "Persist completed, {} segments persisted",
+            persisted_ids.len()
+        );
+
         Ok(persisted_ids)
     }
 
@@ -298,7 +302,7 @@ impl Partition {
             .find(|(id, _)| *id == seg_id)
             .ok_or_else(|| CoreError::Internal(format!("Segment {} not found", seg_id)))?;
 
-        println!("Persisting segment {} to disk", seg_id);
+        log::debug!("Persisting segment {} to disk", seg_id);
 
         // Collect all frozen segments as history (for snapshot their deleted bitmaps)
         let history_segments: Vec<(u64, Arc<Segment>)> = segments
@@ -310,7 +314,7 @@ impl Partition {
         // Persist the segment with history deletes snapshot
         segment.persist(&partition_path, seg_id, &history_segments)?;
 
-        println!("Segment {} persisted successfully", seg_id);
+        log::debug!("Segment {} persisted successfully", seg_id);
 
         Ok(())
     }
@@ -329,7 +333,7 @@ impl Partition {
 
                 // 1. Remove incomplete temp directories
                 if dir_name_str.ends_with("_tmp") {
-                    println!("  Removing incomplete temp directory: {}", dir_name_str);
+                    log::warn!("Removing incomplete temp directory: {}", dir_name_str);
                     let _ = std::fs::remove_dir_all(&entry_path);
                     continue;
                 }
@@ -351,9 +355,10 @@ impl Partition {
                                 if let Some(target_seg_id_str) =
                                     file_name_str.strip_prefix("deleted_seg_")
                                 {
-                                    println!(
-                                        "  Completing file replacement: {} → segment-{}/deleted",
-                                        file_name_str, target_seg_id_str
+                                    log::info!(
+                                        "Completing file replacement: {} → segment-{}/deleted",
+                                        file_name_str,
+                                        target_seg_id_str
                                     );
 
                                     let source_path = seg_entry.path();
@@ -364,12 +369,9 @@ impl Partition {
 
                                     // Replace (overwrite) the target file
                                     if let Err(e) = std::fs::rename(&source_path, &target_path) {
-                                        eprintln!(
-                                            "    Warning: Failed to complete replacement: {}",
-                                            e
-                                        );
+                                        log::warn!("Failed to complete replacement: {}", e);
                                     } else {
-                                        println!("    Completed ✓");
+                                        log::debug!("Replacement completed");
                                     }
                                 }
                             }
@@ -394,7 +396,7 @@ impl Partition {
             .to_str()
             .ok_or_else(|| CoreError::Internal("Invalid base_dir path".to_string()))?;
 
-        println!("\n=== Loading Partition {} from {} ===", id, base_dir_str);
+        log::info!("Loading Partition {} from {}", id, base_dir_str);
 
         // 1. Find all segment directories
         let partition_path = format!("{}/partition-{}", base_dir_str, id);
@@ -409,7 +411,7 @@ impl Partition {
         }
 
         // 1.5. Crash recovery: Clean up incomplete persists and complete file replacements
-        println!("Checking for incomplete persists...");
+        log::info!("Checking for incomplete persists...");
         Self::recover_incomplete_persists(&partition_path)?;
 
         // Scan for segment directories with new format: segment-{start}-{end}
@@ -441,7 +443,7 @@ impl Partition {
         }
 
         segment_ranges.sort();
-        println!(
+        log::info!(
             "Found {} frozen segments: {:?}",
             segment_ranges.len(),
             segment_ranges
@@ -462,7 +464,7 @@ impl Partition {
             .map(|(_start, end)| *end) // Next segment starts where last ended
             .unwrap_or(0);
 
-        println!("Next doc_id start: {}", next_start);
+        log::info!("Next doc_id start: {}", next_start);
 
         // 4. Create new active segment
         let current_segment = Segment::new(next_start, schema.clone());
@@ -565,9 +567,10 @@ impl Partition {
         // 1. Flush 当前活跃 segment
         let current_count = self.current_segment.read().unwrap().doc_count();
         if current_count > 0 {
-            println!(
+            log::info!(
                 "[Partition {}] Flushing current segment ({} records)",
-                self.id, current_count
+                self.id,
+                current_count
             );
             self.flush(false)?;
         }
@@ -575,11 +578,11 @@ impl Partition {
         // 2. 持久化所有未持久化的 segments
         let unpersisted = self.get_unpersisted_segments();
         if unpersisted.is_empty() {
-            println!("[Partition {}] All segments already persisted", self.id);
+            log::info!("[Partition {}] All segments already persisted", self.id);
             return Ok(());
         }
 
-        println!(
+        log::info!(
             "[Partition {}] Persisting {} segments...",
             self.id,
             unpersisted.len()
@@ -590,7 +593,7 @@ impl Partition {
         // 3. 验证
         let remaining = self.get_unpersisted_segments();
         if remaining.is_empty() {
-            println!("[Partition {}] ✅ All data persisted", self.id);
+            log::info!("[Partition {}] All data persisted", self.id);
             Ok(())
         } else {
             Err(CoreError::Internal(format!(

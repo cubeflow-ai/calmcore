@@ -11,6 +11,10 @@ use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 初始化日志系统（可选）
+    // 设置环境变量 RUST_LOG=info 可查看详细日志
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     println!("╔════════════════════════════════════════════════════╗");
     println!("║       Calm Engine 持久化接口演示                    ║");
     println!("╚════════════════════════════════════════════════════╝\n");

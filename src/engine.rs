@@ -131,7 +131,7 @@ impl Engine {
         let mut partitions = self.partitions.write().await;
         partitions.insert(partition_id, partition);
 
-        println!("[Engine] Added partition {}", partition_id);
+        log::info!("Added partition {}", partition_id);
     }
 
     /// 加载 Partition（从磁盘恢复）
@@ -150,7 +150,7 @@ impl Engine {
         let mut partitions = self.partitions.write().await;
         partitions.remove(&partition_id);
 
-        println!("[Engine] Removed partition {}", partition_id);
+        log::info!("Removed partition {}", partition_id);
     }
 
     /// 获取 Partition
@@ -223,7 +223,7 @@ impl Engine {
     /// // 此时 partition 1 的所有数据已写入磁盘
     /// ```
     pub async fn persist_partition(&self, partition_id: u64) -> CoreResult<()> {
-        println!("[Engine] Persisting partition {}...", partition_id);
+        log::info!("Persisting partition {}...", partition_id);
 
         // 1. 获取 Partition
         let partition = {
@@ -263,7 +263,7 @@ impl Engine {
     /// ```
     pub async fn stop(&self) -> CoreResult<()> {
         // 1. 停止后台持久化任务
-        println!("[Engine] Stopping background persist task...");
+        log::info!("Stopping background persist task...");
         let _ = self.persist_tx.send(PersistRequest::Shutdown);
 
         {
@@ -272,7 +272,7 @@ impl Engine {
                 let _ = handle.await;
             }
         }
-        println!("[Engine] ✅ Background task stopped\n");
+        log::info!("Background task stopped");
 
         // 2. 获取所有 Partition ID
         let partition_ids: Vec<u64> = {
@@ -281,15 +281,11 @@ impl Engine {
         };
 
         if partition_ids.is_empty() {
-            println!("[Engine] No partitions to persist");
-            println!("\n[Engine] ✅ Stop completed\n");
+            log::info!("No partitions to persist");
             return Ok(());
         }
 
-        println!(
-            "[Engine] Persisting {} partitions...\n",
-            partition_ids.len()
-        );
+        log::info!("Persisting {} partitions...", partition_ids.len());
 
         // 3. 同步持久化所有 Partition（串行执行，确保稳定）
         let mut success_count = 0;
@@ -299,39 +295,34 @@ impl Engine {
             match self.persist_partition(partition_id).await {
                 Ok(_) => success_count += 1,
                 Err(e) => {
-                    eprintln!(
-                        "[Engine] ❌ Partition {} persist failed: {:?}",
-                        partition_id, e
-                    );
+                    log::error!("Partition {} persist failed: {:?}", partition_id, e);
                     failed_partitions.push(partition_id);
                 }
             }
         }
 
-        // 4. 打印最终统计
+        // 4. 记录最终统计
         let stats = self.stats().await;
 
-        println!("\n╔════════════════════════════════════════════════════╗");
-        println!("║              Engine Stop Summary                   ║");
-        println!("╚════════════════════════════════════════════════════╝");
-        println!("  Partitions persisted: {}", success_count);
+        log::info!("Engine stop summary:");
+        log::info!("  Partitions persisted: {}", success_count);
         if !failed_partitions.is_empty() {
-            println!("  ❌ Failed partitions: {:?}", failed_partitions);
+            log::warn!("  Failed partitions: {:?}", failed_partitions);
         }
-        println!("  Total documents: {}", stats.total_doc_count);
-        println!("  Total segments: {}", stats.total_frozen_segments);
-        println!(
+        log::info!("  Total documents: {}", stats.total_doc_count);
+        log::info!("  Total segments: {}", stats.total_frozen_segments);
+        log::info!(
             "  Unpersisted segments: {}",
             stats.total_unpersisted_segments
         );
 
         if stats.total_unpersisted_segments == 0 && failed_partitions.is_empty() {
-            println!("\n  ✅ All data persisted successfully!");
+            log::info!("All data persisted successfully");
         } else {
-            println!("\n  ⚠️  Warning: Some data may not be persisted");
+            log::warn!("Some data may not be persisted");
         }
 
-        println!("\n[Engine] Stop completed. Engine is now inactive.\n");
+        log::info!("Engine stop completed");
 
         if !failed_partitions.is_empty() {
             return Err(crate::utils::error::CoreError::Internal(format!(
