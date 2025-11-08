@@ -610,25 +610,6 @@ impl Partition {
             self.id, unpersisted_count
         );
 
-        // 3. Persist all unpersisted segments
-        match self.persist_unpersisted_segments() {
-            Ok(persisted_ids) => {
-                println!(
-                    "[Partition {}] Successfully persisted {} segments: {:?}",
-                    self.id,
-                    persisted_ids.len(),
-                    persisted_ids
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "[Partition {}] Failed to persist some segments: {:?}",
-                    self.id, e
-                );
-            }
-        }
-
-        // 4. Final verification
         let remaining_unpersisted = self.get_unpersisted_segments();
         if remaining_unpersisted.is_empty() {
             println!("[Partition {}] ✅ All data persisted successfully", self.id);

@@ -24,24 +24,29 @@
 ## 📁 重要文档
 
 ### 快速阅读 (5分钟)
+
 - `PERFORMANCE_SUMMARY.md` - 性能总结
 - `OPTIMIZATION_COMPLETION_SUMMARY.md` - 工作总结
 
 ### 深度分析 (20分钟)
+
 - `PERFORMANCE_REPORT_2025_11_08.md` - 完整分析
 - `OPTIMIZATION_ANALYSIS_2025_11_09.md` - 技术深度
 
 ### 竞品对标 (10分钟)
+
 - `BENCHMARK_VS_TANTIVY.md` - Tantivy 对标
 
 ## 🔧 如何查看改进
 
 ### 方法 1: 运行基准测试
+
 ```bash
 cargo run --release --example benchmark_query
 ```
 
 结果示例:
+
 ```
 Q1 (COUNT):     3.82ms  (优化后)
 Q3 (过滤):      2.31ms  (优化后)
@@ -49,11 +54,13 @@ Q3 (过滤):      2.31ms  (优化后)
 ```
 
 ### 方法 2: 运行 Tantivy 对标
+
 ```bash
 cargo run --release --example benchmark_vs_tantivy
 ```
 
 结果示例:
+
 ```
 写入吞吐量: Calm 1.83M/s vs Tantivy 0.16M/s
 优势: 11.6x 快 ✅
@@ -62,16 +69,19 @@ cargo run --release --example benchmark_vs_tantivy
 ## 💡 核心改进
 
 ### 1. O(N) → O(1) I/O
+
 **问题**: 每个 doc_id 打开一次 Parquet 文件
 **解决**: 批量打开，一次读取所有数据
 **效果**: 6-8x 改进
 
 ### 2. 元数据快速查询
+
 **问题**: 不知道数据在哪个文件
 **解决**: 内存 BTree 快速定位
 **效果**: < 1µs 查询时间
 
 ### 3. 列式投影
+
 **问题**: 读取不需要的列
 **解决**: Parquet 列投影，只读需要的数据
 **效果**: 减少 I/O 数据量
@@ -79,6 +89,7 @@ cargo run --release --example benchmark_vs_tantivy
 ## ⚡ 性能数据
 
 ### 按查询类型改进
+
 ```
 COUNT(*)       │ 7.7x   ████████
 过滤 (单字段)  │ 12.9x  █████████████ ← 最佳
@@ -90,6 +101,7 @@ OR 条件        │ 11.0x  ███████████
 ```
 
 ### 磁盘占用
+
 ```
 100K 记录
 ─────────────────────────────
@@ -101,11 +113,13 @@ Tantivy:      21.29 MB (6% 开销)
 ## 📌 已知问题
 
 ### 🔴 P0 - 数据丢失
+
 - 现象: 写 100K，查到 97.7K
 - 丢失: 2,328 行
 - 优先级: **必须修复**
 
 ### 🟡 P1 - COUNT(*) 仍可优化
+
 - 当前: 3.82ms (已 7.7x 改进)
 - 目标: 0.5ms (需 COUNT(*) 快速路径)
 - 改进: 再快 7.6x
@@ -113,6 +127,7 @@ Tantivy:      21.29 MB (6% 开销)
 ## 🎓 技术亮点
 
 ### 使用的优化技术
+
 - ✅ I/O 批处理
 - ✅ 内存索引
 - ✅ 列式存储
@@ -120,6 +135,7 @@ Tantivy:      21.29 MB (6% 开销)
 - ✅ RoaringBitmap 快速位运算
 
 ### 实现文件
+
 ```
 src/segment/field_store/row_data.rs
   ↳ get_batch_key_for_doc() - 快速元数据查询
@@ -131,6 +147,7 @@ src/schema/compute/segment_scanner.rs
 ## 🏆 应用场景
 
 ### ✅ Calm 最适合
+
 - 实时日志索引
 - 时间序列存储 (TSDB)
 - 事件流处理
@@ -163,6 +180,7 @@ src/schema/compute/segment_scanner.rs
 ## 🔗 相关链接
 
 ### 文档导航
+
 ```
 📚 PERFORMANCE_REPORTS_INDEX.md
   ├─ 📊 PERFORMANCE_SUMMARY.md (5分钟读)
@@ -174,6 +192,7 @@ src/schema/compute/segment_scanner.rs
 ```
 
 ### 代码
+
 ```
 📁 examples/
   ├─ benchmark_query.rs (改进前后对比)
