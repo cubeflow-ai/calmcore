@@ -6,7 +6,10 @@ pub use field_store::{IndexReader, IndexWriter, RowDataStore};
 use crate::{
     partition::WriteInfo,
     schema::{field::FieldOption, Schema},
-    segment::field_store::{F64Field, I64Field, KeywordField, PkWriter, U32RecordBatchSerializer},
+    segment::field_store::{
+        BooleanField, F32Field, F64Field, I16Field, I32Field, I64Field, I8Field, KeywordField,
+        PkWriter, U16Field, U32Field, U32RecordBatchSerializer, U64Field, U8Field,
+    },
     utils::error::{CoreError, CoreResult},
 };
 use bloomfilter::Bloom;
@@ -59,13 +62,49 @@ impl Segment {
                     let keyword = KeywordField::new(field_opt);
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
+                FieldOption::I8 { .. } => {
+                    let field = I8Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I16 { .. } => {
+                    let field = I16Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I32 { .. } => {
+                    let field = I32Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
                 FieldOption::I64 { .. } => {
                     let num_i64 = I64Field::new(field_opt);
                     fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
                 }
+                FieldOption::U8 { .. } => {
+                    let field = U8Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U16 { .. } => {
+                    let field = U16Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U32 { .. } => {
+                    let field = U32Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U64 { .. } => {
+                    let field = U64Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::F32 { .. } => {
+                    let field = F32Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
                 FieldOption::F64 { .. } => {
                     let num_f64 = F64Field::new(field_opt);
                     fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
+                }
+                FieldOption::Boolean { .. } => {
+                    let field = BooleanField::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
             }
         }
@@ -465,13 +504,49 @@ impl Segment {
                     let keyword = KeywordField::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
+                FieldOption::I8 { .. } => {
+                    let field = I8Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I16 { .. } => {
+                    let field = I16Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I32 { .. } => {
+                    let field = I32Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
                 FieldOption::I64 { .. } => {
                     let num_i64 = I64Field::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
                 }
+                FieldOption::U8 { .. } => {
+                    let field = U8Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U16 { .. } => {
+                    let field = U16Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U32 { .. } => {
+                    let field = U32Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U64 { .. } => {
+                    let field = U64Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::F32 { .. } => {
+                    let field = F32Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
                 FieldOption::F64 { .. } => {
                     let num_f64 = F64Field::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
+                }
+                FieldOption::Boolean { .. } => {
+                    let field = BooleanField::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
             }
         }
@@ -811,13 +886,49 @@ impl Segment {
                     let keyword = KeywordField::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
                 }
+                FieldOption::I8 { .. } => {
+                    let field = I8Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I16 { .. } => {
+                    let field = I16Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I32 { .. } => {
+                    let field = I32Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
                 FieldOption::I64 { .. } => {
                     let num_i64 = I64Field::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
                 }
+                FieldOption::U8 { .. } => {
+                    let field = U8Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U16 { .. } => {
+                    let field = U16Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U32 { .. } => {
+                    let field = U32Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U64 { .. } => {
+                    let field = U64Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::F32 { .. } => {
+                    let field = F32Field::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
                 FieldOption::F64 { .. } => {
                     let num_f64 = F64Field::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
+                }
+                FieldOption::Boolean { .. } => {
+                    let field = BooleanField::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
             }
         }

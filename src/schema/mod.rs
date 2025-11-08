@@ -55,8 +55,17 @@ impl Schema {
                         (DataType::Utf8, true)
                     }
                 }
+                field::FieldOption::I8 { .. } => (DataType::Int8, true),
+                field::FieldOption::I16 { .. } => (DataType::Int16, true),
+                field::FieldOption::I32 { .. } => (DataType::Int32, true),
                 field::FieldOption::I64 { .. } => (DataType::Int64, true),
+                field::FieldOption::U8 { .. } => (DataType::UInt8, true),
+                field::FieldOption::U16 { .. } => (DataType::UInt16, true),
+                field::FieldOption::U32 { .. } => (DataType::UInt32, true),
+                field::FieldOption::U64 { .. } => (DataType::UInt64, true),
+                field::FieldOption::F32 { .. } => (DataType::Float32, true),
                 field::FieldOption::F64 { .. } => (DataType::Float64, true),
+                field::FieldOption::Boolean { .. } => (DataType::Boolean, true),
             };
 
             arrow_fields.push(Field::new(field.name(), data_type, nullable));
