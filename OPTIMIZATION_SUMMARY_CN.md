@@ -46,6 +46,7 @@ batches = parquet.read_multiple(all_batch_keys)  // 1 次 I/O
 ## 代码改动
 
 ### 新增方法
+
 ```rust
 // 在 RowDataStore 中添加
 pub fn get_batch_key_for_doc(&self, doc_id: u32) -> Option<u32>
@@ -55,7 +56,8 @@ pub fn get_batch_key_for_doc(&self, doc_id: u32) -> Option<u32>
 ```
 
 ### 修改位置
-- `src/segment/field_store/row_data.rs`: 
+
+- `src/segment/field_store/row_data.rs`:
   - 移除 DEBUG 输出 (6 处)
   - 新增元数据查找方法
 
@@ -84,6 +86,7 @@ pub fn get_batch_key_for_doc(&self, doc_id: u32) -> Option<u32>
 ## 文档位置
 
 详细分析文档：
+
 - `PERFORMANCE_OPTIMIZATION_2025_11_09.md` - 详细优化过程
 - `OPTIMIZATION_ANALYSIS_2025_11_09.md` - 技术深度分析
 - `OPTIMIZATION_RESULTS_2025_11_09.md` - 完整结果数据

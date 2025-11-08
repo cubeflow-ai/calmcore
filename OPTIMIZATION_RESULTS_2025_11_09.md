@@ -33,16 +33,19 @@ VS DataFusion 前3个: (0.33 + 0.8 + 0.37) avg = 0.5x (Calm 平均超过)
 ### 问题诊断过程
 
 **第一步**：识别瓶颈位置
+
 - 用户报告：34-123 倍性能差，尽管已用 Parquet 格式
 - 初步猜测：DEBUG 输出造成的 I/O 开销
 - 结果：移除 DEBUG 后性能无改进，说明问题不在输出
 
 **第二步**：代码深度分析
+
 - 定位关键函数：`segment_scanner.rs` 的 `execute()` 方法
 - 发现问题：每个 doc_id 都调用一次 `floor_with_projection()`
 - 影响范围：对 10,000 行数据，可能导致 1000+ 次文件 I/O
 
 **第三步**：根本原因
+
 ```
 for doc_id in doc_ids {  // 循环次数 = 结果集大小 (可达 100,000)
     floor_with_projection(&doc_id, projection)  // 每次都涉及:
@@ -140,6 +143,7 @@ for (batch_key, doc_ids_in_batch) in batch_groups {
 #### Q1: COUNT(*) - 优化前后对比
 
 **优化前（29.27ms）**：
+
 ```
 元数据查找:      1000 * 0.001ms = 1ms         (1000次 batch 查找)
 文件打开关闭:    100  * 0.5ms   = 50ms       (100 次，内存中缓存命中率 10%)
@@ -150,6 +154,7 @@ Parquet 读取:    100  * 1.5ms   = 150ms ← 主要开销
 ```
 
 **优化后（3.82ms）**：
+
 ```
 元数据查找:      100,000 * 0.00001ms = 1ms     (100,000次内存查找)
 文件打开关闭:    1 * 0.5ms            = 0.5ms
@@ -160,6 +165,7 @@ Parquet 读取:    1 * 3.5ms            = 3.5ms  (一次读所有batch)
 ```
 
 **核心改进**：从 100 次小 I/O 变成 1 次大 I/O
+
 - 减少文件打开次数：100 → 1 (**99%** 减少)
 - 减少 ProjectionMask 创建：100 → 1 (**99%** 减少)
 - 提高 Parquet 读取效率：单次批量读优于多次零散读
@@ -167,6 +173,7 @@ Parquet 读取:    1 * 3.5ms            = 3.5ms  (一次读所有batch)
 #### Q3: 简单过滤 - 优化前后对比
 
 **优化前（29.82ms）**：
+
 ```
 倒排索引查询: 2ms      (找到 ~20,000 匹配的 doc_id)
 rowdata 读取: 27ms     (逐个查找 batch)
@@ -178,6 +185,7 @@ rowdata 读取: 27ms     (逐个查找 batch)
 ```
 
 **优化后（2.31ms）**：
+
 ```
 倒排索引查询: 2ms      (找到 ~20,000 匹配的 doc_id)
 rowdata 读取: 0.31ms   (批量查找 batch)
@@ -223,6 +231,7 @@ let valid_count = matched_docs.len();  // RoaringBitmap len() 是 O(1)
 **倒排索引结果集优化**
 
 简单过滤仍然比 DataFusion 慢 2.73 倍，原因可能是：
+
 - 倒排索引返回的 bitmap 不够紧凑
 - 或者 Keyword 字段索引的构建不够优化
 
@@ -231,6 +240,7 @@ let valid_count = matched_docs.len();  // RoaringBitmap len() 是 O(1)
 **找回缺失的 2,328 行数据**
 
 目前 COUNT 返回 97,672 而非 100,000。需要检查：
+
 - Parquet 写入时的行数
 - 倒排索引的文档计数
 - 删除位图是否有问题
@@ -265,7 +275,7 @@ let valid_count = matched_docs.len();  // RoaringBitmap len() 是 O(1)
 
 ### 文件修改清单
 
-- ✅ `src/segment/field_store/row_data.rs`: 
+- ✅ `src/segment/field_store/row_data.rs`:
   - 移除 6 个 DEBUG println!
   - 新增 `get_batch_key_for_doc()` 方法
   

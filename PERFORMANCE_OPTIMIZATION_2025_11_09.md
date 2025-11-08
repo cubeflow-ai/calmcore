@@ -19,6 +19,7 @@ for doc_id in doc_ids {  // 循环 10,000 次!
 ```
 
 问题：
+
 1. **文件 open 开销**：`File::open()` 每次都被调用（即使 cache miss）
 2. **ProjectionMask 创建**：每次都重新创建 projection mask（即使是相同的列）
 3. **无效缓存**：由于查询来自倒排索引的**交集**（随机 doc_id），缓存命中率低 (<5%)
@@ -72,12 +73,14 @@ let source_batches = raw_data.get_batch_with_projection(&batch_keys, proj_to_use
 #### 原因分析
 
 **优化前的主要问题**：
+
 - Q1, Q3, Q5 都有数万行数据需要从 Parquet 读取
 - 每行都导致一次 `floor_with_projection()` 调用
 - 由于 doc_id 随机（来自倒排索引交集），缓存几乎无效
 - 结果：数百次文件打开/关闭、数百次 ProjectionMask 创建
 
 **优化后的行为**：
+
 - 所有 doc_id 先进行元数据查找（内存操作，极快）
 - 找到需要的 batch key 后，一次性批量读取
 - 对于 10,000 行数据在 10 个 batch 中，从 ~1000 次文件操作减少到 1 次
@@ -102,6 +105,7 @@ let source_batches = raw_data.get_batch_with_projection(&batch_keys, proj_to_use
 ⚠️ **仍需注意**：COUNT 结果为 97,672 而非 100,000，说明**仍有 2,328 行数据丢失**。
 
 可能的原因：
+
 - [ ] 持久化时数据丢失（需验证 rowdata.parquet 的行数）
 - [ ] 查询时过滤逻辑问题（需检查 process_batch_for_deleted）
 - [ ] 倒排索引与 rowdata 数据不一致（需校验）
@@ -124,6 +128,7 @@ let source_batches = raw_data.get_batch_with_projection(&batch_keys, proj_to_use
 ### 关键代码对比
 
 **优化前（低效）**：
+
 ```rust
 // 高开销的循环：每次 miss 都涉及文件 I/O
 for doc_id in doc_ids {
@@ -136,6 +141,7 @@ for doc_id in doc_ids {
 ```
 
 **优化后（高效）**：
+
 ```rust
 // 先进行快速元数据查找（内存，无 I/O）
 let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -162,22 +168,26 @@ let source_batches = raw_data.get_batch_with_projection(&batch_keys, proj_to_use
 | OR条件 | 2.74 ms | 0.76 ms | 3.6x |
 
 **结论**：
+
 - ✅ 复杂查询和精确查询已经**超过** DataFusion 性能
 - ⚠️ COUNT 和简单过滤仍需优化（可能需要 COUNT 特殊优化）
 
 ## 后续优化方向
 
 ### 1. COUNT(*) 特殊优化 (优先级: 🔴 **高**)
+
 - 当只有 COUNT 聚合时，可以跳过数据读取
 - 只需返回有效文档计数（可从 valid_docs bitmap 直接获得）
 - 预期改进：3.82ms → <0.5ms
 
 ### 2. 简单过滤优化 (优先级: 🟡 **中**)
+
 - 可能是倒排索引命中不够优化
 - 或者是数据不是最优分布
 - 需要进一步 profiling
 
 ### 3. 数据完整性 (优先级: 🔴 **高**)
+
 - 解决 2,328 行数据丢失问题
 - 需要：
   - 验证 rowdata.parquet 行数
@@ -187,6 +197,7 @@ let source_batches = raw_data.get_batch_with_projection(&batch_keys, proj_to_use
 ## 总结
 
 ✅ **主要成就**：
+
 - 识别并修复了关键性能瓶颈
 - COUNT/过滤查询性能提升 **7-11 倍**
 - 现在接近或超过 DataFusion 在某些查询上的性能
@@ -195,6 +206,7 @@ let source_batches = raw_data.get_batch_with_projection(&batch_keys, proj_to_use
 > 将逐个I/O操作转换为批量I/O操作，利用现代存储系统的顺序读取优势
 
 📊 **当前排名**：
+
 1. ⭐⭐⭐ 复杂 AND 查询 (1.94x 更快)
 2. ⭐⭐⭐ 精确查询 (1.25x 更快)
 3. ⭐⭐ 简单过滤 (3.9x 较慢，待优化)
