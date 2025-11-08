@@ -186,7 +186,7 @@ impl Engine {
 
         for partition in partitions.values() {
             stats.total_doc_count += partition.total_count();
-            stats.total_frozen_segments += partition.frozen_count();
+            stats.total_frozen_segments += partition.get_frozen_segments().len();
             stats.total_unpersisted_segments += partition.get_unpersisted_segments().len();
         }
 
@@ -213,21 +213,139 @@ impl Engine {
         println!("╚══════════════════════════════════════════════════════════════╝\n");
     }
 
-    /// 关闭 Engine
-    pub async fn shutdown(&self) {
-        println!("[Engine] Shutting down...");
+    /// 同步持久化指定的 Partition
+    ///
+    /// 这是一个同步操作：调用后，该 Partition 的所有 segment 保证已持久化完毕
+    ///
+    /// # 示例
+    /// ```rust
+    /// engine.persist_partition(1).await;
+    /// // 此时 partition 1 的所有数据已写入磁盘
+    /// ```
+    pub async fn persist_partition(&self, partition_id: u64) -> CoreResult<()> {
+        println!("[Engine] Persisting partition {}...", partition_id);
 
-        // 发送关闭信号
+        // 1. 获取 Partition
+        let partition = {
+            let partitions = self.partitions.read().await;
+            partitions.get(&partition_id).cloned().ok_or_else(|| {
+                crate::utils::error::CoreError::Internal(format!(
+                    "Partition {} not found",
+                    partition_id
+                ))
+            })?
+        };
+
+        // 2. 在阻塞线程池中同步执行持久化（避免阻塞异步运行时）
+        tokio::task::spawn_blocking(move || {
+            // 使用 Partition 的 persist_all 方法（内部会 flush + persist）
+            partition.persist_all()
+        })
+        .await
+        .map_err(|e| {
+            crate::utils::error::CoreError::Internal(format!("Persist task failed: {}", e))
+        })?
+    }
+
+    /// 关闭 Engine（优雅停机）
+    ///
+    /// **重要**: 调用后 Engine 停止所有操作，无法再使用
+    ///
+    /// 执行步骤：
+    /// 1. 停止后台持久化任务
+    /// 2. 扫描所有 Partition 并全部持久化
+    /// 3. 等待所有操作完成
+    ///
+    /// # 示例
+    /// ```rust
+    /// engine.stop().await;
+    /// // 此时所有数据已安全写入磁盘，Engine 不可再用
+    /// ```
+    pub async fn stop(&self) -> CoreResult<()> {
+        // 1. 停止后台持久化任务
+        println!("[Engine] Stopping background persist task...");
         let _ = self.persist_tx.send(PersistRequest::Shutdown);
 
-        // 等待后台任务完成
-        let mut handle_guard = self.persist_task_handle.lock().await;
-        if let Some(handle) = handle_guard.take() {
-            drop(handle_guard); // 释放锁
-            let _ = handle.await;
+        {
+            let mut handle_opt = self.persist_task_handle.lock().await;
+            if let Some(handle) = handle_opt.take() {
+                let _ = handle.await;
+            }
+        }
+        println!("[Engine] ✅ Background task stopped\n");
+
+        // 2. 获取所有 Partition ID
+        let partition_ids: Vec<u64> = {
+            let partitions = self.partitions.read().await;
+            partitions.keys().copied().collect()
+        };
+
+        if partition_ids.is_empty() {
+            println!("[Engine] No partitions to persist");
+            println!("\n[Engine] ✅ Stop completed\n");
+            return Ok(());
         }
 
-        println!("[Engine] Shutdown complete");
+        println!(
+            "[Engine] Persisting {} partitions...\n",
+            partition_ids.len()
+        );
+
+        // 3. 同步持久化所有 Partition（串行执行，确保稳定）
+        let mut success_count = 0;
+        let mut failed_partitions = Vec::new();
+
+        for partition_id in partition_ids {
+            match self.persist_partition(partition_id).await {
+                Ok(_) => success_count += 1,
+                Err(e) => {
+                    eprintln!(
+                        "[Engine] ❌ Partition {} persist failed: {:?}",
+                        partition_id, e
+                    );
+                    failed_partitions.push(partition_id);
+                }
+            }
+        }
+
+        // 4. 打印最终统计
+        let stats = self.stats().await;
+
+        println!("\n╔════════════════════════════════════════════════════╗");
+        println!("║              Engine Stop Summary                   ║");
+        println!("╚════════════════════════════════════════════════════╝");
+        println!("  Partitions persisted: {}", success_count);
+        if !failed_partitions.is_empty() {
+            println!("  ❌ Failed partitions: {:?}", failed_partitions);
+        }
+        println!("  Total documents: {}", stats.total_doc_count);
+        println!("  Total segments: {}", stats.total_frozen_segments);
+        println!(
+            "  Unpersisted segments: {}",
+            stats.total_unpersisted_segments
+        );
+
+        if stats.total_unpersisted_segments == 0 && failed_partitions.is_empty() {
+            println!("\n  ✅ All data persisted successfully!");
+        } else {
+            println!("\n  ⚠️  Warning: Some data may not be persisted");
+        }
+
+        println!("\n[Engine] Stop completed. Engine is now inactive.\n");
+
+        if !failed_partitions.is_empty() {
+            return Err(crate::utils::error::CoreError::Internal(format!(
+                "Failed to persist {} partitions",
+                failed_partitions.len()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// 关闭 Engine（向后兼容的别名）
+    pub async fn shutdown(&self) {
+        let _ = self.stop().await;
     }
 
     /// 后台持久化任务
@@ -406,99 +524,6 @@ impl Engine {
             self.handle_partition_persist(partition_id, active_tasks)
                 .await;
         }
-    }
-
-    /// 优雅停止 Engine 并确保所有数据持久化
-    ///
-    /// 执行步骤：
-    /// 1. 停止持久化后台任务
-    /// 2. 对每个 Partition 调用 stop() 确保数据持久化
-    /// 3. 等待所有持久化操作完成
-    pub async fn stop(&self) {
-        println!("\n╔════════════════════════════════════════════════════╗");
-        println!("║           Engine Stopping - Saving Data           ║");
-        println!("╚════════════════════════════════════════════════════╝");
-
-        // 1. 发送关闭信号给持久化任务
-        let _ = self.persist_tx.send(PersistRequest::Shutdown);
-
-        // 2. 等待持久化任务完成
-        {
-            let mut handle_opt = self.persist_task_handle.lock().await;
-            if let Some(handle) = handle_opt.take() {
-                println!("[Engine] Waiting for persist task to shutdown...");
-                let _ = handle.await;
-                println!("[Engine] Persist task shutdown completed");
-            }
-        }
-
-        // 3. 获取所有 Partition 并调用它们的 stop
-        let partition_list: Vec<(u64, Arc<Partition>)> = {
-            let parts = self.partitions.read().await;
-            parts.iter().map(|(id, p)| (*id, p.clone())).collect()
-        };
-
-        let partition_count = partition_list.len();
-        println!("[Engine] Stopping {} partitions...", partition_count);
-
-        // 4. 并发停止所有 Partition（使用 blocking 线程池）
-        let handles: Vec<_> = partition_list
-            .into_iter()
-            .map(|(id, partition)| {
-                tokio::task::spawn_blocking(move || {
-                    partition.stop();
-                    id
-                })
-            })
-            .collect();
-
-        // 5. 等待所有 Partition 停止完成
-        let mut success_count = 0;
-        let mut failed_count = 0;
-
-        for handle in handles {
-            match handle.await {
-                Ok(partition_id) => {
-                    println!("[Engine] Partition {} stopped successfully", partition_id);
-                    success_count += 1;
-                }
-                Err(e) => {
-                    eprintln!("[Engine] Partition stop failed: {:?}", e);
-                    failed_count += 1;
-                }
-            }
-        }
-
-        // 6. 统计信息
-        let stats = self.stats().await;
-
-        println!("\n╔════════════════════════════════════════════════════╗");
-        println!("║              Engine Stop Summary                   ║");
-        println!("╚════════════════════════════════════════════════════╝");
-        println!(
-            "  Partitions stopped: {}/{}",
-            success_count, partition_count
-        );
-        if failed_count > 0 {
-            println!("  ⚠️  Failed: {}", failed_count);
-        }
-        println!("  Total documents: {}", stats.total_doc_count);
-        println!("  Total frozen segments: {}", stats.total_frozen_segments);
-        println!(
-            "  Unpersisted segments: {}",
-            stats.total_unpersisted_segments
-        );
-
-        if stats.total_unpersisted_segments == 0 {
-            println!("\n  ✅ All data persisted successfully!");
-        } else {
-            println!(
-                "\n  ⚠️  Warning: {} segments not persisted",
-                stats.total_unpersisted_segments
-            );
-        }
-
-        println!("\n[Engine] Stop completed.");
     }
 }
 

@@ -531,13 +531,7 @@ impl Partition {
         count + self.current_segment.read().unwrap().total_count()
     }
 
-    pub fn frozen_count(&self) -> usize {
-        self.frozen_segments.read().unwrap().len()
-    }
-
-    pub fn persisted_count(&self) -> usize {
-        // 注意：现在无法区分是否持久化，返回所有 frozen segments 数量
-        // 如果需要区分，可以在 Segment 内部添加 is_persisted 标记
+    pub fn segment_count(&self) -> usize {
         self.frozen_segments.read().unwrap().len()
     }
 
@@ -558,75 +552,52 @@ impl Partition {
         self.frozen_segments.read().unwrap()
     }
 
-    /// 停止 Partition 并确保所有数据持久化
+    /// 持久化 Partition 的所有数据（同步操作）
     ///
     /// 执行步骤：
-    /// 1. Flush 当前活跃的 segment 到 frozen list
+    /// 1. Flush 当前活跃 segment
     /// 2. 持久化所有未持久化的 segments
-    /// 3. 等待所有持久化操作完成
-    pub fn stop(&self) {
-        println!(
-            "\n[Partition {}] Stopping and persisting all data...",
-            self.id
-        );
+    ///
+    /// 调用后保证：所有数据已写入磁盘
+    pub fn persist_all(&self) -> CoreResult<()> {
+        println!("[Partition {}] Starting persist_all...", self.id);
 
-        // 1. Flush current active segment (force flush even if not full)
+        // 1. Flush 当前活跃 segment
         let current_count = self.current_segment.read().unwrap().doc_count();
         if current_count > 0 {
             println!(
-                "[Partition {}] Flushing current segment ({} records)...",
+                "[Partition {}] Flushing current segment ({} records)",
                 self.id, current_count
             );
-
-            if let Err(e) = self.flush(false) {
-                eprintln!(
-                    "[Partition {}] Failed to flush current segment: {:?}",
-                    self.id, e
-                );
-            } else {
-                println!(
-                    "[Partition {}] Current segment flushed successfully",
-                    self.id
-                );
-            }
-        } else {
-            println!(
-                "[Partition {}] Current segment is empty, no need to flush",
-                self.id
-            );
+            self.flush(false)?;
         }
 
-        // 2. Get all unpersisted segments
+        // 2. 持久化所有未持久化的 segments
         let unpersisted = self.get_unpersisted_segments();
-        let unpersisted_count = unpersisted.len();
-
-        if unpersisted_count == 0 {
+        if unpersisted.is_empty() {
             println!("[Partition {}] All segments already persisted", self.id);
-            return;
+            return Ok(());
         }
 
         println!(
-            "[Partition {}] Found {} unpersisted segments, starting persist...",
-            self.id, unpersisted_count
-        );
-
-        let remaining_unpersisted = self.get_unpersisted_segments();
-        if remaining_unpersisted.is_empty() {
-            println!("[Partition {}] ✅ All data persisted successfully", self.id);
-        } else {
-            eprintln!(
-                "[Partition {}] ⚠️  Warning: {} segments still not persisted",
-                self.id,
-                remaining_unpersisted.len()
-            );
-        }
-
-        println!(
-            "[Partition {}] Stop completed. Total segments: {} (frozen: {}, persisted: {})",
+            "[Partition {}] Persisting {} segments...",
             self.id,
-            self.frozen_count() + 1, // +1 for current segment
-            self.frozen_count(),
-            self.persisted_count()
+            unpersisted.len()
         );
+
+        self.persist_unpersisted_segments()?;
+
+        // 3. 验证
+        let remaining = self.get_unpersisted_segments();
+        if remaining.is_empty() {
+            println!("[Partition {}] ✅ All data persisted", self.id);
+            Ok(())
+        } else {
+            Err(CoreError::Internal(format!(
+                "Partition {} still has {} unpersisted segments",
+                self.id,
+                remaining.len()
+            )))
+        }
     }
 }
