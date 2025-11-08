@@ -285,8 +285,20 @@ impl Segment {
         let (_start_id, batch) = row_data.floor(&doc_id)?;
 
         // Verify this batch contains our doc_id and extract the row
-        let internal_ids =
-            arrow::array::cast::as_primitive_array::<arrow::datatypes::UInt32Type>(batch.column(0));
+        let internal_ids_col = batch.column(0);
+        let internal_ids = match internal_ids_col
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
+        {
+            Some(arr) => arr,
+            None => {
+                eprintln!(
+                    "Warning: Internal ID column is not UInt32 array, got: {:?}",
+                    internal_ids_col.data_type()
+                );
+                return None;
+            }
+        };
 
         for (row_idx, id) in internal_ids.values().iter().enumerate() {
             if *id == doc_id {
@@ -377,8 +389,19 @@ impl Segment {
 
         // Get internal_id column (first column)
         let internal_id_col = batch.column(0);
-        let internal_ids =
-            arrow::array::cast::as_primitive_array::<arrow::datatypes::UInt32Type>(internal_id_col);
+        let internal_ids = match internal_id_col
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
+        {
+            Some(arr) => arr,
+            None => {
+                eprintln!(
+                    "Warning: Internal ID column is not UInt32 array, got: {:?}",
+                    internal_id_col.data_type()
+                );
+                return batch.clone();
+            }
+        };
 
         // Build boolean mask: true = keep, false = filter out
         let mask: Vec<bool> = internal_ids
@@ -1054,13 +1077,16 @@ impl Segment {
             }
         };
 
-        // Step 1: Collect all batches and process deleted documents
-        let mut all_batches: Vec<RecordBatch> = Vec::new();
+        // Step 1: Collect all batches and their starting internal_ids
+        let mut all_batches: Vec<(u32, RecordBatch)> = Vec::new();
+        let mut total_rows: usize = 0;
+
         for item in memory_tree.iter() {
-            let (_key, batch, _ttl) = &*item;
-            // Process batch to set deleted rows to NULL (except internal_id)
-            let processed_batch = self.process_batch_for_deleted(&batch, deleted);
-            all_batches.push(processed_batch);
+            let (key, batch, _ttl) = &*item;
+            // Process batch to set deleted rows to NULL (use key as offset/internal_id)
+            let processed_batch = self.process_batch_for_deleted(&batch, deleted, *key);
+            total_rows += processed_batch.num_rows();
+            all_batches.push((*key, processed_batch));
         }
 
         // If no data, return early
@@ -1069,9 +1095,26 @@ impl Segment {
             return Ok(());
         }
 
+        // Build a flat array of (internal_id, row_index) for all rows
+        let mut row_internal_ids: Vec<u32> = Vec::with_capacity(total_rows);
+        let mut merged_batch_data: Vec<datafusion::arrow::array::RecordBatch> = Vec::new();
+
+        for (start_id, batch) in &all_batches {
+            merged_batch_data.push(batch.clone());
+            let num_rows = batch.num_rows() as u32;
+            for i in 0..num_rows {
+                row_internal_ids.push(start_id + i);
+            }
+        }
+
         // Merge all batches into one large batch
-        let schema = all_batches[0].schema();
-        let merged_batch = concat_batches(&schema, &all_batches)
+        if merged_batch_data.is_empty() {
+            println!("    No data to persist");
+            return Ok(());
+        }
+
+        let schema = merged_batch_data[0].schema();
+        let merged_batch = concat_batches(&schema, &merged_batch_data)
             .map_err(|e| CoreError::Internal(format!("Failed to merge batches: {}", e)))?;
 
         // Report deleted documents stats
@@ -1087,18 +1130,13 @@ impl Segment {
         let total_docs = merged_batch.num_rows();
         let mut reorganized_batches: Vec<(u32, RecordBatch)> = Vec::new();
 
-        // Get internal IDs array
-        let internal_ids = arrow::array::cast::as_primitive_array::<arrow::datatypes::UInt32Type>(
-            merged_batch.column(0),
-        );
-
         let mut row_group_keys: Vec<u32> = Vec::new();
 
         for chunk_start in (0..total_docs).step_by(BATCH_SIZE) {
             let chunk_end = (chunk_start + BATCH_SIZE).min(total_docs);
 
-            // Get the first doc_id as the batch key
-            let batch_key = internal_ids.value(chunk_start);
+            // Get the first internal_id as the batch key
+            let batch_key = row_internal_ids[chunk_start];
             row_group_keys.push(batch_key);
 
             // Slice the batch for this chunk
@@ -1211,29 +1249,29 @@ impl Segment {
 
     /// Process RecordBatch to handle deleted documents
     /// Sets deleted document rows' columns to None to save disk space
+    /// start_id: the internal_id of the first row in this batch
     #[allow(dead_code)]
     fn process_batch_for_deleted(
         &self,
         batch: &RecordBatch,
         deleted: &RoaringBitmap,
+        start_id: u32,
     ) -> RecordBatch {
-        use datafusion::arrow::array::{cast, make_array, ArrayData, ArrayRef};
+        use datafusion::arrow::array::{make_array, ArrayData, ArrayRef};
         use datafusion::arrow::buffer::NullBuffer;
-        use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema, UInt32Type};
+        use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 
         // If no deletions, return batch as-is
         if deleted.is_empty() {
             return batch.clone();
         }
 
-        // Get the internal_id column (first column)
-        let internal_id_col = batch.column(0);
-        let internal_ids = cast::as_primitive_array::<UInt32Type>(internal_id_col);
+        let num_rows = batch.num_rows() as u32;
 
         // Check which rows in this batch are deleted
         let mut has_deleted = false;
-        for id in internal_ids.values() {
-            if deleted.contains(*id) {
+        for row_idx in 0..num_rows {
+            if deleted.contains(start_id + row_idx) {
                 has_deleted = true;
                 break;
             }
@@ -1260,23 +1298,17 @@ impl Segment {
         let new_schema = Arc::new(ArrowSchema::new(new_fields));
 
         // Create new columns with deleted rows set to NULL
-        let num_rows = batch.num_rows();
+        let num_rows_usize = batch.num_rows();
         let new_columns: Vec<ArrayRef> = batch
             .columns()
             .iter()
-            .enumerate()
-            .map(|(col_idx, col)| {
+            .map(|col| {
                 // Build null buffer: true = valid, false = null
-                let mut null_builder = vec![true; num_rows];
-                for (row_idx, id) in internal_ids.values().iter().enumerate() {
-                    if deleted.contains(*id) {
-                        null_builder[row_idx] = false;
+                let mut null_builder = vec![true; num_rows_usize];
+                for row_idx in 0..num_rows {
+                    if deleted.contains(start_id + row_idx) {
+                        null_builder[row_idx as usize] = false;
                     }
-                }
-
-                // If this is the internal_id column, keep it as-is (don't null it out)
-                if col_idx == 0 {
-                    return col.clone();
                 }
 
                 // Create null buffer
@@ -1299,7 +1331,6 @@ impl Segment {
         RecordBatch::try_new(new_schema, new_columns)
             .expect("Failed to create batch with deleted rows")
     }
-
     /// Merge multiple RecordBatches into one, handling deleted documents
     /// Deleted documents have all non-nullable columns converted to nullable and set to None  
     #[allow(dead_code)]

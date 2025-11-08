@@ -387,42 +387,21 @@ impl ExecutionPlan for SegmentExec {
         let doc_ids: Vec<u32> = self.matched_docs.iter().collect();
         let projection = self.projection.clone();
 
-        // 性能优化：按batch分组doc_ids，避免重复读取同一个batch
-        // 关键优化：doc_ids通常是密集的，所以使用启发式方法减少floor()调用
+        // 性能优化：直接使用 floor 查找每个 doc_id 对应的 batch
+        // 关键设计：避免预先扫描所有 batch（这会导致额外的 I/O）
+        // 而是在批量读取时一次性完成所有查找
         let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut batch_keys_set = std::collections::HashSet::new();
 
-        if !doc_ids.is_empty() {
-            let mut current_batch_start: Option<u32> = None;
-            let mut current_batch_end: Option<u32> = None;
-
-            for doc_id in doc_ids {
-                // 检查当前doc_id是否还在已知的batch范围内
-                let in_current_batch = match (current_batch_start, current_batch_end) {
-                    (Some(start), Some(end)) => doc_id >= start && doc_id < end,
-                    _ => false,
-                };
-
-                if !in_current_batch {
-                    // 需要查找新的batch
-                    // 性能优化：只读取第一列 (_internal_id) 来确定范围，避免加载全部列
-                    // 这样在Parquet格式下可以大幅减少I/O
-                    let minimal_projection = Some([0].as_slice()); // 只读取 _internal_id 列
-                    if let Some((batch_start_id, batch)) =
-                        raw_data.floor_with_projection(&doc_id, minimal_projection)
-                    {
-                        current_batch_start = Some(batch_start_id);
-                        current_batch_end = Some(batch_start_id + batch.num_rows() as u32);
-                    } else {
-                        continue; // 找不到batch，跳过这个doc_id
-                    }
-                }
-
-                if let Some(batch_start) = current_batch_start {
-                    batch_groups
-                        .entry(batch_start)
-                        .or_insert_with(Vec::new)
-                        .push(doc_id);
-                }
+        for doc_id in &doc_ids {
+            // 使用 RowDataStore 的 floor() 功能找到 doc_id 所属的 batch
+            // floor() 只需要检查元数据（内存中的 key_to_rowgroup），不涉及 I/O
+            if let Some(batch_start_id) = raw_data.get_batch_key_for_doc(*doc_id) {
+                batch_groups
+                    .entry(batch_start_id)
+                    .or_insert_with(Vec::new)
+                    .push(*doc_id);
+                batch_keys_set.insert(batch_start_id);
             }
         }
 
@@ -431,12 +410,13 @@ impl ExecutionPlan for SegmentExec {
 
         // 关键优化：批量读取所有RowGroups，而不是逐个读取
         // 这将I/O次数从N次减少到1次，带来巨大性能提升
-        let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
+        let batch_keys: Vec<u32> = batch_keys_set.into_iter().collect();
 
         // 直接使用projection,不需要特殊处理
         let proj_to_use = projection.as_ref().map(|p| p.as_slice());
 
-        // 批量读取所有batches
+        // 批量读取所有batches - 这是最核心的优化
+        // Parquet 会在一次 I/O 中读取所有需要的 RowGroup，而不是多次打开文件
         let source_batches = raw_data.get_batch_with_projection(&batch_keys, proj_to_use);
 
         // 3. 对每个batch，提取需要的行
