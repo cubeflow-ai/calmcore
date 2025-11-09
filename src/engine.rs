@@ -7,6 +7,7 @@ use itertools::Itertools;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 
+use crate::catalog::{Catalog, PartitionStrategy, TableMeta};
 use crate::partition::Partition;
 use crate::schema::Schema;
 use crate::utils::error::CoreResult;
@@ -65,6 +66,9 @@ pub struct EngineStats {
 pub struct Engine {
     config: EngineConfig,
 
+    /// Catalog - 表元数据管理
+    catalog: Arc<Catalog>,
+
     /// 所有 Partitions（partition_id -> Partition）
     partitions: Arc<RwLock<HashMap<u64, Arc<Partition>>>>,
 
@@ -83,16 +87,20 @@ impl Engine {
     ///
     /// # 示例
     /// ```rust
-    /// let engine = Engine::new(EngineConfig::default());
+    /// let engine = Engine::new(EngineConfig::default()).unwrap();
     /// ```
-    pub fn new(config: EngineConfig) -> Arc<Self> {
+    pub fn new(config: EngineConfig) -> CoreResult<Arc<Self>> {
         let (persist_tx, persist_rx) = mpsc::unbounded_channel();
         let (partition_notify_tx, partition_notify_rx) = mpsc::unbounded_channel();
         let partitions = Arc::new(RwLock::new(HashMap::new()));
         let persist_task_handle = Arc::new(tokio::sync::Mutex::new(None));
 
+        // 创建 Catalog
+        let catalog = Arc::new(Catalog::new(config.data_dir.clone())?);
+
         let engine = Arc::new(Self {
             config,
+            catalog,
             partitions,
             persist_tx,
             partition_notify_tx,
@@ -112,10 +120,175 @@ impl Engine {
             *handle_clone.lock().await = Some(handle);
         });
 
-        engine
+        Ok(engine)
     }
 
-    /// 创建新的 Partition
+    /// 创建新表
+    ///
+    /// # 参数
+    /// - `table_name`: 表名
+    /// - `schema`: 表的 Schema
+    /// - `partition_strategy`: 分区策略
+    /// - `num_partitions`: 分区数量
+    ///
+    /// # 示例
+    /// ```rust
+    /// use calm::catalog::PartitionStrategy;
+    ///
+    /// engine.create_table(
+    ///     "my_table",
+    ///     schema,
+    ///     PartitionStrategy::Hash {
+    ///         field: "id".to_string(),
+    ///         num_partitions: 4,
+    ///     },
+    ///     4,
+    /// ).await?;
+    /// ```
+    pub async fn create_table(
+        &self,
+        table_name: &str,
+        schema: Schema,
+        partition_strategy: PartitionStrategy,
+        num_partitions: usize,
+    ) -> CoreResult<()> {
+        // 创建 TableMeta
+        let meta = TableMeta::new(
+            table_name.to_string(),
+            schema.clone(),
+            partition_strategy,
+            num_partitions,
+            self.config.data_dir.clone(),
+        );
+
+        // 在 Catalog 中创建表（会创建目录结构和元数据）
+        self.catalog.create_table(meta)?;
+
+        // 加载所有 partition 到内存
+        for i in 0..num_partitions {
+            let partition_dir = self
+                .config
+                .data_dir
+                .join("tables")
+                .join(table_name)
+                .join("partitions")
+                .join(format!("partition-{}", i))
+                .join("segments");
+
+            let partition = Partition::new(
+                i as u64,
+                partition_dir,
+                schema.clone(),
+                self.partition_notify_tx.clone(),
+            );
+
+            let partition = Arc::new(partition);
+            self.add_partition(partition).await;
+        }
+
+        println!(
+            "✅ Table '{}' created with {} partitions",
+            table_name, num_partitions
+        );
+        Ok(())
+    }
+
+    /// 获取表的元数据
+    pub fn get_table_meta(&self, table_name: &str) -> CoreResult<Arc<TableMeta>> {
+        self.catalog.get_table(table_name)
+    }
+
+    /// 列出所有表
+    pub fn list_tables(&self) -> Vec<String> {
+        self.catalog.list_tables()
+    }
+
+    /// 删除表
+    pub async fn drop_table(&self, table_name: &str) -> CoreResult<()> {
+        let meta = self.catalog.get_table(table_name)?;
+
+        // 移除所有相关的 partition
+        for i in 0..meta.parallel_workers {
+            self.remove_partition(i as u64).await;
+        }
+
+        // 从 catalog 中删除
+        self.catalog.drop_table(table_name)?;
+        Ok(())
+    }
+
+    /// 根据分区策略路由到对应的 partition_id
+    ///
+    /// # 参数
+    /// - `table_name`: 表名
+    /// - `partition_value`: 分区字段的值
+    ///
+    /// # 返回
+    /// 返回应该使用的 partition_id
+    pub fn route_partition(&self, table_name: &str, partition_value: &str) -> CoreResult<u64> {
+        let meta = self.catalog.get_table(table_name)?;
+
+        let partition_id = match &meta.partition_strategy {
+            PartitionStrategy::Hash { num_partitions, .. } => {
+                // Hash 分区：对值进行 hash 然后取模
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+
+                let mut hasher = DefaultHasher::new();
+                partition_value.hash(&mut hasher);
+                let hash = hasher.finish();
+
+                (hash % (*num_partitions as u64)) as u64
+            }
+
+            PartitionStrategy::Range { ranges, .. } => {
+                // Range 分区：找到值所在的范围
+                let value_enum = Self::parse_partition_value(partition_value);
+
+                for range in ranges.iter() {
+                    if value_enum >= range.start && value_enum < range.end {
+                        return Ok(range.partition_id as u64);
+                    }
+                }
+                // 如果没找到匹配的范围，返回最后一个 partition
+                ranges.last().map(|r| r.partition_id as u64).unwrap_or(0)
+            }
+
+            PartitionStrategy::List { values, .. } => {
+                // List 分区：在预定义的值到 partition 的映射中查找
+                let partition_id = values.get(partition_value).copied().unwrap_or(0); // 如果没找到，返回 partition 0
+
+                partition_id as u64
+            }
+
+            PartitionStrategy::None => {
+                // 无分区策略，所有数据都在 partition 0
+                0
+            }
+        };
+
+        Ok(partition_id)
+    }
+
+    /// 辅助方法：将字符串值解析为 PartitionValue
+    fn parse_partition_value(value: &str) -> crate::catalog::PartitionValue {
+        use crate::catalog::PartitionValue;
+
+        // 尝试解析为整数
+        if let Ok(val) = value.parse::<i64>() {
+            return PartitionValue::Int64(val);
+        }
+
+        // 尝试解析为无符号整数
+        if let Ok(val) = value.parse::<u64>() {
+            return PartitionValue::UInt64(val);
+        }
+
+        // 默认作为字符串
+        PartitionValue::String(value.to_string())
+    }
+
+    /// 创建新的 Partition（低级 API，通常不需要直接调用）
     pub async fn create_partition(&self, id: u64, schema: Schema) -> Arc<Partition> {
         let partition_dir = self.config.data_dir.join(format!("partition-{}", id));
         let partition = Partition::new(id, partition_dir, schema, self.partition_notify_tx.clone());

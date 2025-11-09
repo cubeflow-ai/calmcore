@@ -96,7 +96,6 @@ pub mod u16_coder {
 }
 
 pub mod u32_coder {
-    use super::types::*;
     use crate::persist::zigzag::{self, BufferRead};
     use std::io::Write;
 

@@ -15,8 +15,7 @@ use crate::{
 use bloomfilter::Bloom;
 use datafusion::arrow::{
     self as arrow,
-    array::{ArrayRef, RecordBatch, UInt32Array},
-    datatypes::{DataType, Field, SchemaRef},
+    array::{ArrayRef, RecordBatch},
 };
 use itertools::Itertools;
 use roaring::RoaringBitmap;
@@ -32,6 +31,7 @@ use std::{
 
 /// 控制非主键字段的索引写入模式
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub enum FieldIndexMode {
     Sync,
     Async,
@@ -136,6 +136,175 @@ impl Segment {
             row_data: RwLock::new(RowDataStore::new_memory(32)),
             base_path: None,
         }
+    }
+
+    /// Create a segment from an external Parquet file
+    ///
+    /// This method creates a segment that references an external Parquet file
+    /// without copying the data. It builds indexes for the data in memory while
+    /// the actual row data remains in the Parquet file.
+    ///
+    /// # Arguments
+    /// * `start` - Starting document ID for this segment
+    /// * `end` - Ending document ID for this segment (inclusive)
+    /// * `parquet_path` - Path to the Parquet file
+    /// * `data` - RecordBatch containing the data (used to build indexes)
+    /// * `schema` - Schema for the segment
+    ///
+    /// # Returns
+    /// A new Segment that references the Parquet file
+    pub fn from_parquet(
+        start: u64,
+        end: u64,
+        parquet_path: &str,
+        data: &RecordBatch,
+        schema: Arc<Schema>,
+    ) -> CoreResult<Self> {
+        let num_rows = data.num_rows() as u32;
+
+        if num_rows == 0 {
+            return Err(CoreError::InvalidParam(
+                "Cannot create segment from empty data".to_string(),
+            ));
+        }
+
+        println!("  🔧 Creating segment from Parquet with {} rows", num_rows);
+
+        // 1. Create empty field indexes
+        let mut fields: Vec<Box<dyn IndexWriter>> = Vec::new();
+
+        for field_opt in &schema.fields {
+            match field_opt {
+                FieldOption::Keyword { .. } => {
+                    let keyword = KeywordField::new(field_opt);
+                    fields.push(Box::new(keyword) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I8 { .. } => {
+                    let field = I8Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I16 { .. } => {
+                    let field = I16Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I32 { .. } => {
+                    let field = I32Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::I64 { .. } => {
+                    let num_i64 = I64Field::new(field_opt);
+                    fields.push(Box::new(num_i64) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U8 { .. } => {
+                    let field = U8Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U16 { .. } => {
+                    let field = U16Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U32 { .. } => {
+                    let field = U32Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::U64 { .. } => {
+                    let field = U64Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::F32 { .. } => {
+                    let field = F32Field::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::F64 { .. } => {
+                    let num_f64 = F64Field::new(field_opt);
+                    fields.push(Box::new(num_f64) as Box<dyn IndexWriter>);
+                }
+                FieldOption::Boolean { .. } => {
+                    let field = BooleanField::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+            }
+        }
+
+        // 2. Build field index
+        let field_index: HashMap<String, usize> = schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name().to_string(), i))
+            .collect();
+
+        // 3. Create BloomFilter and build indexes
+        let expected_items = num_rows as usize;
+        let mut bloom = Bloom::new_for_fp_rate(expected_items, 0.01)
+            .map_err(|e| CoreError::Internal(format!("Failed to create bloom filter: {}", e)))?;
+
+        // 4. Build indexes for all fields
+        for field in fields.iter() {
+            if let Err(e) = field.write(data, 0) {
+                println!(
+                    "  ⚠️  Warning: Failed to build index for field {}: {:?}",
+                    field.name(),
+                    e
+                );
+            } else {
+                println!("    ✓ Built index for field: {}", field.name());
+            }
+        }
+
+        // 5. Build primary key bloom filter if needed
+        if let Some(pk_name) = &schema.primary_key {
+            if let Some(&pk_idx) = field_index.get(pk_name) {
+                use datafusion::arrow::array::Array;
+                if let Some(pk_column) = data
+                    .column(pk_idx)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                {
+                    for i in 0..pk_column.len() {
+                        if let Some(pk_value) = pk_column
+                            .value(i)
+                            .as_bytes()
+                            .get(0..std::cmp::min(pk_column.value(i).len(), 32))
+                        {
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            pk_value.hash(&mut hasher);
+                            let hash = hasher.finish() as u32;
+                            bloom.set(&hash);
+                        }
+                    }
+                    println!("    ✓ Built bloom filter for primary key: {}", pk_name);
+                }
+            }
+        }
+
+        // 6. Create RowDataStore that references the Parquet file
+        let row_data = RowDataStore::new_parquet(parquet_path)?;
+
+        // Calculate doc_id_gen and max_doc_id
+        let max_doc_id_relative = (end - start) as u32;
+        let doc_id_gen = max_doc_id_relative + 1;
+
+        println!(
+            "  ✓ Segment created: doc_id_gen={}, max_doc_id={}",
+            doc_id_gen, max_doc_id_relative
+        );
+
+        Ok(Self {
+            start,
+            doc_id_gen: AtomicU32::new(doc_id_gen),
+            max_doc_id: AtomicU32::new(max_doc_id_relative),
+            persisted: AtomicBool::new(true), // 引用外部文件,视为已持久化
+            created_at: Instant::now(),
+            pk_bloomfilter: RwLock::new(bloom),
+            deleted: RwLock::default(),
+            fields: RwLock::new(fields),
+            field_index,
+            schema,
+            row_data: RwLock::new(row_data),
+            base_path: Some(parquet_path.to_string()),
+        })
     }
 
     pub fn write(
@@ -859,8 +1028,6 @@ impl Segment {
         end_id: u64,
         schema: Arc<Schema>,
     ) -> CoreResult<Self> {
-        use crate::segment::field_store::InvertedIndex;
-
         let segment_path = format!("{}/segment-{}-{}", base_dir, start_id, end_id);
 
         if !std::path::Path::new(&segment_path).exists() {
@@ -1302,6 +1469,7 @@ impl Segment {
     }
 
     /// Mark an entire RecordBatch as deleted (set all columns except internal_id to NULL)
+    #[allow(dead_code)]
     fn mark_batch_as_deleted(&self, batch: &RecordBatch) -> RecordBatch {
         use datafusion::arrow::array::{make_array, ArrayData, ArrayRef};
         use datafusion::arrow::buffer::NullBuffer;

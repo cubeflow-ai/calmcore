@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FieldType {
     Keyword,
     I8,
@@ -15,7 +17,7 @@ pub enum FieldType {
 }
 
 /// 持久化配置选项
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistOption {
     /// Zstd 压缩级别 (1-22, 默认 3)
     pub zstd_level: i32,
@@ -47,7 +49,7 @@ impl Default for PersistOption {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FieldOption {
     Keyword {
         name: String,

@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
@@ -7,15 +7,15 @@ use std::{
 };
 
 use datafusion::arrow::{self as arrow, array::RecordBatch};
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tokio::sync::mpsc;
 
 use crate::{
     schema::Schema,
-    segment::{self, Segment},
+    segment::Segment,
     utils::{
-        self, arrow_utils,
-        error::{self, CoreError, CoreResult},
+        arrow_utils,
+        error::{CoreError, CoreResult},
     },
 };
 
@@ -196,6 +196,54 @@ impl Partition {
         }
     }
 
+    /// Delete documents by primary key values
+    ///
+    /// This method marks documents as deleted in the segments.
+    /// The actual data is not removed immediately, but marked in a deleted bitmap.
+    ///
+    /// # Arguments
+    /// * `pk_values` - Arrow array containing primary key values to delete
+    ///
+    /// # Returns
+    /// Number of documents marked as deleted
+    pub fn delete_by_pk(
+        &self,
+        pk_values: &std::sync::Arc<dyn datafusion::arrow::array::Array>,
+    ) -> CoreResult<u64> {
+        use crate::utils::arrow_utils;
+
+        let _pk = self
+            .schema
+            .primary_key
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidParam("Table has no primary key".to_string()))?;
+
+        // Hash the primary key values
+        let pk_hash = arrow_utils::array_to_hash(pk_values);
+
+        let _write_guard = self.write_lock.lock().unwrap();
+
+        let mut deleted_count = 0u64;
+
+        // Search in frozen segments
+        let segments = self.frozen_segments.read().unwrap().clone();
+        for (_, segment) in segments.iter() {
+            if let Some(ids) = segment.mget_internal_id(pk_hash.as_ref(), pk_values) {
+                deleted_count += ids.len() as u64;
+                segment.mark_del(ids);
+            }
+        }
+
+        // Search in current segment
+        let current = self.current_segment.read().unwrap();
+        if let Some(ids) = current.mget_internal_id(pk_hash.as_ref(), pk_values) {
+            deleted_count += ids.len() as u64;
+            current.mark_del(ids);
+        }
+
+        Ok(deleted_count)
+    }
+
     /// Flush current active segment to frozen list (non-blocking write)
     /// The segment becomes immediately readable but not yet persisted to disk
     pub fn flush(&self, check: bool) -> CoreResult<u64> {
@@ -233,7 +281,127 @@ impl Partition {
         }
 
         // 4. flush notify Engine to check for persist
-        self.persist_notify.send(self.id);
+        let _ = self.persist_notify.send(self.id);
+
+        Ok(seg_id)
+    }
+
+    /// Add a segment from an external Parquet file
+    ///
+    /// This method allows you to directly add a segment that references an external
+    /// Parquet file without copying the data. The method will:
+    /// 1. Read the Parquet file to determine row count and data range
+    /// 2. Build indexes for the data in the Parquet file
+    /// 3. Create a new segment that references the Parquet file
+    /// 4. Add the segment to frozen_segments list
+    ///
+    /// # Arguments
+    /// * `parquet_path` - Path to the Parquet file to add
+    ///
+    /// # Returns
+    /// The segment ID of the newly added segment
+    ///
+    /// # Example
+    /// ```no_run
+    /// let seg_id = partition.add_segment_from_parquet("/path/to/data.parquet")?;
+    /// ```
+    pub fn add_segment_from_parquet(&self, parquet_path: &str) -> CoreResult<u64> {
+        use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
+        use std::fs::File;
+
+        println!("📦 Adding segment from Parquet: {}", parquet_path);
+
+        // 1. Open and read Parquet file metadata
+        let file = File::open(parquet_path)
+            .map_err(|e| CoreError::IOError(format!("Failed to open parquet file: {}", e)))?;
+
+        let reader = SerializedFileReader::new(file)
+            .map_err(|e| CoreError::IOError(format!("Failed to read parquet file: {}", e)))?;
+
+        let metadata = reader.metadata();
+        let num_rows = metadata.file_metadata().num_rows() as u64;
+
+        if num_rows == 0 {
+            return Err(CoreError::InvalidParam(
+                "Parquet file has no rows".to_string(),
+            ));
+        }
+
+        println!("  📊 Parquet file contains {} rows", num_rows);
+
+        // 2. Determine start ID for this segment (based on current segment's next_doc_id)
+        let start_id = {
+            let current = self.current_segment.read().unwrap();
+            current.next_doc_id()
+        };
+        let end_id = start_id + num_rows - 1;
+
+        println!("  📍 Segment range: {} - {}", start_id, end_id);
+
+        // 3. Allocate segment ID
+        let seg_id = self.segment_id_counter.fetch_add(1, Ordering::SeqCst);
+
+        // 4. Read all data from Parquet to build indexes
+        println!("  🔨 Building indexes for segment {}...", seg_id);
+
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let file = File::open(parquet_path)
+            .map_err(|e| CoreError::IOError(format!("Failed to open parquet file: {}", e)))?;
+
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| CoreError::IOError(format!("Failed to create parquet reader: {}", e)))?;
+
+        let mut reader = builder
+            .build()
+            .map_err(|e| CoreError::IOError(format!("Failed to build parquet reader: {}", e)))?;
+
+        let mut all_batches = Vec::new();
+        while let Some(result) = reader.next() {
+            let batch =
+                result.map_err(|e| CoreError::IOError(format!("Failed to read batch: {}", e)))?;
+            all_batches.push(batch);
+        }
+
+        // Combine all batches
+        let combined_batch = if all_batches.len() == 1 {
+            all_batches.into_iter().next().unwrap()
+        } else {
+            arrow::compute::concat_batches(&self.arrow_schema, &all_batches)
+                .map_err(|e| CoreError::Internal(format!("Failed to combine batches: {}", e)))?
+        };
+
+        println!("  ✓ Read {} rows from Parquet", combined_batch.num_rows());
+
+        // 5. Create new segment and build indexes
+        let segment = Segment::from_parquet(
+            start_id,
+            end_id,
+            parquet_path,
+            &combined_batch,
+            self.schema.clone(),
+        )?;
+
+        println!("  ✓ Indexes built successfully");
+
+        // 6. Add to frozen segments
+        let segment_arc = Arc::new(segment);
+        {
+            let mut segments = self.frozen_segments.write().unwrap();
+            segments.push((seg_id, segment_arc));
+        }
+
+        // 7. Update current segment's start position
+        {
+            let mut current = self.current_segment.write().unwrap();
+            let new_start = end_id + 1;
+            *current = Segment::new(new_start, self.schema.clone());
+        }
+
+        println!(
+            "✅ Segment {} added successfully ({} rows, range: {}-{})",
+            seg_id, num_rows, start_id, end_id
+        );
 
         Ok(seg_id)
     }

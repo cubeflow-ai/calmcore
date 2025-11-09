@@ -19,7 +19,6 @@ use std::{
 };
 
 use datafusion::arrow::array::{ArrayRef, RecordBatch};
-use mem_btree::persist;
 use roaring::RoaringBitmap;
 
 use crate::{
@@ -155,6 +154,7 @@ impl<K: IndexKey> GenericIndexedField<K> {
     }
 
     /// 查询（用于普通字段）
+    #[allow(dead_code)]
     pub fn query(&self, key: &K) -> Option<RoaringBitmap> {
         let normalized_key = key.normalize(self.field.case_sensitive());
         let indexs = self.indexs.read().unwrap();
@@ -245,7 +245,7 @@ impl<K: IndexKey> PkWriter for GenericIndexedField<K> {
         // 构建主键映射并收集需要删除的旧文档
         let internal_id_array = arrow_downcast!(data.column(0), UInt32Array);
 
-        for ((row_idx, key), id_opt) in K::extract_from_array(pk).zip(internal_id_array.iter()) {
+        for ((_row_idx, key), id_opt) in K::extract_from_array(pk).zip(internal_id_array.iter()) {
             if let Some(id) = id_opt {
                 let normalized_key = key.normalize(self.field.case_sensitive());
                 if let Some(list) = mtp.get_mut(&normalized_key) {
@@ -324,9 +324,4 @@ impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
     }
 }
 
-/// 类型别名，让代码更清晰
-pub type KeywordField = GenericIndexedField<String>;
-pub type I64Field = GenericIndexedField<i64>;
-pub type U64Field = GenericIndexedField<u64>;
-pub type U32Field = GenericIndexedField<u32>;
-pub type I32Field = GenericIndexedField<i32>;
+// 注意：类型别名已在 mod.rs 中定义并导出

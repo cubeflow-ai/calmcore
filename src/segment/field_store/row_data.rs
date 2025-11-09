@@ -182,7 +182,6 @@ impl ParquetRowDataReader {
         projection: Option<&[usize]>,
     ) -> HashMap<u32, RecordBatch> {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use datafusion::parquet::arrow::ProjectionMask;
 
         let mut result = HashMap::new();
 

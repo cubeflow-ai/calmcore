@@ -65,7 +65,7 @@ impl TreeWriter {
 
         let mut offset_tracker = MAGIC_VERSION.len() as i64; // Track offset manually instead of calling stream_position()
 
-        for (i, item) in iter.enumerate() {
+        for (_i, item) in iter.enumerate() {
             cw.add_key_offset(&item.0.clone(), offset_tracker)?;
 
             let value_bytes = serializer.serialize_value(&item.1);

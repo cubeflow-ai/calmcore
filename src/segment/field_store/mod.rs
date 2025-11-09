@@ -31,8 +31,7 @@ pub mod row_data;
 pub use row_data::RowDataStore;
 
 // 导出泛型类型别名
-pub use generic_index::{GenericIndexedField, IndexKey};
-pub use index_key_impls::*;
+pub use generic_index::GenericIndexedField;
 pub use ordered_f32::OrderedF32;
 pub use ordered_f64::OrderedF64;
 
@@ -61,6 +60,7 @@ impl I64RoaringSerializer {
         Self { zstd_level }
     }
 
+    #[allow(dead_code)]
     pub fn default() -> Self {
         Self { zstd_level: 3 }
     }
@@ -766,6 +766,7 @@ impl F64RoaringSerializer {
         Self { zstd_level }
     }
 
+    #[allow(dead_code)]
     pub fn default() -> Self {
         Self { zstd_level: 3 }
     }
@@ -854,6 +855,7 @@ impl StringRoaringSerializer {
         Self { zstd_level }
     }
 
+    #[allow(dead_code)]
     pub fn default() -> Self {
         Self { zstd_level: 3 }
     }
@@ -932,6 +934,7 @@ impl persist::WriteSerializer<String, RoaringBitmap> for StringRoaringSerializer
 pub struct U32RecordBatchSerializer;
 
 impl U32RecordBatchSerializer {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self
     }
@@ -1095,6 +1098,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn append_ids(&mut self, k: K, ids: Vec<u32>) {
         if let InvertedIndex::Memory(tree) = self {
             match tree.get(&k) {
@@ -1254,6 +1258,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn memory_get_ref(&self, k: &K) -> Option<&Arc<RwLock<Vec<u32>>>> {
         match self {
             InvertedIndex::Disk(_) => unreachable!(),
@@ -1261,6 +1266,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         match self {
             InvertedIndex::Disk(r) => r.len() as usize,
@@ -1273,6 +1279,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
 /// - 0: delta-encoded u32 sequence (big-endian, mem_btree::persist::num_ser::u32_coder)
 /// - 1: RoaringBitmap native serialization
 /// Returns Vec<u8> on success.
+#[allow(dead_code)]
 pub fn encode_roaring_from_u32s(ids: &[u32]) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     if ids.len() < 1000 {

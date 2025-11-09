@@ -1,16 +1,38 @@
 pub mod compute;
 pub mod field;
 
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Segment 持久化策略配置
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistPolicy {
     /// 文档数阈值（达到此数量触发持久化）
     pub max_docs_per_segment: u32,
 
     /// 时间阈值（segment 存活超过此时间触发持久化）
+    #[serde(with = "serde_duration")]
     pub max_segment_age: Duration,
+}
+
+mod serde_duration {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        duration.as_secs().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
 }
 
 impl Default for PersistPolicy {
@@ -22,7 +44,7 @@ impl Default for PersistPolicy {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Schema {
     pub name: String,
     pub primary_key: Option<String>,
@@ -32,6 +54,7 @@ pub struct Schema {
 }
 
 impl Schema {
+    #[allow(dead_code)]
     pub(crate) fn add_field(&mut self, field: field::FieldOption) {
         self.fields.push(field);
     }
