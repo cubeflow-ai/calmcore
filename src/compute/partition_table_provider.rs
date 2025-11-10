@@ -222,8 +222,9 @@ impl TableProvider for PartitionTableProvider {
             let current_segment = self.partition.get_current_segment();
             if current_segment.doc_count() > 0 {
                 let scanner = self.create_segment_scanner(&*current_segment)?;
-                let plan = scanner.create_execution_plan(filters, projection)?;
-                segment_plans.push(plan);
+                if let Some(plan) = scanner.create_execution_plan(filters, projection) {
+                    segment_plans.push(plan);
+                }
             }
         }
 
@@ -233,8 +234,9 @@ impl TableProvider for PartitionTableProvider {
 
             for (_seg_id, segment) in frozen_segments.iter() {
                 let scanner = self.create_segment_scanner(segment)?;
-                let plan = scanner.create_execution_plan(filters, projection)?;
-                segment_plans.push(plan);
+                if let Some(plan) = scanner.create_execution_plan(filters, projection) {
+                    segment_plans.push(plan);
+                }
             }
         }
 

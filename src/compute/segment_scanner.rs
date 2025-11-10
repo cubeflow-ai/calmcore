@@ -71,7 +71,7 @@ impl SegmentScanner {
         &self,
         filters: &[Expr],
         projection: Option<&Vec<usize>>,
-    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+    ) -> Option<Arc<dyn ExecutionPlan>> {
         // 1. 从预计算的有效文档开始（已排除删除的文档）
         let mut result_bitmap = self.valid_docs.clone();
 
@@ -82,14 +82,18 @@ impl SegmentScanner {
             }
         }
 
-        // if result_bitmap.len() * 5 > self.valid_docs.len() {
-        //     result_bitmap = self.valid_docs.clone();
-        // }
+        // 如果数据超过20%，直接全表扫描
+        if result_bitmap.len() * 5 > self.valid_docs.len() {
+            log::info!("🔍 [SegmentScanner] Query matches more than 20% of documents ({} out of {}), switching to full scan",
+                result_bitmap.len(),
+                self.valid_docs.len()
+            );
+            result_bitmap = self.valid_docs.clone();
+        }
 
-        // if rand::random_bool(1.0 / 3.0) {
-        //     result_bitmap = self.valid_docs.clone();
-        //     println!("=====================================");
-        // }
+        if result_bitmap.is_empty() {
+            return None;
+        }
 
         // 3. 处理投影 - 直接使用原始索引,不需要转换
         let projected_schema = match projection {
@@ -119,7 +123,7 @@ impl SegmentScanner {
             projection.map(|p| p.to_vec()),
         );
 
-        Ok(Arc::new(exec))
+        Some(Arc::new(exec))
     }
 
     fn expr_to_bitmap(&self, expr: &Expr) -> Option<RoaringBitmap> {
@@ -404,16 +408,16 @@ impl ExecutionPlan for SegmentExec {
     ) -> DFResult<SendableRecordBatchStream> {
         // 🚀 流式处理优化: 使用真正的异步流,按需分批生成数据
         // 避免一次性加载所有数据到内存,防止 OOM
-        
+
         let projected_schema = self.projected_schema.clone();
         let raw_data = self.raw_data.clone();
         let matched_docs = self.matched_docs.clone();
         let projection = self.projection.clone();
-        
+
         // 配置: 每次最多处理多少个 storage batch
         // 这控制了内存使用上限: CHUNK_SIZE × 1000行/batch × 列数 × 数据大小
         const CHUNK_SIZE: usize = 100; // 每次处理100个batch (约10万行)
-        
+
         eprintln!(
             "🔍 [SegmentExec::execute] Starting streaming execution, total matched_docs={}",
             matched_docs.len()
@@ -430,17 +434,17 @@ impl ExecutionPlan for SegmentExec {
 }
 
 /// 真正的流式 RecordBatchStream 实现
-/// 
+///
 /// 按需分批读取数据,避免一次性加载全部到内存
 struct SegmentStream {
     schema: SchemaRef,
     raw_data: RowDataStore,
-    doc_ids: Vec<u32>,  // 所有需要查询的 doc_ids
+    doc_ids: Vec<u32>, // 所有需要查询的 doc_ids
     projection: Option<Vec<usize>>,
     chunk_size: usize,
-    
+
     // 迭代状态
-    current_offset: usize,  // 当前处理到的 doc_id 偏移量
+    current_offset: usize, // 当前处理到的 doc_id 偏移量
     pending_batches: std::vec::IntoIter<RecordBatch>,
 }
 
@@ -454,13 +458,13 @@ impl SegmentStream {
     ) -> Self {
         // 一次性收集 doc_ids (bitmap 迭代器很轻量)
         let doc_ids: Vec<u32> = matched_docs.iter().collect();
-        
+
         eprintln!(
             "🔍 [SegmentStream::new] Total doc_ids={}, will process in chunks of {} storage batches",
             doc_ids.len(),
             chunk_size
         );
-        
+
         Self {
             schema,
             raw_data,
@@ -471,61 +475,64 @@ impl SegmentStream {
             pending_batches: Vec::new().into_iter(),
         }
     }
-    
+
     /// 生成下一批 RecordBatches
     fn generate_next_chunk(&mut self) -> DFResult<Vec<RecordBatch>> {
         use datafusion::arrow::array::UInt32Array;
         use datafusion::arrow::compute::take;
         use std::collections::HashMap;
-        
+
+        // 已经处理完所有 doc_ids
+        if self.current_offset >= self.doc_ids.len() {
+            return Ok(Vec::new());
+        }
+
         // 1. 收集下一个 chunk 的 doc_ids
         let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut batch_keys_set = std::collections::HashSet::new();
-        let mut doc_count = 0;
-        
-        if let Some(ref mut iter) = self.doc_iter {
-            for doc_id in iter {
-                if let Some(batch_start_id) = self.raw_data.get_batch_key_for_doc(doc_id) {
-                    batch_groups
-                        .entry(batch_start_id)
-                        .or_insert_with(Vec::new)
-                        .push(doc_id);
-                    batch_keys_set.insert(batch_start_id);
-                }
-                
-                doc_count += 1;
-                // 达到 chunk_size,停止收集
-                if batch_keys_set.len() >= self.chunk_size {
-                    break;
-                }
+        let start_offset = self.current_offset;
+
+        while self.current_offset < self.doc_ids.len() {
+            let doc_id = self.doc_ids[self.current_offset];
+
+            if let Some(batch_start_id) = self.raw_data.get_batch_key_for_doc(doc_id) {
+                batch_groups
+                    .entry(batch_start_id)
+                    .or_insert_with(Vec::new)
+                    .push(doc_id);
+                batch_keys_set.insert(batch_start_id);
+            }
+
+            self.current_offset += 1;
+
+            // 达到 chunk_size 个 storage batch,停止收集
+            if batch_keys_set.len() >= self.chunk_size {
+                break;
             }
         }
-        
+
         // 没有更多数据
         if batch_groups.is_empty() {
             return Ok(Vec::new());
         }
-        
-        eprintln!(
-            "🔍 [SegmentStream] Generating chunk: {} storage batches, {} docs",
-            batch_groups.len(),
-            doc_count
-        );
-        
+
+        let doc_count = batch_groups.values().map(|v| v.len()).sum::<usize>();
+
         // 2. 批量读取这一批的 storage batches
         let batch_keys: Vec<u32> = batch_keys_set.into_iter().collect();
         let is_empty_projection = self.projection.as_ref().map_or(false, |p| p.is_empty());
-        
+
         let source_batches = if is_empty_projection {
             HashMap::new()
         } else {
             let proj_to_use = self.projection.as_ref().map(|p| p.as_slice());
-            self.raw_data.get_batch_with_projection(&batch_keys, proj_to_use)
+            self.raw_data
+                .get_batch_with_projection(&batch_keys, proj_to_use)
         };
-        
+
         // 3. 生成 RecordBatches
         let mut result_batches = Vec::new();
-        
+
         for (batch_start_id, doc_ids_in_batch) in batch_groups {
             // 空投影处理
             if is_empty_projection {
@@ -542,7 +549,7 @@ impl SegmentStream {
                 }
                 continue;
             }
-            
+
             // 正常投影处理
             if let Some(source_batch) = source_batches.get(&batch_start_id) {
                 let mut row_indices: Vec<usize> = doc_ids_in_batch
@@ -556,29 +563,28 @@ impl SegmentStream {
                         }
                     })
                     .collect();
-                
+
                 if row_indices.is_empty() {
                     continue;
                 }
-                
+
                 row_indices.sort_unstable();
-                
-                let indices_array = UInt32Array::from(
-                    row_indices.iter().map(|&i| i as u32).collect::<Vec<_>>()
-                );
-                
+
+                let indices_array =
+                    UInt32Array::from(row_indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
+
                 let final_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = source_batch
                     .columns()
                     .iter()
                     .filter_map(|col| take(col.as_ref(), &indices_array, None).ok())
                     .collect();
-                
+
                 if let Ok(batch) = RecordBatch::try_new(self.schema.clone(), final_columns) {
                     result_batches.push(batch);
                 }
             }
         }
-        
+
         Ok(result_batches)
     }
 }
@@ -597,7 +603,7 @@ impl futures::Stream for SegmentStream {
         if let Some(batch) = self.pending_batches.next() {
             return Poll::Ready(Some(Ok(batch)));
         }
-        
+
         // 2. 生成下一批数据
         match self.generate_next_chunk() {
             Ok(batches) => {
@@ -607,7 +613,7 @@ impl futures::Stream for SegmentStream {
                 } else {
                     // 设置待处理队列
                     self.pending_batches = batches.into_iter();
-                    
+
                     // 立即返回第一个 batch
                     if let Some(batch) = self.pending_batches.next() {
                         Poll::Ready(Some(Ok(batch)))
