@@ -12,6 +12,13 @@ use crate::partition::Partition;
 use crate::schema::Schema;
 use crate::utils::error::CoreResult;
 
+/// Partition 的唯一标识 (表名, partition_id)
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct PartitionKey {
+    table_name: String,
+    partition_id: u64,
+}
+
 /// Engine 配置
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -40,10 +47,10 @@ impl Default for EngineConfig {
 }
 
 /// 持久化请求
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PersistRequest {
     /// 检查并持久化特定 Partition
-    CheckPartition(u64),
+    CheckPartition(PartitionKey),
 
     /// 检查并持久化所有 Partition
     CheckAll,
@@ -69,14 +76,15 @@ pub struct Engine {
     /// Catalog - 表元数据管理
     catalog: Arc<Catalog>,
 
-    /// 所有 Partitions（partition_id -> Partition）
-    partitions: Arc<RwLock<HashMap<u64, Arc<Partition>>>>,
+    /// 所有 Partitions（(table_name, partition_id) -> Partition）
+    partitions: Arc<RwLock<HashMap<PartitionKey, Arc<Partition>>>>,
 
     /// 持久化请求通道
     persist_tx: mpsc::UnboundedSender<PersistRequest>,
 
     /// Partition 通知通道（Partition → Engine）
-    partition_notify_tx: mpsc::UnboundedSender<u64>,
+    /// 格式: (table_name, partition_id)
+    partition_notify_tx: mpsc::UnboundedSender<(String, u64)>,
 
     /// 后台任务句柄（使用 Mutex 以便在 Arc 中修改）
     persist_task_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
@@ -123,6 +131,85 @@ impl Engine {
         Ok(engine)
     }
 
+    /// 加载所有已存在的表和它们的 partition
+    pub async fn load_existing_tables(self: &Arc<Self>) -> CoreResult<()> {
+        println!("🔍 [Engine] Loading existing tables...");
+        let table_names = self.catalog.list_tables();
+        println!("🔍 [Engine] Found {} tables", table_names.len());
+
+        for table_name in table_names {
+            println!("🔍 [Engine] Loading table: {}", table_name);
+            let meta = match self.catalog.get_table(&table_name) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    eprintln!("⚠️  Failed to get metadata for table {}: {}", table_name, e);
+                    continue;
+                }
+            };
+
+            let num_partitions = meta.parallel_workers;
+            println!(
+                "🔍 [Engine] Table {} has {} partitions",
+                table_name, num_partitions
+            );
+
+            // 加载所有 partition
+            for i in 0..num_partitions {
+                let partition_dir = self
+                    .config
+                    .data_dir
+                    .join("tables")
+                    .join(&table_name)
+                    .join("partitions")
+                    .join(format!("partition-{}", i))
+                    .join("segments");
+
+                // 检查目录是否存在
+                if !partition_dir.exists() {
+                    println!("🔍 [Engine] Partition directory does not exist, creating new partition: {}", i);
+                    // 如果目录不存在，创建新的 partition
+                    let partition = Partition::new(
+                        i as u64,
+                        table_name.clone(),
+                        partition_dir,
+                        meta.schema.clone(),
+                        self.partition_notify_tx.clone(),
+                    );
+                    let partition = Arc::new(partition);
+                    self.add_partition_with_table(&table_name, partition).await;
+                } else {
+                    println!("🔍 [Engine] Loading existing partition: {}", i);
+                    // 如果目录存在，从磁盘加载
+                    match Partition::load(
+                        i as u64,
+                        table_name.clone(),
+                        partition_dir,
+                        meta.schema.clone(),
+                        self.partition_notify_tx.clone(),
+                    ) {
+                        Ok(partition) => {
+                            let partition = Arc::new(partition);
+                            self.add_partition_with_table(&table_name, partition).await;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "⚠️  Failed to load partition {} for table {}: {}",
+                                i, table_name, e
+                            );
+                        }
+                    }
+                }
+            }
+
+            println!(
+                "✅ Loaded table '{}' with {} partitions",
+                table_name, num_partitions
+            );
+        }
+
+        Ok(())
+    }
+
     /// 创建新表
     ///
     /// # 参数
@@ -165,6 +252,10 @@ impl Engine {
         self.catalog.create_table(meta)?;
 
         // 加载所有 partition 到内存
+        println!(
+            "🔍 [DEBUG create_table] Creating {} partitions for table '{}'",
+            num_partitions, table_name
+        );
         for i in 0..num_partitions {
             let partition_dir = self
                 .config
@@ -175,15 +266,26 @@ impl Engine {
                 .join(format!("partition-{}", i))
                 .join("segments");
 
+            println!(
+                "🔍 [DEBUG create_table] Creating partition {} at {:?}",
+                i, partition_dir
+            );
+
             let partition = Partition::new(
                 i as u64,
+                table_name.to_string(),
                 partition_dir,
                 schema.clone(),
                 self.partition_notify_tx.clone(),
             );
 
             let partition = Arc::new(partition);
-            self.add_partition(partition).await;
+            println!(
+                "🔍 [DEBUG create_table] About to add partition {} to map",
+                i
+            );
+            self.add_partition_with_table(table_name, partition).await;
+            println!("🔍 [DEBUG create_table] Finished adding partition {}", i);
         }
 
         println!(
@@ -209,7 +311,7 @@ impl Engine {
 
         // 移除所有相关的 partition
         for i in 0..meta.parallel_workers {
-            self.remove_partition(i as u64).await;
+            self.remove_partition(table_name, i as u64).await;
         }
 
         // 从 catalog 中删除
@@ -289,60 +391,139 @@ impl Engine {
     }
 
     /// 创建新的 Partition（低级 API，通常不需要直接调用）
-    pub async fn create_partition(&self, id: u64, schema: Schema) -> Arc<Partition> {
-        let partition_dir = self.config.data_dir.join(format!("partition-{}", id));
-        let partition = Partition::new(id, partition_dir, schema, self.partition_notify_tx.clone());
-
-        let partition = Arc::new(partition);
-        self.add_partition(partition.clone()).await;
-        partition
+    /// 已废弃：使用带 table_name 的版本
+    #[allow(dead_code)]
+    #[deprecated(note = "需要提供 table_name")]
+    pub async fn create_partition(&self, id: u64, _schema: Schema) -> Arc<Partition> {
+        panic!("create_partition is deprecated, use create_partition_with_table instead");
     }
 
-    /// 添加已存在的 Partition
+    /// 添加已存在的 Partition (带表名)
+    pub async fn add_partition_with_table(&self, table_name: &str, partition: Arc<Partition>) {
+        let partition_id = partition.id();
+        let key = PartitionKey {
+            table_name: table_name.to_string(),
+            partition_id,
+        };
+        let mut partitions = self.partitions.write().await;
+        partitions.insert(key.clone(), partition);
+
+        println!(
+            "🔍 [DEBUG] Added partition: table={}, partition_id={}",
+            table_name, partition_id
+        );
+        println!("🔍 [DEBUG] Total partitions in map: {}", partitions.len());
+        println!("🔍 [DEBUG] Key inserted: {:?}", key);
+
+        log::info!("Added partition {} for table {}", partition_id, table_name);
+    }
+
+    /// 添加已存在的 Partition (兼容旧接口,已废弃)
+    #[deprecated(note = "使用 add_partition_with_table 代替")]
     pub async fn add_partition(&self, partition: Arc<Partition>) {
         let partition_id = partition.id();
         let mut partitions = self.partitions.write().await;
-        partitions.insert(partition_id, partition);
+        // 使用 partition_id 作为 table_name (向后兼容)
+        let key = PartitionKey {
+            table_name: format!("__legacy_{}", partition_id),
+            partition_id,
+        };
+        partitions.insert(key, partition);
 
-        log::info!("Added partition {}", partition_id);
+        log::info!("Added partition {} (legacy mode)", partition_id);
     }
 
     /// 加载 Partition（从磁盘恢复）
-    pub async fn load_partition(&self, id: u64, schema: Schema) -> CoreResult<Arc<Partition>> {
-        let partition_dir = self.config.data_dir.join(format!("partition-{}", id));
-        let partition =
-            Partition::load(id, partition_dir, schema, self.partition_notify_tx.clone())?;
+    pub async fn load_partition(
+        &self,
+        table_name: &str,
+        id: u64,
+        schema: Schema,
+    ) -> CoreResult<Arc<Partition>> {
+        let partition_dir = self
+            .config
+            .data_dir
+            .join("tables")
+            .join(table_name)
+            .join("partitions")
+            .join(format!("partition-{}", id))
+            .join("segments");
+        let partition = Partition::load(
+            id,
+            table_name.to_string(),
+            partition_dir,
+            schema,
+            self.partition_notify_tx.clone(),
+        )?;
 
         let partition = Arc::new(partition);
-        self.add_partition(partition.clone()).await;
+        self.add_partition_with_table(table_name, partition.clone())
+            .await;
         Ok(partition)
     }
 
     /// 移除 Partition
-    pub async fn remove_partition(&self, partition_id: u64) {
+    pub async fn remove_partition(&self, table_name: &str, partition_id: u64) {
+        let key = PartitionKey {
+            table_name: table_name.to_string(),
+            partition_id,
+        };
         let mut partitions = self.partitions.write().await;
-        partitions.remove(&partition_id);
+        partitions.remove(&key);
 
-        log::info!("Removed partition {}", partition_id);
+        log::info!(
+            "Removed partition {} for table {}",
+            partition_id,
+            table_name
+        );
     }
 
     /// 获取 Partition
-    pub async fn get_partition(&self, partition_id: u64) -> Option<Arc<Partition>> {
+    pub async fn get_partition(
+        &self,
+        table_name: &str,
+        partition_id: u64,
+    ) -> Option<Arc<Partition>> {
+        let key = PartitionKey {
+            table_name: table_name.to_string(),
+            partition_id,
+        };
         let partitions = self.partitions.read().await;
-        partitions.get(&partition_id).cloned()
+
+        for k in partitions.keys() {
+            println!("  - {:?}", k);
+        }
+
+        let result = partitions.get(&key).cloned();
+        result
     }
 
-    /// 列出所有 Partition
-    pub async fn list_partitions(&self) -> Vec<u64> {
+    /// 列出表的所有 Partition IDs
+    pub async fn list_partitions(&self, table_name: &str) -> Vec<u64> {
         let partitions = self.partitions.read().await;
-        partitions.keys().copied().collect()
+        partitions
+            .keys()
+            .filter(|k| k.table_name == table_name)
+            .map(|k| k.partition_id)
+            .collect()
+    }
+
+    /// 列出所有 Partition Keys
+    pub async fn list_all_partition_keys(&self) -> Vec<(String, u64)> {
+        let partitions = self.partitions.read().await;
+        partitions
+            .keys()
+            .map(|k| (k.table_name.clone(), k.partition_id))
+            .collect()
     }
 
     /// 触发特定 Partition 的持久化检查
-    pub fn trigger_persist(&self, partition_id: u64) {
-        let _ = self
-            .persist_tx
-            .send(PersistRequest::CheckPartition(partition_id));
+    pub fn trigger_persist(&self, table_name: &str, partition_id: u64) {
+        let key = PartitionKey {
+            table_name: table_name.to_string(),
+            partition_id,
+        };
+        let _ = self.persist_tx.send(PersistRequest::CheckPartition(key));
     }
 
     /// 触发所有 Partition 的持久化检查
@@ -392,19 +573,27 @@ impl Engine {
     ///
     /// # 示例
     /// ```rust
-    /// engine.persist_partition(1).await;
-    /// // 此时 partition 1 的所有数据已写入磁盘
+    /// engine.persist_partition("users", 1).await;
+    /// // 此时 users 表的 partition 1 的所有数据已写入磁盘
     /// ```
-    pub async fn persist_partition(&self, partition_id: u64) -> CoreResult<()> {
-        log::info!("Persisting partition {}...", partition_id);
+    pub async fn persist_partition(&self, table_name: &str, partition_id: u64) -> CoreResult<()> {
+        log::info!(
+            "Persisting partition {} of table {}...",
+            partition_id,
+            table_name
+        );
 
         // 1. 获取 Partition
         let partition = {
+            let key = PartitionKey {
+                table_name: table_name.to_string(),
+                partition_id,
+            };
             let partitions = self.partitions.read().await;
-            partitions.get(&partition_id).cloned().ok_or_else(|| {
+            partitions.get(&key).cloned().ok_or_else(|| {
                 crate::utils::error::CoreError::Internal(format!(
-                    "Partition {} not found",
-                    partition_id
+                    "Partition {} of table {} not found",
+                    partition_id, table_name
                 ))
             })?
         };
@@ -418,6 +607,67 @@ impl Engine {
         .map_err(|e| {
             crate::utils::error::CoreError::Internal(format!("Persist task failed: {}", e))
         })?
+    }
+
+    /// 持久化整个表的所有 partition
+    ///
+    /// 这是一个同步操作：调用后，该表的所有 partition 的所有 segment 保证已持久化完毕
+    ///
+    /// # 示例
+    /// ```rust
+    /// engine.flush_table("users").await?;
+    /// // 此时 users 表的所有数据已写入磁盘
+    /// ```
+    pub async fn flush_table(&self, table_name: &str) -> CoreResult<()> {
+        println!("🔄 Flushing table '{}'...", table_name);
+
+        // 1. 获取表的元数据以确定有多少个 partition
+        let meta = self.catalog.get_table(table_name)?;
+        let num_partitions = meta.parallel_workers;
+
+        println!(
+            "🔍 Table '{}' has {} partitions",
+            table_name, num_partitions
+        );
+
+        // 2. 持久化所有 partition
+        let mut success_count = 0;
+        let mut error_count = 0;
+
+        for partition_id in 0..num_partitions {
+            match self
+                .persist_partition(table_name, partition_id as u64)
+                .await
+            {
+                Ok(_) => {
+                    success_count += 1;
+                    println!(
+                        "✅ Flushed partition {} of table '{}'",
+                        partition_id, table_name
+                    );
+                }
+                Err(e) => {
+                    error_count += 1;
+                    eprintln!(
+                        "❌ Failed to flush partition {} of table '{}': {}",
+                        partition_id, table_name, e
+                    );
+                }
+            }
+        }
+
+        if error_count > 0 {
+            Err(crate::utils::error::CoreError::Internal(format!(
+                "Failed to flush {} out of {} partitions for table '{}'",
+                error_count, num_partitions, table_name
+            )))
+        } else {
+            println!(
+                "✅ Successfully flushed all {} partitions of table '{}'",
+                success_count, table_name
+            );
+            Ok(())
+        }
     }
 
     /// 关闭 Engine（优雅停机）
@@ -447,29 +697,37 @@ impl Engine {
         }
         log::info!("Background task stopped");
 
-        // 2. 获取所有 Partition ID
-        let partition_ids: Vec<u64> = {
+        // 2. 获取所有 Partition Keys
+        let partition_keys: Vec<(String, u64)> = {
             let partitions = self.partitions.read().await;
-            partitions.keys().copied().collect()
+            partitions
+                .keys()
+                .map(|k| (k.table_name.clone(), k.partition_id))
+                .collect()
         };
 
-        if partition_ids.is_empty() {
+        if partition_keys.is_empty() {
             log::info!("No partitions to persist");
             return Ok(());
         }
 
-        log::info!("Persisting {} partitions...", partition_ids.len());
+        log::info!("Persisting {} partitions...", partition_keys.len());
 
         // 3. 同步持久化所有 Partition（串行执行，确保稳定）
         let mut success_count = 0;
         let mut failed_partitions = Vec::new();
 
-        for partition_id in partition_ids {
-            match self.persist_partition(partition_id).await {
+        for (table_name, partition_id) in partition_keys {
+            match self.persist_partition(&table_name, partition_id).await {
                 Ok(_) => success_count += 1,
                 Err(e) => {
-                    log::error!("Partition {} persist failed: {:?}", partition_id, e);
-                    failed_partitions.push(partition_id);
+                    log::error!(
+                        "Partition {} of table {} persist failed: {:?}",
+                        partition_id,
+                        table_name,
+                        e
+                    );
+                    failed_partitions.push((table_name, partition_id));
                 }
             }
         }
@@ -516,7 +774,7 @@ impl Engine {
     async fn persist_background_task(
         self: Arc<Self>,
         mut persist_rx: mpsc::UnboundedReceiver<PersistRequest>,
-        mut partition_notify_rx: mpsc::UnboundedReceiver<u64>,
+        mut partition_notify_rx: mpsc::UnboundedReceiver<(String, u64)>,
     ) {
         println!("[Engine] Persist background task started");
 
@@ -525,7 +783,7 @@ impl Engine {
             tokio::time::interval(Duration::from_secs(self.config.persist_check_interval_secs));
 
         // 当前正在持久化的任务
-        let active_tasks: Arc<tokio::sync::Mutex<HashMap<u64, JoinHandle<()>>>> =
+        let active_tasks: Arc<tokio::sync::Mutex<HashMap<PartitionKey, JoinHandle<()>>>> =
             Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         loop {
@@ -533,9 +791,9 @@ impl Engine {
                 // 接收手动持久化请求
                 Some(request) = persist_rx.recv() => {
                     match request {
-                        PersistRequest::CheckPartition(partition_id) => {
+                        PersistRequest::CheckPartition(key) => {
                             self.handle_partition_persist(
-                                partition_id,
+                                key,
                                 &active_tasks,
                             ).await;
                         }
@@ -551,8 +809,9 @@ impl Engine {
 
                             // 等待所有任务完成
                             let tasks = active_tasks.lock().await;
-                            for (partition_id, _) in tasks.iter() {
-                                println!("[Engine] Waiting for partition {} to finish persisting", partition_id);
+                            for (key, _) in tasks.iter() {
+                                println!("[Engine] Waiting for partition {}/{} to finish persisting",
+                                    key.table_name, key.partition_id);
                             }
 
                             break;
@@ -561,17 +820,21 @@ impl Engine {
                 }
 
                 // 接收 Partition 的通知（write/flush 达到阈值）
-                Some(partition_id) = partition_notify_rx.recv() => {
-                    println!("[Engine] Received persist notification from partition {}", partition_id);
-                    self.handle_partition_persist(
+                Some((table_name, partition_id)) = partition_notify_rx.recv() => {
+                    println!("[Engine] Received persist notification from partition {}/{}", table_name, partition_id);
+                    let key = PartitionKey {
+                        table_name,
                         partition_id,
+                    };
+                    self.handle_partition_persist(
+                        key,
                         &active_tasks,
                     ).await;
                 }
 
                 // 定时检查（兜底保障）
                 _ = interval.tick() => {
-                    // println!("[Engine] Periodic persist check (fallback)");
+                    log::info!("[Engine] Periodic persist check (fallback)");
                     self.handle_all_persist(
                         &active_tasks,
                     ).await;
@@ -581,20 +844,19 @@ impl Engine {
 
         println!("[Engine] Persist background task stopped");
     }
-
     /// 处理单个 Partition 的持久化
     async fn handle_partition_persist(
         &self,
-        partition_id: u64,
-        active_tasks: &Arc<tokio::sync::Mutex<HashMap<u64, JoinHandle<()>>>>,
+        key: PartitionKey,
+        active_tasks: &Arc<tokio::sync::Mutex<HashMap<PartitionKey, JoinHandle<()>>>>,
     ) {
         // 检查是否已有任务在执行
         {
             let tasks = active_tasks.lock().await;
-            if tasks.contains_key(&partition_id) {
+            if tasks.contains_key(&key) {
                 println!(
-                    "[Engine] Partition {} is already persisting, skip",
-                    partition_id
+                    "[Engine] Partition {}/{} is already persisting, skip",
+                    key.table_name, key.partition_id
                 );
                 return;
             }
@@ -603,10 +865,13 @@ impl Engine {
         // 获取 Partition
         let partition = {
             let parts = self.partitions.read().await;
-            match parts.get(&partition_id) {
+            match parts.get(&key) {
                 Some(p) => p.clone(),
                 None => {
-                    println!("[Engine] Partition {} not found", partition_id);
+                    println!(
+                        "[Engine] Partition {}/{} not found",
+                        key.table_name, key.partition_id
+                    );
                     return;
                 }
             }
@@ -624,13 +889,15 @@ impl Engine {
         }
 
         println!(
-            "[Engine] Partition {} has {} segments ready for persist (doc/time threshold)",
-            partition_id,
+            "[Engine] Partition {}/{} has {} segments ready for persist (doc/time threshold)",
+            key.table_name,
+            key.partition_id,
             segments_to_persist.len()
         );
 
         // 启动持久化任务并异步等待完成
         let active_tasks_clone = active_tasks.clone();
+        let key_clone = key.clone();
         let handle = tokio::spawn(async move {
             // 在阻塞线程池中执行持久化
             let result =
@@ -639,54 +906,54 @@ impl Engine {
             match result {
                 Ok(Ok(persisted_ids)) => {
                     println!(
-                        "[Engine] Partition {} persist completed: {} segments",
-                        partition_id,
+                        "[Engine] Partition {}/{} persist completed: {} segments",
+                        key_clone.table_name,
+                        key_clone.partition_id,
                         persisted_ids.len()
                     );
                 }
                 Ok(Err(e)) => {
                     eprintln!(
-                        "[Engine] Partition {} persist failed: {:?}",
-                        partition_id, e
+                        "[Engine] Partition {}/{} persist failed: {:?}",
+                        key_clone.table_name, key_clone.partition_id, e
                     );
                 }
                 Err(e) => {
                     eprintln!(
-                        "[Engine] Partition {} persist task panicked: {:?}",
-                        partition_id, e
+                        "[Engine] Partition {}/{} persist task panicked: {:?}",
+                        key_clone.table_name, key_clone.partition_id, e
                     );
                 }
             }
 
             // 持久化完成后立即从 active_tasks 中移除
             let mut tasks = active_tasks_clone.lock().await;
-            tasks.remove(&partition_id);
+            tasks.remove(&key_clone);
             println!(
-                "[Engine] Partition {} removed from active tasks",
-                partition_id
+                "[Engine] Partition {}/{} removed from active tasks",
+                key_clone.table_name, key_clone.partition_id
             );
         });
 
         // 记录任务
         {
             let mut tasks = active_tasks.lock().await;
-            tasks.insert(partition_id, handle);
+            tasks.insert(key, handle);
         }
     }
 
     /// 处理所有 Partition 的持久化
     async fn handle_all_persist(
         &self,
-        active_tasks: &Arc<tokio::sync::Mutex<HashMap<u64, JoinHandle<()>>>>,
+        active_tasks: &Arc<tokio::sync::Mutex<HashMap<PartitionKey, JoinHandle<()>>>>,
     ) {
-        let partition_ids: Vec<u64> = {
+        let partition_keys: Vec<PartitionKey> = {
             let parts = self.partitions.read().await;
-            parts.keys().copied().collect()
+            parts.keys().cloned().collect()
         };
 
-        for partition_id in partition_ids {
-            self.handle_partition_persist(partition_id, active_tasks)
-                .await;
+        for key in partition_keys {
+            self.handle_partition_persist(key, active_tasks).await;
         }
     }
 }

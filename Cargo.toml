@@ -37,3 +37,11 @@ tokio = { version = "1", features = [
     "net",
 ] }
 msql-srv = "0.11"
+
+# Web framework - Poem
+poem = { version = "3", features = ["embed"] }
+poem-openapi = "5"
+
+# GraphQL
+async-graphql = "7"
+async-graphql-poem = "7"

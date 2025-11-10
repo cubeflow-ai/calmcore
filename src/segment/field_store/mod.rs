@@ -1056,6 +1056,7 @@ pub trait PkWriter: Send + Sync + 'static {
     fn write_pk(
         &self,
         data: &RecordBatch,
+        start_id: u32,
         info: Option<WriteInfo>,
         lock: &RwLock<()>,
     ) -> CoreResult<HashSet<u32>>;

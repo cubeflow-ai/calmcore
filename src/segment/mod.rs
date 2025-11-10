@@ -340,7 +340,7 @@ impl Segment {
         {
             let fields = self.fields.read().unwrap();
             let pk_field = &fields[*index];
-            self.write_pk(pk_field, &new_data, pk_hash, info, lock)?;
+            self.write_pk(pk_field, &new_data, start_id, pk_hash, info, lock)?;
         }
 
         // 使用 RowDataStore 的 put 方法存储 RecordBatch
@@ -369,6 +369,7 @@ impl Segment {
         &self,
         pk_field: &Box<dyn IndexWriter>,
         data: &RecordBatch,
+        start_id: u32,
         pk_hash: Option<Vec<u32>>,
         info: Option<WriteInfo>,
         lock: &RwLock<()>,
@@ -388,7 +389,7 @@ impl Segment {
                         ))
                     })?;
 
-                let del = pk_writer.write_pk(data, info, lock)?;
+                let del = pk_writer.write_pk(data, start_id, info, lock)?;
                 if !del.is_empty() {
                     self.deleted.write().unwrap().extend(del.iter());
                 }
@@ -493,35 +494,22 @@ impl Segment {
         let row_data = self.row_data.read().unwrap();
 
         // Use floor to find the batch containing this doc_id
-        let (_start_id, batch) = row_data.floor(&doc_id)?;
+        let (start_id, batch) = row_data.floor(&doc_id)?;
 
-        // Verify this batch contains our doc_id and extract the row
-        let internal_ids_col = batch.column(0);
-        let internal_ids = match internal_ids_col
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
-        {
-            Some(arr) => arr,
-            None => {
-                eprintln!(
-                    "Warning: Internal ID column is not UInt32 array, got: {:?}",
-                    internal_ids_col.data_type()
-                );
-                return None;
-            }
-        };
+        // Calculate row index within the batch
+        // doc_id = start_id + row_idx
+        let row_idx = doc_id.checked_sub(start_id)? as usize;
 
-        for (row_idx, id) in internal_ids.values().iter().enumerate() {
-            if *id == doc_id {
-                // Found it! Extract just this row
-                let mask: Vec<bool> = (0..batch.num_rows()).map(|i| i == row_idx).collect();
-                let mask_array = arrow::array::BooleanArray::from(mask);
-
-                return filter_record_batch(&batch, &mask_array).ok();
-            }
+        // Check if row_idx is within bounds
+        if row_idx >= batch.num_rows() {
+            return None;
         }
 
-        None
+        // Extract just this row
+        let mask: Vec<bool> = (0..batch.num_rows()).map(|i| i == row_idx).collect();
+        let mask_array = arrow::array::BooleanArray::from(mask);
+
+        filter_record_batch(&batch, &mask_array).ok()
     }
     /// Get multiple documents by internal doc_ids
     /// Returns a RecordBatch containing only the requested documents
@@ -569,17 +557,15 @@ impl Segment {
 
         // Collect all non-deleted batches
         let mut batches: Vec<RecordBatch> = Vec::new();
-        let doc_count = self.doc_id_gen.load(Ordering::Relaxed);
 
-        for doc_id in 0..doc_count {
-            if deleted.contains(doc_id) {
-                continue;
-            }
-
-            if let Some(batch) = row_data.get(&doc_id) {
+        // Iterate through all batches in row_data
+        if let Some(iter) = row_data.iter() {
+            for (start_id, batch) in iter {
                 // Apply deleted filter to this batch
-                let filtered_batch = self.filter_deleted_from_batch(&batch, &deleted);
-                batches.push(filtered_batch);
+                let filtered_batch = self.filter_deleted_from_batch(start_id, &batch, &deleted);
+                if filtered_batch.num_rows() > 0 {
+                    batches.push(filtered_batch);
+                }
             }
         }
 
@@ -587,8 +573,10 @@ impl Segment {
     }
 
     /// Filter deleted rows from a RecordBatch
+    /// start_id is the first doc_id in the batch
     fn filter_deleted_from_batch(
         &self,
+        start_id: u32,
         batch: &RecordBatch,
         deleted: &RoaringBitmap,
     ) -> RecordBatch {
@@ -598,27 +586,13 @@ impl Segment {
             return batch.clone();
         }
 
-        // Get internal_id column (first column)
-        let internal_id_col = batch.column(0);
-        let internal_ids = match internal_id_col
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
-        {
-            Some(arr) => arr,
-            None => {
-                eprintln!(
-                    "Warning: Internal ID column is not UInt32 array, got: {:?}",
-                    internal_id_col.data_type()
-                );
-                return batch.clone();
-            }
-        };
-
         // Build boolean mask: true = keep, false = filter out
-        let mask: Vec<bool> = internal_ids
-            .values()
-            .iter()
-            .map(|id| !deleted.contains(*id))
+        // doc_id = start_id + row_idx
+        let mask: Vec<bool> = (0..batch.num_rows())
+            .map(|row_idx| {
+                let doc_id = start_id + row_idx as u32;
+                !deleted.contains(doc_id)
+            })
             .collect();
 
         // Create boolean array for filtering
@@ -852,17 +826,46 @@ impl Segment {
                 if let Some(keyword) = field.as_any().downcast_ref::<KeywordField>() {
                     let disk_field = keyword.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_i8) = field.as_any().downcast_ref::<I8Field>() {
+                    let disk_field = num_i8.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_i16) = field.as_any().downcast_ref::<I16Field>() {
+                    let disk_field = num_i16.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_i32) = field.as_any().downcast_ref::<I32Field>() {
+                    let disk_field = num_i32.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else if let Some(num_i64) = field.as_any().downcast_ref::<I64Field>() {
                     let disk_field = num_i64.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_u8) = field.as_any().downcast_ref::<U8Field>() {
+                    let disk_field = num_u8.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_u16) = field.as_any().downcast_ref::<U16Field>() {
+                    let disk_field = num_u16.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_u32) = field.as_any().downcast_ref::<U32Field>() {
+                    let disk_field = num_u32.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_u64) = field.as_any().downcast_ref::<U64Field>() {
+                    let disk_field = num_u64.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(num_f32) = field.as_any().downcast_ref::<F32Field>() {
+                    let disk_field = num_f32.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else if let Some(num_f64) = field.as_any().downcast_ref::<F64Field>() {
                     let disk_field = num_f64.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(boolean) = field.as_any().downcast_ref::<BooleanField>() {
+                    let disk_field = boolean.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else {
-                    return Err(CoreError::Internal(format!(
-                        "Unsupported field type for persist: {}",
+                    eprintln!(
+                        "⚠️ Warning: Field '{}' has unsupported type for persist, skipping",
                         field_name
-                    )));
+                    );
+                    // Skip unsupported fields but continue with others
+                    continue;
                 }
             }
 

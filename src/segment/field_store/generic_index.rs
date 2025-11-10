@@ -225,6 +225,7 @@ impl<K: IndexKey> PkWriter for GenericIndexedField<K> {
     fn write_pk(
         &self,
         data: &RecordBatch,
+        start_id: u32,
         info: Option<WriteInfo>,
         lock: &RwLock<()>,
     ) -> CoreResult<HashSet<u32>> {
@@ -243,19 +244,17 @@ impl<K: IndexKey> PkWriter for GenericIndexedField<K> {
         let mut mtp: HashMap<K, Vec<u32>> = HashMap::new();
 
         // 构建主键映射并收集需要删除的旧文档
-        let internal_id_array = arrow_downcast!(data.column(0), UInt32Array);
-
-        for ((_row_idx, key), id_opt) in K::extract_from_array(pk).zip(internal_id_array.iter()) {
-            if let Some(id) = id_opt {
-                let normalized_key = key.normalize(self.field.case_sensitive());
-                if let Some(list) = mtp.get_mut(&normalized_key) {
-                    if !list.is_empty() {
-                        cur_dels.extend(list.clone());
-                    }
-                    list[0] = id;
-                } else {
-                    mtp.insert(normalized_key, vec![id]);
+        // 使用start_id + row_idx 生成文档ID
+        for (row_idx, key) in K::extract_from_array(pk) {
+            let id = start_id + row_idx as u32;
+            let normalized_key = key.normalize(self.field.case_sensitive());
+            if let Some(list) = mtp.get_mut(&normalized_key) {
+                if !list.is_empty() {
+                    cur_dels.extend(list.clone());
                 }
+                list[0] = id;
+            } else {
+                mtp.insert(normalized_key, vec![id]);
             }
         }
 

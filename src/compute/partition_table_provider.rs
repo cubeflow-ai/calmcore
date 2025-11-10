@@ -238,11 +238,19 @@ impl TableProvider for PartitionTableProvider {
             }
         }
 
-        // Handle empty partition case
+        // Handle empty partition case - return empty plan instead of error
         if segment_plans.is_empty() {
-            return Err(DataFusionError::Internal(
-                "Partition has no data".to_string(),
-            ));
+            use datafusion::physical_plan::empty::EmptyExec;
+
+            // 使用投影后的schema(如果有),否则使用完整schema
+            let empty_schema = if let Some(proj) = projection {
+                let fields: Vec<_> = proj.iter().map(|i| self.schema.field(*i).clone()).collect();
+                Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
+            } else {
+                self.schema.clone()
+            };
+
+            return Ok(Arc::new(EmptyExec::new(empty_schema)));
         }
 
         // If only one segment, return its plan directly

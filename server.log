@@ -1,0 +1,80 @@
+=== Calm Elasticsearch API Server Demo ===
+
+✓ Engine initialized
+
+Starting Elasticsearch API server on 127.0.0.1:9200...
+
+You can now use curl or any Elasticsearch client:
+
+Examples:
+  # Create index
+  curl -X PUT "http://localhost:9200/products" -H 'Content-Type: application/json' -d'
+  {
+    "mappings": {
+      "properties": {
+        "_id": { "type": "keyword" },
+        "name": { "type": "text" },
+        "price": { "type": "double" },
+        "category": { "type": "keyword" },
+        "in_stock": { "type": "boolean" }
+      }
+    }
+  }'
+
+  # Index a document with ID
+  curl -X PUT "http://localhost:9200/products/_doc/1" -H 'Content-Type: application/json' -d'
+  {
+    "name": "Laptop",
+    "price": 999.99,
+    "category": "electronics",
+    "in_stock": true
+  }'
+
+  # Index a document (auto-generate ID)
+  curl -X POST "http://localhost:9200/products/_doc" -H 'Content-Type: application/json' -d'
+  {
+    "name": "Mouse",
+    "price": 29.99,
+    "category": "electronics",
+    "in_stock": true
+  }'
+
+  # Get a document
+  curl -X GET "http://localhost:9200/products/_doc/1"
+
+  # Search documents
+  curl -X GET "http://localhost:9200/products/_search"
+
+  # Bulk insert
+  curl -X POST "http://localhost:9200/products/_bulk" -H 'Content-Type: application/x-ndjson' -d'
+  {"index":{"_id":"2"}}
+  {"name":"Keyboard","price":79.99,"category":"electronics","in_stock":true}
+  {"index":{"_id":"3"}}
+  {"name":"Monitor","price":299.99,"category":"electronics","in_stock":false}
+  '
+
+  # List all indices
+  curl -X GET "http://localhost:9200/_cat/indices"
+
+Press Ctrl+C to stop the server
+
+[Engine] Persist background task started
+🔍 Elasticsearch API server listening on http://127.0.0.1:9200
+
+API endpoints:
+  PUT    /:index                    - Create index
+  DELETE /:index                    - Delete index
+  GET    /:index                    - Get index info
+  GET    /_cat/indices              - List all indices
+  PUT    /:index/_doc/:id           - Index document with ID
+  POST   /:index/_doc               - Index document (auto ID)
+  GET    /:index/_doc/:id           - Get document
+  DELETE /:index/_doc/:id           - Delete document
+  POST   /:index/_bulk              - Bulk operations
+  POST   /:index/_search            - Search documents
+
+✅ Table 'products' dropped successfully
+✅ Table 'products' created successfully
+✅ Table 'products' created with 1 partitions
+Warning: Internal ID column is not UInt32 array, got: Utf8
+Warning: Internal ID column is not UInt32 array, got: Utf8

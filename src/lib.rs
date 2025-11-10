@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod compute;
 pub mod engine;
 pub mod partition;
 pub mod schema;

@@ -21,11 +21,12 @@ use crate::{
 
 pub struct WriteInfo(pub Vec<(Arc<Segment>, Vec<u32>)>);
 
-/// 持久化通知回调
-pub type PersistNotifyCallback = mpsc::UnboundedSender<u64>;
+/// 持久化通知回调 (table_name, partition_id)
+pub type PersistNotifyCallback = mpsc::UnboundedSender<(String, u64)>;
 
 pub struct Partition {
     pub id: u64,
+    table_name: String,
     current_segment: RwLock<Segment>,
     frozen_segments: RwLock<Vec<(u64, Arc<Segment>)>>, // (seg_id, segment)
     base_dir: PathBuf,
@@ -33,6 +34,7 @@ pub struct Partition {
     pub arrow_schema: Arc<datafusion::arrow::datatypes::Schema>,
     read_lock: RwLock<()>,
     write_lock: Mutex<()>,
+    persist_lock: Mutex<()>, // 新增：防止并发持久化同一个 partition
     segment_id_counter: AtomicU64,
     persist_notify: PersistNotifyCallback,
 }
@@ -40,14 +42,16 @@ pub struct Partition {
 impl Partition {
     pub fn new(
         id: u64,
+        table_name: String,
         base_dir: PathBuf,
         schema: Schema,
-        persist_notify: mpsc::UnboundedSender<u64>,
+        persist_notify: mpsc::UnboundedSender<(String, u64)>,
     ) -> Self {
         let schema = Arc::new(schema);
         let arrow_schema = schema.to_arrow_schema();
         Partition {
             id,
+            table_name,
             base_dir,
             schema: schema.clone(),
             arrow_schema,
@@ -55,6 +59,7 @@ impl Partition {
             frozen_segments: RwLock::new(vec![]),
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
+            persist_lock: Mutex::new(()), // 初始化持久化锁
             segment_id_counter: AtomicU64::new(0),
             persist_notify,
         }
@@ -281,7 +286,7 @@ impl Partition {
         }
 
         // 4. flush notify Engine to check for persist
-        let _ = self.persist_notify.send(self.id);
+        let _ = self.persist_notify.send((self.table_name.clone(), self.id));
 
         Ok(seg_id)
     }
@@ -420,6 +425,9 @@ impl Partition {
     /// 自动持久化所有未持久化的 segments
     /// 这个方法应该被定期调用以释放内存
     pub fn persist_unpersisted_segments(&self) -> CoreResult<Vec<u64>> {
+        // 获取持久化锁，防止并发持久化
+        let _persist_guard = self.persist_lock.lock().unwrap();
+
         let unpersisted = self.get_unpersisted_segments();
 
         if unpersisted.is_empty() {
@@ -555,6 +563,7 @@ impl Partition {
     /// Load a partition from disk
     pub fn load(
         id: u64,
+        table_name: String,
         base_dir: PathBuf,
         schema: Schema,
         persist_notify: PersistNotifyCallback,
@@ -564,7 +573,12 @@ impl Partition {
             .to_str()
             .ok_or_else(|| CoreError::Internal("Invalid base_dir path".to_string()))?;
 
-        log::info!("Loading Partition {} from {}", id, base_dir_str);
+        log::info!(
+            "Loading Partition {} of table {} from {}",
+            id,
+            table_name,
+            base_dir_str
+        );
 
         // 1. Find all segment directories
         let partition_path = format!("{}/partition-{}", base_dir_str, id);
@@ -572,6 +586,7 @@ impl Partition {
             // No persisted data, create new partition
             return Ok(Self::new(
                 id,
+                table_name,
                 base_dir,
                 schema.as_ref().clone(),
                 persist_notify,
@@ -644,6 +659,7 @@ impl Partition {
         let arrow_schema = schema.to_arrow_schema();
         Ok(Partition {
             id: id as u64,
+            table_name,
             base_dir,
             schema,
             arrow_schema,
@@ -651,6 +667,7 @@ impl Partition {
             frozen_segments: RwLock::new(frozen_segments),
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
+            persist_lock: Mutex::new(()), // 初始化持久化锁
             segment_id_counter: AtomicU64::new(deprecated_counter),
             persist_notify,
         })

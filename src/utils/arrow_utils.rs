@@ -78,3 +78,36 @@ pub fn json_to_record_arrow(
         .ok_or_else(|| CoreError::Internal("No data in JSON reader".to_string()))?
         .map_err(|e| CoreError::Internal(format!("Failed to read RecordBatch: {}", e)))
 }
+
+/// 将 RecordBatch 转换为 JSON 数组
+pub fn record_batch_to_json(batch: &RecordBatch) -> CoreResult<Vec<serde_json::Value>> {
+    use datafusion::arrow::json::writer::LineDelimited;
+    use datafusion::arrow::json::ArrayWriter;
+    use std::io::Cursor;
+
+    let mut buffer = Vec::new();
+    {
+        let mut writer = ArrayWriter::new(Cursor::new(&mut buffer));
+        writer
+            .write(batch)
+            .map_err(|e| CoreError::Internal(format!("Failed to write JSON: {}", e)))?;
+        writer
+            .finish()
+            .map_err(|e| CoreError::Internal(format!("Failed to finish JSON: {}", e)))?;
+    }
+
+    // 解析 NDJSON
+    let json_str = String::from_utf8(buffer)
+        .map_err(|e| CoreError::Internal(format!("Invalid UTF-8: {}", e)))?;
+
+    let mut results = Vec::new();
+    for line in json_str.lines() {
+        if !line.trim().is_empty() {
+            let value: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| CoreError::Internal(format!("Failed to parse JSON: {}", e)))?;
+            results.push(value);
+        }
+    }
+
+    Ok(results)
+}
