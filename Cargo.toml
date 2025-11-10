@@ -45,3 +45,4 @@ poem-openapi = "5"
 # GraphQL
 async-graphql = "7"
 async-graphql-poem = "7"
+tempfile = "3.23.0"

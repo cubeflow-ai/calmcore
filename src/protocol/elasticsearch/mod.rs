@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use axum::{
-    extract::{Path, State},
+use poem::{
+    error::ResponseError,
+    handler,
     http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
-    Json, Router,
+    middleware::AddData,
+    web::{Data, Json, Path},
+    EndpointExt, IntoResponse, Response, Route, Server,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,36 +28,35 @@ impl ElasticsearchServer {
         Self { engine }
     }
 
-    /// 创建 Axum Router
-    pub fn router(self) -> Router {
+    /// 创建 Poem Route
+    pub fn app(self) -> impl poem::IntoEndpoint {
         let state = Arc::new(self);
 
-        Router::new()
+        Route::new()
             // 健康检查
-            .route("/", get(root))
-            .route("/_cluster/health", get(cluster_health))
+            .at("/", poem::get(root))
+            .at("/_cluster/health", poem::get(cluster_health))
             // 索引管理
-            .route("/:index", put(create_index))
-            .route("/:index", delete(delete_index))
-            .route("/:index", get(get_index))
-            .route("/_cat/indices", get(list_indices))
+            .at("/:index", poem::put(create_index))
+            .at("/:index", poem::delete(delete_index))
+            .at("/:index", poem::get(get_index))
+            .at("/_cat/indices", poem::get(list_indices))
             // 文档操作
-            .route("/:index/_doc/:id", put(index_document_with_id))
-            .route("/:index/_doc", post(index_document))
-            .route("/:index/_doc/:id", get(get_document))
-            .route("/:index/_doc/:id", delete(delete_document))
+            .at("/:index/_doc/:id", poem::put(index_document_with_id))
+            .at("/:index/_doc", poem::post(index_document))
+            .at("/:index/_doc/:id", poem::get(get_document))
+            .at("/:index/_doc/:id", poem::delete(delete_document))
             // 批量操作
-            .route("/:index/_bulk", post(bulk_operation))
-            .route("/_bulk", post(bulk_operation_global))
+            .at("/:index/_bulk", poem::post(bulk_operation))
+            .at("/_bulk", poem::post(bulk_operation_global))
             // 搜索
-            .route("/:index/_search", post(search_documents))
-            .route("/:index/_search", get(search_documents_get))
-            .with_state(state)
+            .at("/:index/_search", poem::post(search_documents))
+            .at("/:index/_search", poem::get(search_documents_get))
+            .with(AddData::new(state))
     }
 
     /// 启动 HTTP 服务器
     pub async fn start(self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = tokio::net::TcpListener::bind(addr).await?;
         println!("🔍 Elasticsearch API server listening on http://{}", addr);
         println!();
         println!("API endpoints:");
@@ -72,7 +72,9 @@ impl ElasticsearchServer {
         println!("  POST   /:index/_search            - Search documents");
         println!();
 
-        axum::serve(listener, self.router()).await?;
+        Server::new(poem::listener::TcpListener::bind(addr))
+            .run(self.app())
+            .await?;
         Ok(())
     }
 }
@@ -127,8 +129,9 @@ struct ErrorDetail {
 // ===== 处理器函数 =====
 
 /// 根路径 - 返回集群信息
+#[handler]
 async fn root() -> Json<Value> {
-    Json(json!({
+    poem::web::Json(serde_json::json!({
         "name": "calm-node-1",
         "cluster_name": "calm-cluster",
         "version": {
@@ -143,8 +146,9 @@ async fn root() -> Json<Value> {
 }
 
 /// 集群健康检查
+#[handler]
 async fn cluster_health() -> Json<Value> {
-    Json(json!({
+    poem::web::Json(serde_json::json!({
         "cluster_name": "calm-cluster",
         "status": "green",
         "timed_out": false,
@@ -159,11 +163,13 @@ async fn cluster_health() -> Json<Value> {
 }
 
 /// 创建索引
+
+#[handler]
 async fn create_index(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
     Json(payload): Json<CreateIndexRequest>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     // 构建 Schema
     let mut fields = Vec::new();
 
@@ -239,7 +245,7 @@ async fn create_index(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    Ok(Json(json!({
+    Ok(poem::web::Json(serde_json::json!({
         "acknowledged": true,
         "shards_acknowledged": true,
         "index": index
@@ -247,26 +253,30 @@ async fn create_index(
 }
 
 /// 删除索引
+
+#[handler]
 async fn delete_index(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     server
         .engine
         .drop_table(&index)
         .await
         .map_err(|e| AppError::NotFound(format!("Index not found: {}", e)))?;
 
-    Ok(Json(json!({
+    Ok(poem::web::Json(serde_json::json!({
         "acknowledged": true
     })))
 }
 
 /// 获取索引信息
+
+#[handler]
 async fn get_index(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     let meta = server
         .engine
         .get_table_meta(&index)
@@ -293,7 +303,7 @@ async fn get_index(
         );
     }
 
-    Ok(Json(json!({
+    Ok(poem::web::Json(serde_json::json!({
         index: {
             "mappings": {
                 "properties": properties
@@ -309,7 +319,11 @@ async fn get_index(
 }
 
 /// 列出所有索引
-async fn list_indices(State(server): State<Arc<ElasticsearchServer>>) -> Result<String, AppError> {
+
+#[handler]
+async fn list_indices(
+    Data(server): Data<&Arc<ElasticsearchServer>>,
+) -> Result<String, poem::Error> {
     let tables = server.engine.list_tables();
 
     let mut output = String::new();
@@ -327,11 +341,13 @@ async fn list_indices(State(server): State<Arc<ElasticsearchServer>>) -> Result<
 }
 
 /// 索引文档（指定 ID）
+
+#[handler]
 async fn index_document_with_id(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     Path((index, id)): Path<(String, String)>,
     Json(document): Json<Value>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     // 添加 _id 字段到文档
     let mut doc = document;
     if let Value::Object(ref mut map) = doc {
@@ -346,7 +362,7 @@ async fn index_document_with_id(
 
     let partition = server
         .engine
-        .get_partition(partition_id)
+        .get_partition(&index, partition_id)
         .await
         .ok_or_else(|| AppError::Internal("Partition not found".to_string()))?;
 
@@ -355,7 +371,7 @@ async fn index_document_with_id(
         .upsert_json(&[doc])
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    Ok(Json(json!({
+    Ok(poem::web::Json(serde_json::json!({
         "_index": index,
         "_id": id,
         "_version": 1,
@@ -371,11 +387,13 @@ async fn index_document_with_id(
 }
 
 /// 索引文档（自动生成 ID）
+
+#[handler]
 async fn index_document(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
     Json(document): Json<Value>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     // 生成唯一 ID
     let id = uuid::Uuid::new_v4().to_string();
 
@@ -393,7 +411,7 @@ async fn index_document(
 
     let partition = server
         .engine
-        .get_partition(partition_id)
+        .get_partition(&index, partition_id)
         .await
         .ok_or_else(|| AppError::Internal("Partition not found".to_string()))?;
 
@@ -402,7 +420,7 @@ async fn index_document(
         .upsert_json(&[doc])
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    Ok(Json(json!({
+    Ok(poem::web::Json(serde_json::json!({
         "_index": index,
         "_id": id,
         "_version": 1,
@@ -418,10 +436,12 @@ async fn index_document(
 }
 
 /// 获取文档
+
+#[handler]
 async fn get_document(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     Path((index, id)): Path<(String, String)>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     // 获取 partition
     let partition_id = server
         .engine
@@ -430,7 +450,7 @@ async fn get_document(
 
     let partition = server
         .engine
-        .get_partition(partition_id)
+        .get_partition(&index, partition_id)
         .await
         .ok_or_else(|| AppError::Internal("Partition not found".to_string()))?;
 
@@ -446,7 +466,7 @@ async fn get_document(
                 .map_err(|e| AppError::Internal(e.to_string()))?;
 
             if let Some(doc) = json_docs.first() {
-                return Ok(Json(json!({
+                return Ok(poem::web::Json(serde_json::json!({
                     "_index": index,
                     "_id": id,
                     "_version": 1,
@@ -457,7 +477,7 @@ async fn get_document(
         }
     }
 
-    Ok(Json(json!({
+    Ok(poem::web::Json(serde_json::json!({
         "_index": index,
         "_id": id,
         "found": false
@@ -465,12 +485,14 @@ async fn get_document(
 }
 
 /// 删除文档
+
+#[handler]
 async fn delete_document(
-    State(_server): State<Arc<ElasticsearchServer>>,
+    Data(_server): Data<&Arc<ElasticsearchServer>>,
     Path((index, id)): Path<(String, String)>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     // TODO: 实现删除逻辑
-    Ok(Json(json!({
+    Ok(poem::web::Json(serde_json::json!({
         "_index": index,
         "_id": id,
         "_version": 2,
@@ -486,20 +508,24 @@ async fn delete_document(
 }
 
 /// 批量操作
+
+#[handler]
 async fn bulk_operation(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
     body: String,
-) -> Result<Json<Value>, AppError> {
-    bulk_operation_impl(server, Some(index), body).await
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
+    bulk_operation_impl(server.clone(), Some(index), body).await
 }
 
 /// 批量操作（全局）
+
+#[handler]
 async fn bulk_operation_global(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     body: String,
-) -> Result<Json<Value>, AppError> {
-    bulk_operation_impl(server, None, body).await
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
+    bulk_operation_impl(server.clone(), None, body).await
 }
 
 /// 批量操作实现
@@ -507,7 +533,7 @@ async fn bulk_operation_impl(
     server: Arc<ElasticsearchServer>,
     default_index: Option<String>,
     body: String,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     let mut items = Vec::new();
     let mut errors = false;
 
@@ -537,7 +563,7 @@ async fn bulk_operation_impl(
         } else if let Some(delete_action) = action.get("delete") {
             ("delete", delete_action)
         } else {
-            return Err(AppError::BadRequest("Unknown action type".to_string()));
+            return Err(AppError::BadRequest("Unknown action type".to_string()).into());
         };
 
         // 获取索引和 ID
@@ -557,9 +583,9 @@ async fn bulk_operation_impl(
         match action_type {
             "index" | "create" => {
                 if i >= lines.len() {
-                    return Err(AppError::BadRequest(
-                        "Missing document after action".to_string(),
-                    ));
+                    return Err(
+                        AppError::BadRequest("Missing document after action".to_string()).into(),
+                    );
                 }
 
                 // 解析文档
@@ -630,7 +656,7 @@ async fn bulk_operation_impl(
         }
     }
 
-    Ok(Json(json!({
+    Ok(poem::web::Json(serde_json::json!({
         "took": 10,
         "errors": errors,
         "items": items
@@ -638,26 +664,30 @@ async fn bulk_operation_impl(
 }
 
 /// 搜索文档（POST）
+
+#[handler]
 async fn search_documents(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
     Json(search_req): Json<SearchRequest>,
-) -> Result<Json<Value>, AppError> {
-    search_impl(server, index, search_req).await
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
+    search_impl(server.clone(), index, search_req).await
 }
 
 /// 搜索文档（GET）
+
+#[handler]
 async fn search_documents_get(
-    State(server): State<Arc<ElasticsearchServer>>,
+    Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     // 默认搜索请求
     let search_req = SearchRequest {
         query: None,
         size: Some(10),
         from: Some(0),
     };
-    search_impl(server, index, search_req).await
+    search_impl(server.clone(), index, search_req).await
 }
 
 /// 搜索实现
@@ -665,7 +695,7 @@ async fn search_impl(
     server: Arc<ElasticsearchServer>,
     index: String,
     search_req: SearchRequest,
-) -> Result<Json<Value>, AppError> {
+) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     // 获取表的所有 partition
     let meta = server
         .engine
@@ -678,7 +708,11 @@ async fn search_impl(
     // TODO: 实现完整的搜索功能，目前返回空结果
     // 后续可以通过 DataFusion SQL 或直接扫描 segments 实现
     for partition_id in 0..meta.parallel_workers {
-        if let Some(_partition) = server.engine.get_partition(partition_id as u64).await {
+        if let Some(_partition) = server
+            .engine
+            .get_partition(&index, partition_id as u64)
+            .await
+        {
             // 暂时不实现全表扫描，返回空结果
             // 实际应该扫描所有 segments 的数据
         }
@@ -709,7 +743,7 @@ async fn search_impl(
         })
         .collect();
 
-    Ok(Json(json!({
+    Ok(poem::web::Json(serde_json::json!({
         "took": 5,
         "timed_out": false,
         "_shards": {
@@ -745,7 +779,7 @@ async fn insert_document(
 
     let partition = server
         .engine
-        .get_partition(partition_id)
+        .get_partition(&index, partition_id)
         .await
         .ok_or_else(|| AppError::Internal("Partition not found".to_string()))?;
 
@@ -776,6 +810,38 @@ impl std::fmt::Display for AppError {
 }
 
 impl std::error::Error for AppError {}
+
+impl ResponseError for AppError {
+    fn status(&self) -> StatusCode {
+        match self {
+            AppError::NotFound(_) => StatusCode::NOT_FOUND,
+            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn as_response(&self) -> Response {
+        let (status, error_type, reason) = match self {
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "index_not_found_exception", msg),
+            AppError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                "action_request_validation_exception",
+                msg,
+            ),
+            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg),
+        };
+
+        let body = Json(ErrorResponse {
+            error: ErrorDetail {
+                error_type: error_type.to_string(),
+                reason: reason.clone(),
+            },
+            status: status.as_u16(),
+        });
+
+        (status, body).into_response()
+    }
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
