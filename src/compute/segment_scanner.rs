@@ -490,7 +490,7 @@ impl SegmentStream {
         // 1. 收集下一个 chunk 的 doc_ids
         let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut batch_keys_set = std::collections::HashSet::new();
-        let start_offset = self.current_offset;
+        let _start_offset = self.current_offset;
 
         while self.current_offset < self.doc_ids.len() {
             let doc_id = self.doc_ids[self.current_offset];
@@ -516,7 +516,7 @@ impl SegmentStream {
             return Ok(Vec::new());
         }
 
-        let doc_count = batch_groups.values().map(|v| v.len()).sum::<usize>();
+        let _doc_count = batch_groups.values().map(|v| v.len()).sum::<usize>();
 
         // 2. 批量读取这一批的 storage batches
         let batch_keys: Vec<u32> = batch_keys_set.into_iter().collect();
@@ -598,7 +598,7 @@ impl RecordBatchStream for SegmentStream {
 impl futures::Stream for SegmentStream {
     type Item = DFResult<RecordBatch>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // 1. 如果有待处理的 batch,先返回
         if let Some(batch) = self.pending_batches.next() {
             return Poll::Ready(Some(Ok(batch)));

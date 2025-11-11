@@ -956,6 +956,68 @@ impl Engine {
             self.handle_partition_persist(key, active_tasks).await;
         }
     }
+
+    /// 执行 SQL 查询
+    ///
+    /// 这是一个通用的 SQL 查询接口，可被 MySQL、GraphQL、Elasticsearch 等协议层调用
+    pub async fn execute_sql(
+        &self,
+        sql: &str,
+    ) -> CoreResult<Vec<datafusion::arrow::record_batch::RecordBatch>> {
+        use crate::compute::PartitionTableProvider;
+        use datafusion::prelude::*;
+
+        let ctx = SessionContext::new();
+
+        // 提取表名 (简单实现)
+        let query_lower = sql.to_lowercase();
+        let table_names = self.list_tables();
+
+        let mut found_table: Option<String> = None;
+        for table_name in &table_names {
+            if query_lower.contains(&format!("from {}", table_name.to_lowercase()))
+                || query_lower.contains(&format!("from `{}`", table_name.to_lowercase()))
+            {
+                found_table = Some(table_name.clone());
+                break;
+            }
+        }
+
+        let table_name = found_table.ok_or_else(|| {
+            crate::utils::error::CoreError::InvalidParam(format!(
+                "Table not found in query. Available tables: {}",
+                table_names.join(", ")
+            ))
+        })?;
+
+        // 验证表存在
+        let _meta = self.get_table_meta(&table_name)?;
+
+        // 注册所有 partition (简化版: 只使用第一个)
+        // TODO: 未来可以用 UNION ALL 合并多个 partition
+        let partition = self.get_partition(&table_name, 0).await.ok_or_else(|| {
+            crate::utils::error::CoreError::NotExisted(format!(
+                "Partition 0 not found for table '{}'",
+                table_name
+            ))
+        })?;
+
+        let provider = Arc::new(PartitionTableProvider::new(partition));
+        ctx.register_table(&table_name, provider).map_err(|e| {
+            crate::utils::error::CoreError::Internal(format!("Failed to register table: {}", e))
+        })?;
+
+        // 执行查询
+        let df = ctx.sql(sql).await.map_err(|e| {
+            crate::utils::error::CoreError::InvalidParam(format!("Query parse error: {}", e))
+        })?;
+
+        let batches = df.collect().await.map_err(|e| {
+            crate::utils::error::CoreError::Internal(format!("Query execution error: {}", e))
+        })?;
+
+        Ok(batches)
+    }
 }
 
 impl Drop for Engine {

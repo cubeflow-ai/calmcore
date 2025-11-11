@@ -1,4 +1,3 @@
-use crate::compute::PartitionTableProvider;
 use crate::engine::Engine;
 use crate::schema::field::FieldOption;
 use crate::schema::Schema;
@@ -7,7 +6,6 @@ use datafusion::arrow::array::{
     StringArray, UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
-use datafusion::prelude::*;
 use msql_srv::*;
 use std::io;
 use std::sync::Arc;
@@ -200,91 +198,17 @@ async fn execute_query<W: io::Read + io::Write>(
     query: &str,
     results: QueryResultWriter<'_, W>,
 ) -> io::Result<()> {
-    let ctx = SessionContext::new();
-
-    // 提取表名 (简单实现)
-    let query_lower = query.to_lowercase();
-    let table_names = engine.list_tables();
-
-    let mut found_table: Option<String> = None;
-    for table_name in &table_names {
-        if query_lower.contains(&format!("from {}", table_name.to_lowercase()))
-            || query_lower.contains(&format!("from `{}`", table_name.to_lowercase()))
-        {
-            found_table = Some(table_name.clone());
-            break;
-        }
-    }
-
-    let table_name = match found_table {
-        Some(name) => name,
-        None => {
-            let msg = format!(
-                "Table not found in query. Available tables: {}",
-                table_names.join(", ")
-            );
-            return results.error(ErrorKind::ER_NO_SUCH_TABLE, msg.as_bytes());
-        }
-    };
-
-    // 获取表元数据 (验证表存在)
-    let _meta = match engine.get_table_meta(&table_name) {
-        Ok(meta) => meta,
+    // 使用 Engine 的统一 SQL 执行接口
+    let batches = match engine.execute_sql(query).await {
+        Ok(batches) => batches,
         Err(e) => {
-            let msg = format!("Failed to get table metadata: {}", e);
-            return results.error(ErrorKind::ER_NO_SUCH_TABLE, msg.as_bytes());
-        }
-    };
-
-    // 注册所有 partition (简化版: 只使用第一个)
-    // 未来可以用 UNION ALL 合并多个 partition
-    if let Some(partition) = engine.get_partition(&table_name, 0).await {
-        eprintln!(
-            "🔍 [Partition Info] current segment doc_count: {}",
-            partition.get_current_segment().doc_count()
-        );
-        eprintln!(
-            "🔍 [Partition Info] frozen segments count: {}",
-            partition.get_frozen_segments().len()
-        );
-
-        let provider = Arc::new(PartitionTableProvider::new(partition));
-        if let Err(e) = ctx.register_table(&table_name, provider) {
-            let msg = format!("Failed to register table: {}", e);
-            return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
-        }
-    } else {
-        let msg = format!("Partition 0 not found for table '{}'", table_name);
-        return results.error(ErrorKind::ER_NO_SUCH_TABLE, msg.as_bytes());
-    }
-
-    // 执行查询
-    eprintln!("🔍 [SQL Query] {}", query);
-    let df = match ctx.sql(query).await {
-        Ok(df) => {
-            eprintln!("🔍 [SQL] Query parsed successfully");
-            df
-        }
-        Err(e) => {
-            let msg = format!("Query parse error: {}", e);
-            eprintln!("❌ [SQL] Parse error: {}", msg);
+            let msg = format!("SQL execution failed: {}", e);
+            eprintln!("❌ [SQL] Error: {}", msg);
             return results.error(ErrorKind::ER_PARSE_ERROR, msg.as_bytes());
         }
     };
 
-    let batches = match df.collect().await {
-        Ok(batches) => {
-            eprintln!("🔍 [SQL] Query executed successfully");
-            batches
-        }
-        Err(e) => {
-            let msg = format!("Query execution error: {}", e);
-            eprintln!("❌ [SQL] Execution error: {}", msg);
-            return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
-        }
-    };
-
-    // 调试信息
+    eprintln!("🔍 [SQL Query] {}", query);
     eprintln!("🔍 [Query Result] batches.len() = {}", batches.len());
     for (i, batch) in batches.iter().enumerate() {
         eprintln!(
@@ -297,7 +221,6 @@ async fn execute_query<W: io::Read + io::Write>(
 
     // 检查是否有数据
     if batches.is_empty() {
-        // 没有任何 batch，返回空结果
         return results.completed(0, 0);
     }
 
@@ -737,34 +660,14 @@ async fn handle_delete<W: io::Read + io::Write>(
     let where_clause = &query_clean[where_pos.unwrap() + 6..];
     let select_query = format!("SELECT * FROM {} WHERE {}", table_name, where_clause);
 
-    // 创建 DataFusion context 并注册表
-    let ctx = SessionContext::new();
-
-    // 注册所有 partition (简化: 只用第一个)
-    if let Some(partition) = engine.get_partition(&table_name, 0).await {
-        let provider = Arc::new(PartitionTableProvider::new(partition));
-        ctx.register_table(&table_name, provider).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Register table failed: {}", e),
-            )
-        })?;
-    } else {
-        return results.error(ErrorKind::ER_NO_SUCH_TABLE, b"Partition not found");
-    }
-
-    // 执行查询找到要删除的记录
-    let df = ctx.sql(&select_query).await.map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Query parse error: {}", e),
-        )
-    })?;
-
-    let batches = df
-        .collect()
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Query failed: {}", e)))?;
+    // 使用 Engine 的统一 SQL 执行接口
+    let batches = match engine.execute_sql(&select_query).await {
+        Ok(batches) => batches,
+        Err(e) => {
+            let msg = format!("Query execution failed: {}", e);
+            return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
+        }
+    };
 
     if batches.is_empty() {
         return results.completed(0, 0);

@@ -1,6 +1,7 @@
 use async_graphql_poem::GraphQL;
 use calm::catalog::PartitionStrategy;
 use calm::engine::{Engine, EngineConfig};
+use calm::protocol::elasticsearch::ElasticsearchServer;
 use calm::protocol::graphql::GraphQLServer;
 use calm::protocol::mysql::MysqlServer;
 use calm::schema::field::FieldOption;
@@ -413,10 +414,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // 6. 启动 MySQL 服务器
-    println!("=== Starting MySQL Server ===\n");
+    // 6. 启动多个服务器
+    println!("=== Starting Servers ===\n");
+
+    println!("✓ Elasticsearch Server starting on 127.0.0.1:9200");
+    println!("✓ GraphQL Server starting on 127.0.0.1:8080");
     println!("✓ MySQL Server starting on 127.0.0.1:3307");
-    println!("\n💡 Connect using:");
+
+    println!("\n💡 Elasticsearch API:");
+    println!("   curl -X POST 'http://127.0.0.1:9200/context_report/_bulk' \\");
+    println!("     -H 'Content-Type: application/x-ndjson' -d '...'");
+
+    println!("\n💡 MySQL Connection:");
     println!("   mysql -h 127.0.0.1 -P 3307 -u root\n");
     println!("📚 Example Queries:");
     println!("   SELECT COUNT(*) FROM context_report;");
@@ -426,17 +435,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   SELECT \"appClient_clientName\", ip FROM context_report WHERE \"traceFrom_sampling\" = true LIMIT 10;");
     println!("\n⚠️  Note: Mixed-case field names require double quotes (e.g., \\\"envSetting_language\\\")\n");
 
+    // 启动 Elasticsearch 服务器
+    let es_handle = tokio::spawn({
+        let engine = engine.clone();
+        async move {
+            let es_server = ElasticsearchServer::new(engine);
+            let _ = es_server.start("127.0.0.1:9200").await;
+        }
+    });
+
     let graphql_handle = tokio::spawn({
         let engine = engine.clone();
         async move {
             let graphql_server = GraphQLServer::new(engine);
-            graphql_server.start("127.0.0.1:8080").await
+            let _ = graphql_server.start("127.0.0.1:8080").await;
         }
     });
 
     let mysql_result = MysqlServer::new(engine).start("127.0.0.1:3307").await;
 
-    // 等待 GraphQL 服务器结束(通常不会)
+    // 等待服务器结束(通常不会)
+    let _ = es_handle.await;
     let _ = graphql_handle.await;
 
     mysql_result
