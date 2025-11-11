@@ -36,22 +36,17 @@ impl ElasticsearchServer {
             // 健康检查
             .at("/", poem::get(root))
             .at("/_cluster/health", poem::get(cluster_health))
-            // 索引管理
-            .at("/:index", poem::put(create_index))
-            .at("/:index", poem::delete(delete_index))
-            .at("/:index", poem::get(get_index))
             .at("/_cat/indices", poem::get(list_indices))
-            // 文档操作
-            .at("/:index/_doc/:id", poem::put(index_document_with_id))
+            // 索引管理 - 标准 Elasticsearch API 路径
+            .at("/:index", poem::put(create_index).get(get_index).delete(delete_index))
+            // 文档操作 - 合并相同路径的不同 HTTP 方法
+            .at("/:index/_doc/:id", poem::put(index_document_with_id).get(get_document).delete(delete_document))
             .at("/:index/_doc", poem::post(index_document))
-            .at("/:index/_doc/:id", poem::get(get_document))
-            .at("/:index/_doc/:id", poem::delete(delete_document))
             // 批量操作
             .at("/:index/_bulk", poem::post(bulk_operation))
             .at("/_bulk", poem::post(bulk_operation_global))
             // 搜索
-            .at("/:index/_search", poem::post(search_documents))
-            .at("/:index/_search", poem::get(search_documents_get))
+            .at("/:index/_search", poem::post(search_documents).get(search_documents_get))
             .with(AddData::new(state))
     }
 
@@ -696,6 +691,8 @@ async fn search_impl(
     index: String,
     search_req: SearchRequest,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
+    let start_time = std::time::Instant::now();
+
     // 获取表的所有 partition
     let meta = server
         .engine
@@ -705,25 +702,49 @@ async fn search_impl(
     let mut all_docs = Vec::new();
 
     // 查询所有 partition
-    // TODO: 实现完整的搜索功能，目前返回空结果
-    // 后续可以通过 DataFusion SQL 或直接扫描 segments 实现
     for partition_id in 0..meta.parallel_workers {
-        if let Some(_partition) = server
+        if let Some(partition) = server
             .engine
             .get_partition(&index, partition_id as u64)
             .await
         {
-            // 暂时不实现全表扫描，返回空结果
-            // 实际应该扫描所有 segments 的数据
+            // 扫描当前 segment
+            let current_segment = partition.get_current_segment();
+            if let Ok(batches) = current_segment.scan_documents() {
+                for batch in batches {
+                    if let Ok(docs) = crate::utils::arrow_utils::record_batch_to_json(&batch) {
+                        all_docs.extend(docs);
+                    }
+                }
+            }
+
+            // 扫描所有 frozen segments
+            let frozen_segments = partition.get_frozen_segments();
+            for (_, segment) in frozen_segments.iter() {
+                if let Ok(batches) = segment.scan_documents() {
+                    for batch in batches {
+                        if let Ok(docs) = crate::utils::arrow_utils::record_batch_to_json(&batch) {
+                            all_docs.extend(docs);
+                        }
+                    }
+                }
+            }
         }
     }
+
+    // 应用查询过滤（简单的 match_all 或 term 查询）
+    let filtered_docs = if let Some(query) = &search_req.query {
+        apply_query_filter(&all_docs, query)
+    } else {
+        all_docs // 如果没有查询条件，返回所有文档
+    };
 
     // 分页
     let from = search_req.from.unwrap_or(0);
     let size = search_req.size.unwrap_or(10);
-    let total = all_docs.len();
+    let total = filtered_docs.len();
 
-    let hits: Vec<Value> = all_docs
+    let hits: Vec<Value> = filtered_docs
         .into_iter()
         .skip(from)
         .take(size)
@@ -743,8 +764,10 @@ async fn search_impl(
         })
         .collect();
 
+    let took = start_time.elapsed().as_millis() as u64;
+
     Ok(poem::web::Json(serde_json::json!({
-        "took": 5,
+        "took": took,
         "timed_out": false,
         "_shards": {
             "total": meta.parallel_workers,
@@ -761,6 +784,76 @@ async fn search_impl(
             "hits": hits
         }
     })))
+}
+
+/// 应用查询过滤
+fn apply_query_filter(docs: &[Value], query: &Value) -> Vec<Value> {
+    // 简单的查询实现，支持 match_all 和 term 查询
+    if let Some(query_obj) = query.as_object() {
+        if query_obj.contains_key("match_all") {
+            return docs.to_vec();
+        }
+        
+        if let Some(term) = query_obj.get("term") {
+            if let Some(term_obj) = term.as_object() {
+                let mut filtered = Vec::new();
+                
+                for doc in docs {
+                    let mut matches = true;
+                    
+                    for (field, value) in term_obj {
+                        if !check_field_match(doc, field, value) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                    
+                    if matches {
+                        filtered.push(doc.clone());
+                    }
+                }
+                
+                return filtered;
+            }
+        }
+        
+        // 支持简单的 match 查询
+        if let Some(match_query) = query_obj.get("match") {
+            if let Some(match_obj) = match_query.as_object() {
+                let mut filtered = Vec::new();
+                
+                for doc in docs {
+                    let mut matches = true;
+                    
+                    for (field, value) in match_obj {
+                        if !check_field_match(doc, field, value) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                    
+                    if matches {
+                        filtered.push(doc.clone());
+                    }
+                }
+                
+                return filtered;
+            }
+        }
+    }
+    
+    // 默认返回所有文档
+    docs.to_vec()
+}
+
+/// 检查字段是否匹配
+fn check_field_match(doc: &Value, field: &str, expected_value: &Value) -> bool {
+    if let Some(doc_obj) = doc.as_object() {
+        if let Some(field_value) = doc_obj.get(field) {
+            return field_value == expected_value;
+        }
+    }
+    false
 }
 
 // ===== 辅助函数 =====
