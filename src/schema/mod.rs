@@ -90,7 +90,9 @@ impl Schema {
                 field::FieldOption::Boolean { .. } => (DataType::Boolean, true),
             };
 
-            arrow_fields.push(Field::new(field.name(), data_type, nullable));
+            // Convert field name to lowercase for case-insensitive SQL queries
+            let field_name_lower = field.name().to_lowercase();
+            arrow_fields.push(Field::new(field_name_lower, data_type, nullable));
         }
 
         Arc::new(ArrowSchema::new(arrow_fields))

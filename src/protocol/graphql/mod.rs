@@ -132,51 +132,9 @@ impl QueryRoot {
     async fn query(&self, ctx: &Context<'_>, sql: String) -> Result<QueryResult> {
         let engine = ctx.data::<Arc<Engine>>()?;
 
-        // 解析 SQL 获取表名 (简单实现: 从 FROM 后提取)
-        let sql_upper = sql.to_uppercase();
-        let table_name = if let Some(from_pos) = sql_upper.find(" FROM ") {
-            let after_from = &sql[from_pos + 6..];
-            after_from
-                .split_whitespace()
-                .next()
-                .unwrap_or("unknown")
-                .to_string()
-        } else {
-            return Err(async_graphql::Error::new(
-                "Cannot parse table name from SQL",
-            ));
-        };
-
-        // 创建 DataFusion context
-        use datafusion::prelude::*;
-        let datafusion_ctx = SessionContext::new();
-
-        // 注册所有 partition
-        let meta = engine
-            .get_table_meta(&table_name)
-            .map_err(|e| async_graphql::Error::new(format!("Table not found: {}", e)))?;
-
-        for partition_id in 0..meta.parallel_workers {
-            if let Some(partition) = engine.get_partition(&table_name, partition_id as u64).await {
-                use crate::compute::PartitionTableProvider;
-                let provider = Arc::new(PartitionTableProvider::new(partition));
-                datafusion_ctx
-                    .register_table(&table_name, provider)
-                    .map_err(|e| {
-                        async_graphql::Error::new(format!("Register table failed: {}", e))
-                    })?;
-                break; // 简化: 只注册第一个 partition
-            }
-        }
-
-        // 执行查询
-        let df = datafusion_ctx
-            .sql(&sql)
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("SQL parse error: {}", e)))?;
-
-        let batches = df
-            .collect()
+        // 使用 Engine 的 execute_sql 方法
+        let batches = engine
+            .execute_sql(&sql)
             .await
             .map_err(|e| async_graphql::Error::new(format!("Query failed: {}", e)))?;
 
@@ -429,11 +387,6 @@ impl GraphQLServer {
 
     /// 启动 GraphQL 服务器
     pub async fn start(self, addr: &str) -> Result<(), std::io::Error> {
-        println!("=== Calm Database - GraphQL Server ===");
-        println!();
-        println!("✓ Engine initialized");
-        println!();
-
         // 创建 GraphQL Schema
         let graphql_schema = create_schema(self.engine.clone());
 
@@ -473,98 +426,6 @@ impl GraphQLServer {
                 })),
             )
             .with(Cors::new());
-
-        println!("🚀 GraphQL Server starting on http://{}", addr);
-        println!();
-        println!("📍 Endpoints:");
-        println!("   GraphQL API:        http://{}/graphql", addr);
-        println!("   GraphQL Playground: http://{}/playground", addr);
-        println!();
-        println!("📚 Available Operations:");
-        println!();
-        println!("  Queries:");
-        println!("    - tables: [String!]!");
-        println!("    - table(name: String!): Table");
-        println!("    - query(sql: String!): QueryResult!");
-        println!();
-        println!("  Mutations:");
-        println!("    - createTable(input: CreateTableInput!): Table!");
-        println!("    - dropTable(name: String!): Boolean!");
-        println!("    - flushTable(name: String!): Boolean!");
-        println!("    - insertData(input: InsertDataInput!): InsertResult!");
-        println!();
-        println!("📖 Example Usage:");
-        println!();
-        println!("  1️⃣  Create a table:");
-        println!(
-            r#"
-mutation {{
-  createTable(input: {{
-    name: "users"
-    primaryKey: "id"
-    partitionCount: 1
-    fields: [
-      {{ name: "id", fieldType: "keyword" }}
-      {{ name: "name", fieldType: "keyword" }}
-      {{ name: "age", fieldType: "i64" }}
-      {{ name: "email", fieldType: "keyword" }}
-    ]
-  }}) {{
-    name
-    partitionCount
-    fields {{
-      name
-      fieldType
-      indexed
-    }}
-  }}
-}}
-"#
-        );
-        println!();
-        println!("  2️⃣  Insert data:");
-        println!(
-            r#"
-mutation {{
-  insertData(input: {{
-    table: "users"
-    data: [
-      {{id: "1", name: "Alice", age: 30, email: "alice@example.com"}},
-      {{id: "2", name: "Bob", age: 25, email: "bob@example.com"}}
-    ]
-  }}) {{
-    success
-    rowsInserted
-    message
-  }}
-}}
-"#
-        );
-        println!();
-        println!("  3️⃣  Query with SQL:");
-        println!(
-            r#"
-query {{
-  query(sql: "SELECT * FROM users WHERE age > 20") {{
-    columns
-    totalRows
-    rows
-  }}
-}}
-"#
-        );
-        println!();
-        println!("  4️⃣  Flush table (persist to disk):");
-        println!(
-            r#"
-mutation {{
-  flushTable(name: "users")
-}}
-"#
-        );
-        println!();
-        println!("Press Ctrl+C to stop the server");
-        println!();
 
         Server::new(TcpListener::bind(addr)).run(app).await
     }

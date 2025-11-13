@@ -1,4 +1,5 @@
 pub(crate) mod arrow_utils;
+pub mod datetime_utils;
 pub mod error;
 
 #[macro_export]

@@ -47,3 +47,10 @@ async-graphql = "7"
 async-graphql-poem = "7"
 tempfile = "3.23.0"
 regex = "1.10"
+chrono = "0.4"
+toml = "0.8"
+
+
+[[bin]]
+name = "calm"
+path = "src/bin/calm/main.rs"

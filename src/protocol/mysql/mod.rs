@@ -20,27 +20,39 @@ impl MysqlServer {
     }
 
     pub async fn start(self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = std::net::TcpListener::bind(addr)?;
-        println!("MySQL server listening on {}", addr);
+        let listener = tokio::net::TcpListener::bind(addr).await?;
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
+        loop {
+            match listener.accept().await {
+                Ok((stream, addr)) => {
+                    println!("MySQL client connected from: {}", addr);
                     let engine = self.engine.clone();
-                    tokio::spawn(async move {
-                        let backend = CalmBackend { engine };
-                        if let Err(e) = MysqlIntermediary::run_on_tcp(backend, stream) {
-                            eprintln!("Error handling client: {}", e);
+
+                    // 将 tokio TcpStream 转换为 std TcpStream 并设置为阻塞模式
+                    // msql_srv 需要阻塞式的 std::net::TcpStream
+                    tokio::task::spawn_blocking(move || match stream.into_std() {
+                        Ok(std_stream) => {
+                            // 设置为阻塞模式，msql_srv 期望阻塞 I/O
+                            if let Err(e) = std_stream.set_nonblocking(false) {
+                                eprintln!("Failed to set blocking mode: {}", e);
+                                return;
+                            }
+
+                            let backend = CalmBackend { engine };
+                            if let Err(e) = MysqlIntermediary::run_on_tcp(backend, std_stream) {
+                                eprintln!("Error handling MySQL client: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to convert stream: {}", e);
                         }
                     });
                 }
                 Err(e) => {
-                    eprintln!("Connection failed: {}", e);
+                    eprintln!("MySQL connection failed: {}", e);
                 }
             }
         }
-
-        Ok(())
     }
 }
 
@@ -198,9 +210,8 @@ async fn execute_query<W: io::Read + io::Write>(
     query: &str,
     results: QueryResultWriter<'_, W>,
 ) -> io::Result<()> {
-    // 使用 Engine 的统一 SQL 执行接口
-    let batches = match engine.execute_sql(query).await {
-        Ok(batches) => batches,
+    let batches = match engine.clone().execute_sql(query).await {
+        Ok(result) => result,
         Err(e) => {
             let msg = format!("SQL execution failed: {}", e);
             eprintln!("❌ [SQL] Error: {}", msg);
@@ -660,9 +671,8 @@ async fn handle_delete<W: io::Read + io::Write>(
     let where_clause = &query_clean[where_pos.unwrap() + 6..];
     let select_query = format!("SELECT * FROM {} WHERE {}", table_name, where_clause);
 
-    // 使用 Engine 的统一 SQL 执行接口
-    let batches = match engine.execute_sql(&select_query).await {
-        Ok(batches) => batches,
+    let batches = match engine.clone().execute_sql(&select_query).await {
+        Ok(result) => result,
         Err(e) => {
             let msg = format!("Query execution failed: {}", e);
             return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());

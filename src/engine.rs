@@ -133,24 +133,25 @@ impl Engine {
 
     /// 加载所有已存在的表和它们的 partition
     pub async fn load_existing_tables(self: &Arc<Self>) -> CoreResult<()> {
-        println!("🔍 [Engine] Loading existing tables...");
+        log::info!("🔍 [Engine] Loading existing tables...");
         let table_names = self.catalog.list_tables();
-        println!("🔍 [Engine] Found {} tables", table_names.len());
+        log::info!("🔍 [Engine] Found {} tables", table_names.len());
 
         for table_name in table_names {
-            println!("🔍 [Engine] Loading table: {}", table_name);
+            log::info!("🔍 [Engine] Loading table: {}", table_name);
             let meta = match self.catalog.get_table(&table_name) {
                 Ok(meta) => meta,
                 Err(e) => {
-                    eprintln!("⚠️  Failed to get metadata for table {}: {}", table_name, e);
+                    log::warn!("⚠️  Failed to get metadata for table {}: {}", table_name, e);
                     continue;
                 }
             };
 
             let num_partitions = meta.parallel_workers;
-            println!(
+            log::info!(
                 "🔍 [Engine] Table {} has {} partitions",
-                table_name, num_partitions
+                table_name,
+                num_partitions
             );
 
             // 加载所有 partition
@@ -166,7 +167,7 @@ impl Engine {
 
                 // 检查目录是否存在
                 if !partition_dir.exists() {
-                    println!("🔍 [Engine] Partition directory does not exist, creating new partition: {}", i);
+                    log::info!("🔍 [Engine] Partition directory does not exist, creating new partition: {}", i);
                     // 如果目录不存在，创建新的 partition
                     let partition = Partition::new(
                         i as u64,
@@ -178,7 +179,7 @@ impl Engine {
                     let partition = Arc::new(partition);
                     self.add_partition_with_table(&table_name, partition).await;
                 } else {
-                    println!("🔍 [Engine] Loading existing partition: {}", i);
+                    log::info!("🔍 [Engine] Loading existing partition: {}", i);
                     // 如果目录存在，从磁盘加载
                     match Partition::load(
                         i as u64,
@@ -192,18 +193,21 @@ impl Engine {
                             self.add_partition_with_table(&table_name, partition).await;
                         }
                         Err(e) => {
-                            eprintln!(
+                            log::error!(
                                 "⚠️  Failed to load partition {} for table {}: {}",
-                                i, table_name, e
+                                i,
+                                table_name,
+                                e
                             );
                         }
                     }
                 }
             }
 
-            println!(
+            log::info!(
                 "✅ Loaded table '{}' with {} partitions",
-                table_name, num_partitions
+                table_name,
+                num_partitions
             );
         }
 
@@ -252,9 +256,10 @@ impl Engine {
         self.catalog.create_table(meta)?;
 
         // 加载所有 partition 到内存
-        println!(
+        log::debug!(
             "🔍 [DEBUG create_table] Creating {} partitions for table '{}'",
-            num_partitions, table_name
+            num_partitions,
+            table_name
         );
         for i in 0..num_partitions {
             let partition_dir = self
@@ -266,9 +271,10 @@ impl Engine {
                 .join(format!("partition-{}", i))
                 .join("segments");
 
-            println!(
+            log::debug!(
                 "🔍 [DEBUG create_table] Creating partition {} at {:?}",
-                i, partition_dir
+                i,
+                partition_dir
             );
 
             let partition = Partition::new(
@@ -280,17 +286,18 @@ impl Engine {
             );
 
             let partition = Arc::new(partition);
-            println!(
+            log::debug!(
                 "🔍 [DEBUG create_table] About to add partition {} to map",
                 i
             );
             self.add_partition_with_table(table_name, partition).await;
-            println!("🔍 [DEBUG create_table] Finished adding partition {}", i);
+            log::debug!("🔍 [DEBUG create_table] Finished adding partition {}", i);
         }
 
-        println!(
+        log::debug!(
             "✅ Table '{}' created with {} partitions",
-            table_name, num_partitions
+            table_name,
+            num_partitions
         );
         Ok(())
     }
@@ -408,12 +415,13 @@ impl Engine {
         let mut partitions = self.partitions.write().await;
         partitions.insert(key.clone(), partition);
 
-        println!(
+        log::debug!(
             "🔍 [DEBUG] Added partition: table={}, partition_id={}",
-            table_name, partition_id
+            table_name,
+            partition_id
         );
-        println!("🔍 [DEBUG] Total partitions in map: {}", partitions.len());
-        println!("🔍 [DEBUG] Key inserted: {:?}", key);
+        log::debug!("🔍 [DEBUG] Total partitions in map: {}", partitions.len());
+        log::debug!("🔍 [DEBUG] Key inserted: {:?}", key);
 
         log::info!("Added partition {} for table {}", partition_id, table_name);
     }
@@ -489,11 +497,6 @@ impl Engine {
             partition_id,
         };
         let partitions = self.partitions.read().await;
-
-        for k in partitions.keys() {
-            println!("  - {:?}", k);
-        }
-
         let result = partitions.get(&key).cloned();
         result
     }
@@ -545,26 +548,6 @@ impl Engine {
         }
 
         stats
-    }
-
-    /// 打印统计信息
-    pub async fn print_stats(&self) {
-        let stats = self.stats().await;
-
-        println!("\n╔══════════════════════════════════════════════════════════════╗");
-        println!("║                     Engine Statistics                        ║");
-        println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║ Partitions          : {:>39} ║", stats.partition_count);
-        println!("║ Total Documents     : {:>39} ║", stats.total_doc_count);
-        println!(
-            "║ Frozen Segments     : {:>39} ║",
-            stats.total_frozen_segments
-        );
-        println!(
-            "║ Unpersisted Segments: {:>39} ║",
-            stats.total_unpersisted_segments
-        );
-        println!("╚══════════════════════════════════════════════════════════════╝\n");
     }
 
     /// 同步持久化指定的 Partition
@@ -619,15 +602,16 @@ impl Engine {
     /// // 此时 users 表的所有数据已写入磁盘
     /// ```
     pub async fn flush_table(&self, table_name: &str) -> CoreResult<()> {
-        println!("🔄 Flushing table '{}'...", table_name);
+        log::info!("🔄 Flushing table '{}'...", table_name);
 
         // 1. 获取表的元数据以确定有多少个 partition
         let meta = self.catalog.get_table(table_name)?;
         let num_partitions = meta.parallel_workers;
 
-        println!(
+        log::info!(
             "🔍 Table '{}' has {} partitions",
-            table_name, num_partitions
+            table_name,
+            num_partitions
         );
 
         // 2. 持久化所有 partition
@@ -641,16 +625,19 @@ impl Engine {
             {
                 Ok(_) => {
                     success_count += 1;
-                    println!(
+                    log::info!(
                         "✅ Flushed partition {} of table '{}'",
-                        partition_id, table_name
+                        partition_id,
+                        table_name
                     );
                 }
                 Err(e) => {
                     error_count += 1;
-                    eprintln!(
+                    log::error!(
                         "❌ Failed to flush partition {} of table '{}': {}",
-                        partition_id, table_name, e
+                        partition_id,
+                        table_name,
+                        e
                     );
                 }
             }
@@ -662,9 +649,10 @@ impl Engine {
                 error_count, num_partitions, table_name
             )))
         } else {
-            println!(
+            log::info!(
                 "✅ Successfully flushed all {} partitions of table '{}'",
-                success_count, table_name
+                success_count,
+                table_name
             );
             Ok(())
         }
@@ -776,7 +764,7 @@ impl Engine {
         mut persist_rx: mpsc::UnboundedReceiver<PersistRequest>,
         mut partition_notify_rx: mpsc::UnboundedReceiver<(String, u64)>,
     ) {
-        println!("[Engine] Persist background task started");
+        log::info!("[Engine] Persist background task started");
 
         // 定时器
         let mut interval =
@@ -805,12 +793,12 @@ impl Engine {
                         }
 
                         PersistRequest::Shutdown => {
-                            println!("[Engine] Persist task shutting down...");
+                            log::info!("[Engine] Persist task shutting down...");
 
                             // 等待所有任务完成
                             let tasks = active_tasks.lock().await;
                             for (key, _) in tasks.iter() {
-                                println!("[Engine] Waiting for partition {}/{} to finish persisting",
+                                log::info!("[Engine] Waiting for partition {}/{} to finish persisting",
                                     key.table_name, key.partition_id);
                             }
 
@@ -821,7 +809,7 @@ impl Engine {
 
                 // 接收 Partition 的通知（write/flush 达到阈值）
                 Some((table_name, partition_id)) = partition_notify_rx.recv() => {
-                    println!("[Engine] Received persist notification from partition {}/{}", table_name, partition_id);
+                    log::info!("[Engine] Received persist notification from partition {}/{}", table_name, partition_id);
                     let key = PartitionKey {
                         table_name,
                         partition_id,
@@ -842,7 +830,7 @@ impl Engine {
             }
         }
 
-        println!("[Engine] Persist background task stopped");
+        log::info!("[Engine] Persist background task stopped");
     }
     /// 处理单个 Partition 的持久化
     async fn handle_partition_persist(
@@ -854,9 +842,10 @@ impl Engine {
         {
             let tasks = active_tasks.lock().await;
             if tasks.contains_key(&key) {
-                println!(
+                log::info!(
                     "[Engine] Partition {}/{} is already persisting, skip",
-                    key.table_name, key.partition_id
+                    key.table_name,
+                    key.partition_id
                 );
                 return;
             }
@@ -868,9 +857,10 @@ impl Engine {
             match parts.get(&key) {
                 Some(p) => p.clone(),
                 None => {
-                    println!(
+                    log::info!(
                         "[Engine] Partition {}/{} not found",
-                        key.table_name, key.partition_id
+                        key.table_name,
+                        key.partition_id
                     );
                     return;
                 }
@@ -888,7 +878,7 @@ impl Engine {
             return;
         }
 
-        println!(
+        log::info!(
             "[Engine] Partition {}/{} has {} segments ready for persist (doc/time threshold)",
             key.table_name,
             key.partition_id,
@@ -905,7 +895,7 @@ impl Engine {
 
             match result {
                 Ok(Ok(persisted_ids)) => {
-                    println!(
+                    log::info!(
                         "[Engine] Partition {}/{} persist completed: {} segments",
                         key_clone.table_name,
                         key_clone.partition_id,
@@ -913,15 +903,19 @@ impl Engine {
                     );
                 }
                 Ok(Err(e)) => {
-                    eprintln!(
+                    log::error!(
                         "[Engine] Partition {}/{} persist failed: {:?}",
-                        key_clone.table_name, key_clone.partition_id, e
+                        key_clone.table_name,
+                        key_clone.partition_id,
+                        e
                     );
                 }
                 Err(e) => {
-                    eprintln!(
+                    log::error!(
                         "[Engine] Partition {}/{} persist task panicked: {:?}",
-                        key_clone.table_name, key_clone.partition_id, e
+                        key_clone.table_name,
+                        key_clone.partition_id,
+                        e
                     );
                 }
             }
@@ -929,9 +923,10 @@ impl Engine {
             // 持久化完成后立即从 active_tasks 中移除
             let mut tasks = active_tasks_clone.lock().await;
             tasks.remove(&key_clone);
-            println!(
+            log::info!(
                 "[Engine] Partition {}/{} removed from active tasks",
-                key_clone.table_name, key_clone.partition_id
+                key_clone.table_name,
+                key_clone.partition_id
             );
         });
 
@@ -957,66 +952,32 @@ impl Engine {
         }
     }
 
-    /// 执行 SQL 查询
+    /// 执行 SQL 查询 (向后兼容方法)
     ///
-    /// 这是一个通用的 SQL 查询接口，可被 MySQL、GraphQL、Elasticsearch 等协议层调用
+    /// **推荐**: 新代码请直接使用 `DistributedExecutor`
+    ///
+    /// # 参数
+    /// - `sql`: SQL 查询语句
+    ///
+    /// # 返回
+    /// - `batches`: 查询结果的数据批次
+    ///
+    /// # 注意
+    /// 此方法现在委托给 `DistributedExecutor`，保持向后兼容。
+    /// 由于需要 Arc<Engine>，建议协议层直接使用 DistributedExecutor。
+    ///
+    /// 如果协议层需要总行数（如 ES 分页），应该：
+    /// 1. 先执行 COUNT 查询获取总数
+    /// 2. 再执行实际查询获取数据
     pub async fn execute_sql(
-        &self,
+        self: &Arc<Self>,
         sql: &str,
     ) -> CoreResult<Vec<datafusion::arrow::record_batch::RecordBatch>> {
-        use crate::compute::PartitionTableProvider;
-        use datafusion::prelude::*;
+        use crate::compute::DistributedExecutor;
 
-        let ctx = SessionContext::new();
-
-        // 提取表名 (简单实现)
-        let query_lower = sql.to_lowercase();
-        let table_names = self.list_tables();
-
-        let mut found_table: Option<String> = None;
-        for table_name in &table_names {
-            if query_lower.contains(&format!("from {}", table_name.to_lowercase()))
-                || query_lower.contains(&format!("from `{}`", table_name.to_lowercase()))
-            {
-                found_table = Some(table_name.clone());
-                break;
-            }
-        }
-
-        let table_name = found_table.ok_or_else(|| {
-            crate::utils::error::CoreError::InvalidParam(format!(
-                "Table not found in query. Available tables: {}",
-                table_names.join(", ")
-            ))
-        })?;
-
-        // 验证表存在
-        let _meta = self.get_table_meta(&table_name)?;
-
-        // 注册所有 partition (简化版: 只使用第一个)
-        // TODO: 未来可以用 UNION ALL 合并多个 partition
-        let partition = self.get_partition(&table_name, 0).await.ok_or_else(|| {
-            crate::utils::error::CoreError::NotExisted(format!(
-                "Partition 0 not found for table '{}'",
-                table_name
-            ))
-        })?;
-
-        let provider = Arc::new(PartitionTableProvider::new(partition));
-        ctx.register_table(&table_name, provider).map_err(|e| {
-            crate::utils::error::CoreError::Internal(format!("Failed to register table: {}", e))
-        })?;
-
-        // 执行查询
-        let df = ctx.sql(sql).await.map_err(|e| {
-            crate::utils::error::CoreError::InvalidParam(format!("Query parse error: {}", e))
-        })?;
-
-        let batches = df.collect().await.map_err(|e| {
-            crate::utils::error::CoreError::Internal(format!("Query execution error: {}", e))
-        })?;
-
-        Ok(batches)
+        let executor = DistributedExecutor::new(self.clone());
+        let result = executor.execute_sql(sql).await?;
+        Ok(result.batches)
     }
 }
 
@@ -1026,6 +987,6 @@ impl Drop for Engine {
         let _ = self.persist_tx.send(PersistRequest::Shutdown);
         // 注意: Drop 是同步的，无法 await stop()
         // 建议用户在 drop 前显式调用 engine.stop().await
-        println!("[Engine] Dropping - if data not saved, call engine.stop().await first!");
+        log::info!("[Engine] Dropping - if data not saved, call engine.stop().await first!");
     }
 }

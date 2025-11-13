@@ -4,14 +4,9 @@ use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::Session,
     datasource::{TableProvider, TableType},
-    error::{DataFusionError, Result},
-    execution::{SendableRecordBatchStream, TaskContext},
+    error::Result,
     logical_expr::{Expr, TableProviderFilterPushDown},
-    physical_expr::EquivalenceProperties,
-    physical_plan::{
-        execution_plan::{Boundedness, EmissionType},
-        DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    },
+    physical_plan::ExecutionPlan,
 };
 
 use crate::partition::Partition;
@@ -217,10 +212,22 @@ impl TableProvider for PartitionTableProvider {
         // Collect execution plans from all segments (current + frozen)
         let mut segment_plans: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
 
+        eprintln!(
+            "🔍 [PartitionTableProvider::scan] Starting scan for partition {}",
+            self.partition.id()
+        );
+        eprintln!("🔍 [PartitionTableProvider::scan] Filters: {:?}", filters);
+
         // Add current segment (only if non-empty)
         {
             let current_segment = self.partition.get_current_segment();
-            if current_segment.doc_count() > 0 {
+            let doc_count = current_segment.doc_count();
+            eprintln!(
+                "🔍 [PartitionTableProvider::scan] Current segment doc_count: {}",
+                doc_count
+            );
+
+            if doc_count > 0 {
                 let scanner = self.create_segment_scanner(&*current_segment)?;
                 if let Some(plan) = scanner.create_execution_plan(filters, projection) {
                     segment_plans.push(plan);
@@ -231,8 +238,17 @@ impl TableProvider for PartitionTableProvider {
         // Add frozen segments
         {
             let frozen_segments = self.partition.get_frozen_segments();
+            eprintln!(
+                "🔍 [PartitionTableProvider::scan] Frozen segments count: {}",
+                frozen_segments.len()
+            );
 
-            for (_seg_id, segment) in frozen_segments.iter() {
+            for (seg_id, segment) in frozen_segments.iter() {
+                eprintln!(
+                    "🔍 [PartitionTableProvider::scan] Frozen segment {} doc_count: {}",
+                    seg_id,
+                    segment.doc_count()
+                );
                 let scanner = self.create_segment_scanner(segment)?;
                 if let Some(plan) = scanner.create_execution_plan(filters, projection) {
                     segment_plans.push(plan);
@@ -240,8 +256,14 @@ impl TableProvider for PartitionTableProvider {
             }
         }
 
+        eprintln!(
+            "🔍 [PartitionTableProvider::scan] Total segment plans created: {}",
+            segment_plans.len()
+        );
+
         // Handle empty partition case - return empty plan instead of error
         if segment_plans.is_empty() {
+            eprintln!("⚠️  [PartitionTableProvider::scan] No segments found, returning empty plan");
             use datafusion::physical_plan::empty::EmptyExec;
 
             // 使用投影后的schema(如果有),否则使用完整schema
@@ -266,117 +288,5 @@ impl TableProvider for PartitionTableProvider {
 
         let union_plan = UnionExec::new(segment_plans);
         Ok(Arc::new(union_plan))
-    }
-}
-
-/// PartitionUnionExec: ExecutionPlan that unions multiple segment execution plans
-///
-/// This is similar to DataFusion's UnionExec but specialized for our use case
-struct PartitionUnionExec {
-    inputs: Vec<Arc<dyn ExecutionPlan>>,
-    schema: SchemaRef,
-    properties: PlanProperties,
-}
-
-impl PartitionUnionExec {
-    fn new(inputs: Vec<Arc<dyn ExecutionPlan>>, schema: SchemaRef) -> Self {
-        // Create properties
-        let eq_properties = EquivalenceProperties::new(schema.clone());
-        // UnionExec应该有单个partition，因为我们要把所有输入合并成一个流
-        let partitioning = Partitioning::UnknownPartitioning(1);
-        let emission_type = EmissionType::Final;
-        let boundedness = Boundedness::Bounded;
-
-        let properties =
-            PlanProperties::new(eq_properties, partitioning, emission_type, boundedness);
-
-        Self {
-            inputs,
-            schema,
-            properties,
-        }
-    }
-}
-impl std::fmt::Debug for PartitionUnionExec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PartitionUnionExec")
-            .field("num_segments", &self.inputs.len())
-            .finish()
-    }
-}
-
-impl DisplayAs for PartitionUnionExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "PartitionUnionExec: segments={}", self.inputs.len())
-    }
-}
-
-impl ExecutionPlan for PartitionUnionExec {
-    fn name(&self) -> &str {
-        "PartitionUnionExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        self.inputs.iter().collect()
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(PartitionUnionExec::new(
-            children,
-            self.schema.clone(),
-        )))
-    }
-
-    fn execute(
-        &self,
-        partition: usize,
-        context: Arc<TaskContext>,
-    ) -> Result<SendableRecordBatchStream> {
-        // Union只有一个partition(partition 0)
-        if partition != 0 {
-            return Err(DataFusionError::Execution(format!(
-                "Invalid partition index: {} (PartitionUnionExec has only 1 partition)",
-                partition
-            )));
-        }
-
-        // 执行所有input plans并合并它们的流
-        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-        use futures::stream::{self, StreamExt};
-
-        println!(
-            "[DEBUG] PartitionUnionExec::execute with {} inputs",
-            self.inputs.len()
-        );
-
-        let mut streams = Vec::new();
-        for (_i, input) in self.inputs.iter().enumerate() {
-            let stream = input.execute(0, context.clone())?;
-            streams.push(stream);
-        }
-
-        // 使用futures::stream::iter将所有流连接起来
-        let schema = self.schema.clone();
-        let combined_stream = stream::iter(streams).flat_map(|s| s);
-
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            schema,
-            combined_stream,
-        )))
     }
 }

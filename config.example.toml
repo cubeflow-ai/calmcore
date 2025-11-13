@@ -1,0 +1,47 @@
+# Calm Database Configuration Example
+
+# 监听地址
+host = "127.0.0.1"
+
+# GraphQL 服务端口 (设置为 null 或移除以禁用)
+graphql_port = 9567
+
+# Elasticsearch 服务端口 (设置为 null 或移除以禁用)
+es_port = 9200
+
+# MySQL 服务端口 (设置为 null 或移除以禁用)
+mysql_port = 3307
+
+# 日志配置
+[log]
+# 日志级别: trace, debug, info, warn, error
+level = "info"
+
+# 日志输出目标: console (控制台), file (文件), both (两者)
+target = "console"
+
+# 日志文件路径 (当 target 为 file 或 both 时生效)
+file = "./logs/calm.log"
+
+# 是否启用日志文件轮转
+rotation = true
+
+# 日志文件最大大小 (MB)
+max_size_mb = 100
+
+# 保留的日志文件数量
+max_files = 10
+
+# 引擎配置
+[engine]
+# 数据存储目录
+data_dir = "./data"
+
+# 持久化检查间隔（秒）
+persist_check_interval_secs = 60
+
+# 最大并发持久化的 Partition 数量
+max_concurrent_persists = 4
+
+# 是否在 flush 后立即检查持久化
+check_after_flush = true

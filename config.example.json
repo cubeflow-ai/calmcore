@@ -1,0 +1,20 @@
+{
+    "host": "127.0.0.1",
+    "graphql_port": 9567,
+    "es_port": 9200,
+    "mysql_port": 3307,
+    "log": {
+        "level": "info",
+        "target": "console",
+        "file": "./logs/calm.log",
+        "rotation": true,
+        "max_size_mb": 100,
+        "max_files": 10
+    },
+    "engine": {
+        "data_dir": "./data",
+        "persist_check_interval_secs": 60,
+        "max_concurrent_persists": 4,
+        "check_after_flush": true
+    }
+}
