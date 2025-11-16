@@ -66,11 +66,7 @@ impl SegmentScanner {
 
     /// 创建执行计划 - 主入口方法
     ///
-    /// 根据查询上下文选择最优策略：
-    /// 1. 应用 filters，计算命中的文档
-    /// 2. 命中率 < 20% → Bitmap Scan（只扫描命中的文档）
-    /// 3. 命中率 >= 20% + 有 ORDER BY → Index Ordered Scan（利用索引有序扫描）
-    /// 4. 命中率 >= 20% + 无 ORDER BY → Full Scan（扫描所有有效文档）
+    /// 应用 filters，计算命中的文档，然后构建执行计划
     pub fn create_plan(
         &self,
         filters: &[Expr],
@@ -78,41 +74,20 @@ impl SegmentScanner {
         limit: Option<usize>,
         sort: Option<(String, bool)>,
     ) -> Option<Arc<dyn ExecutionPlan>> {
-        // 1. 应用 filters，计算命中的文档
+        // 应用 filters，计算命中的文档
         let result_bitmap = self.apply_filters(filters)?;
-
-        let hit_count = result_bitmap.len();
-        let total_count = self.valid_docs.len();
-        let hit_ratio = hit_count as f64 / total_count as f64;
 
         log::info!(
             "🎯 [SegmentScanner] hit={}/{} ({:.1}%), limit={:?}, sort={:?}",
-            hit_count,
-            total_count,
-            hit_ratio * 100.0,
+            result_bitmap.len(),
+            self.valid_docs.len(),
+            result_bitmap.len() as f64 / self.valid_docs.len() as f64 * 100.0,
             limit,
             sort
         );
 
-        // 2. 选择扫描策略
-        let use_bitmap_scan = hit_ratio < 0.2;
-
-        // 3. 根据策略生成执行计划
-        if use_bitmap_scan {
-            // 命中率 < 20%：使用 Bitmap Scan
-            log::info!(
-                "🎯 [Strategy] BitmapScan: hit_ratio={:.1}% < 20%",
-                hit_ratio * 100.0
-            );
-            self.build_exec_plan(result_bitmap, projection, sort, limit)
-        } else {
-            // 命中率 >= 20%：全表扫描（使用所有有效文档）
-            log::info!(
-                "🎯 [Strategy] FullScan: hit_ratio={:.1}% >= 20%",
-                hit_ratio * 100.0
-            );
-            self.build_exec_plan(result_bitmap, projection, sort, limit)
-        }
+        // 构建执行计划
+        self.build_exec_plan(result_bitmap, projection, sort, limit)
     }
 
     /// 应用过滤条件，返回命中的文档bitmap
@@ -141,6 +116,7 @@ impl SegmentScanner {
         limit: Option<usize>,
     ) -> Option<Arc<dyn ExecutionPlan>> {
         let projected_schema = self.build_projected_schema(projection);
+
         let exec = SegmentExec::new(
             self.raw_data.clone(),
             self.schema.clone(),
@@ -465,15 +441,21 @@ impl ExecutionPlan for SegmentExec {
         let matched_docs = self.matched_docs.clone();
         let projection = self.projection.clone();
 
+        // LIMIT 下推：如果没有 SORT，在 Segment 层面应用 LIMIT
+        let pushdown_limit = if self.sort.is_none() {
+            self.limit
+        } else {
+            None
+        };
+
         // 配置: 每次最多处理多少个 storage batch
         // 这控制了内存使用上限: CHUNK_SIZE × 1000行/batch × 列数 × 数据大小
         const CHUNK_SIZE: usize = 100; // 每次处理100个batch (约10万行)
 
         eprintln!(
-            "🔍 [SegmentExec::execute] Starting streaming execution, total matched_docs={}",
-            matched_docs
-                .map(|m| m.len() as usize)
-                .unwrap_or_else(|| self.raw_data.len())
+            "🔍 [SegmentExec::execute] Starting streaming execution, total matched_docs={}, pushdown_limit={:?}",
+            matched_docs.len(),
+            pushdown_limit
         );
 
         Ok(Box::pin(SegmentStream::new(
@@ -482,6 +464,7 @@ impl ExecutionPlan for SegmentExec {
             matched_docs,
             projection,
             CHUNK_SIZE,
+            pushdown_limit,
         )))
     }
 }
@@ -492,12 +475,13 @@ impl ExecutionPlan for SegmentExec {
 struct SegmentStream {
     schema: SchemaRef,
     raw_data: RowDataStore,
-    doc_ids: Vec<u32>, // 所有需要查询的 doc_ids
+    doc_ids_iter: roaring::bitmap::IntoIter, // 使用迭代器，避免一次性分配大 Vec
     projection: Option<Vec<usize>>,
     chunk_size: usize,
+    limit: Option<usize>, // LIMIT 下推：如果设置，只返回这么多行
 
     // 迭代状态
-    current_offset: usize, // 当前处理到的 doc_id 偏移量
+    rows_returned: usize, // 已经返回的行数（用于 LIMIT）
     pending_batches: std::vec::IntoIter<RecordBatch>,
 }
 
@@ -508,23 +492,25 @@ impl SegmentStream {
         matched_docs: RoaringBitmap,
         projection: Option<Vec<usize>>,
         chunk_size: usize,
+        limit: Option<usize>,
     ) -> Self {
-        // 一次性收集 doc_ids (bitmap 迭代器很轻量)
-        let doc_ids: Vec<u32> = matched_docs.iter().collect();
+        let total_docs = matched_docs.len();
 
         eprintln!(
-            "🔍 [SegmentStream::new] Total doc_ids={}, will process in chunks of {} storage batches",
-            doc_ids.len(),
-            chunk_size
+            "🔍 [SegmentStream::new] Total doc_ids={}, will process in chunks of {} storage batches, limit={:?}",
+            total_docs,
+            chunk_size,
+            limit
         );
 
         Self {
             schema,
             raw_data,
-            doc_ids,
+            doc_ids_iter: matched_docs.into_iter(), // 使用迭代器，零额外内存
             projection,
             chunk_size,
-            current_offset: 0,
+            limit,
+            rows_returned: 0,
             pending_batches: Vec::new().into_iter(),
         }
     }
@@ -535,18 +521,28 @@ impl SegmentStream {
         use datafusion::arrow::compute::take;
         use std::collections::HashMap;
 
-        // 已经处理完所有 doc_ids
-        if self.current_offset >= self.doc_ids.len() {
-            return Ok(Vec::new());
+        // LIMIT 下推：如果已经返回足够的行，停止生成
+        if let Some(limit) = self.limit {
+            if self.rows_returned >= limit {
+                return Ok(Vec::new());
+            }
         }
 
         // 1. 收集下一个 chunk 的 doc_ids
+        // LIMIT 优化：只收集需要的 doc_ids
+        let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
         let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut batch_keys_set = std::collections::HashSet::new();
-        let _start_offset = self.current_offset;
+        let mut collected_rows = 0;
 
-        while self.current_offset < self.doc_ids.len() {
-            let doc_id = self.doc_ids[self.current_offset];
+        // 使用迭代器，按需读取 doc_ids
+        for doc_id in self.doc_ids_iter.by_ref() {
+            // LIMIT 优化：如果已经收集足够的行，停止
+            if let Some(remaining) = remaining_rows {
+                if collected_rows >= remaining {
+                    break;
+                }
+            }
 
             if let Some(batch_start_id) = self.raw_data.get_batch_key_for_doc(doc_id) {
                 batch_groups
@@ -554,9 +550,8 @@ impl SegmentStream {
                     .or_insert_with(Vec::new)
                     .push(doc_id);
                 batch_keys_set.insert(batch_start_id);
+                collected_rows += 1;
             }
-
-            self.current_offset += 1;
 
             // 达到 chunk_size 个 storage batch,停止收集
             if batch_keys_set.len() >= self.chunk_size {
@@ -638,6 +633,10 @@ impl SegmentStream {
             }
         }
 
+        // 更新已返回的行数（用于 LIMIT 下推）
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        self.rows_returned += total_rows;
+
         Ok(result_batches)
     }
 }
@@ -678,46 +677,5 @@ impl futures::Stream for SegmentStream {
             }
             Err(e) => Poll::Ready(Some(Err(e))),
         }
-    }
-}
-
-// ============================================================================
-// 简化的查询优化
-// ============================================================================
-
-impl SegmentScanner {
-    /// 尝试使用倒排索引的有序扫描（ORDER BY优化）
-    ///
-    /// 策略：只使用第一个排序字段进行索引扫描，后续字段交给DataFusion处理
-    ///
-    /// # Arguments
-    /// * `result_bitmap` - 已经应用过filters的候选文档bitmap
-    /// * `projection` - 投影列
-    /// * `_limit` - LIMIT 值（预留，未来用于优化）
-    /// * `sort_fields` - ORDER BY 字段 [(field_name, ascending)]
-    ///
-    /// # 返回
-    /// 如果第一个排序字段有索引且支持有序扫描，返回优化的执行计划；
-    /// 否则fallback到普通的bitmap scan
-    fn try_index_ordered_scan(
-        &self,
-        result_bitmap: RoaringBitmap,
-        projection: Option<&Vec<usize>>,
-        sort: Option<(String, bool)>,
-        limit: usize,
-    ) -> Option<Arc<dyn ExecutionPlan>> {
-        if sort
-            .as_ref()
-            .map(|(f, _)| self.index_readers.contains_key(f))
-            .unwrap_or(false)
-        {
-            log::warn!(
-                "🎯 [IndexOrderedScan] No index for field '{}', falling back to BitmapScan",
-                sort
-            );
-            return self.build_exec_plan(result_bitmap, projection);
-        }
-
-        self.build_exec_plan(result_bitmap, projection, limit, sort_fields.get)
     }
 }

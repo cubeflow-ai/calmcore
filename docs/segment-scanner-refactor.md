@@ -3,6 +3,39 @@
 ## 重构日期
 2024-11-16
 
+## 第二轮简化（删除无用优化）
+
+### 发现的问题
+原来的"优化"逻辑实际上没有任何作用：
+```rust
+if hit_ratio < 0.2 {
+    self.build_exec_plan(result_bitmap, ...)  // Bitmap Scan
+} else {
+    self.build_exec_plan(result_bitmap, ...)  // "Full Scan" - 但实际上一样！
+}
+```
+
+两个分支做的事情完全相同，都是扫描 `result_bitmap` 中的文档。
+
+### 为什么这个优化没用？
+1. **两个分支逻辑相同**：都是扫描 result_bitmap
+2. **"全表扫描"名不副实**：并没有真正扫描全表
+3. **在列存储中意义不大**：读取 80% 和 100% 的数据性能差异很小
+
+### 简化后的代码
+直接删除了无用的判断逻辑，简化为：
+```rust
+pub fn create_plan(...) -> Option<Arc<dyn ExecutionPlan>> {
+    let result_bitmap = self.apply_filters(filters)?;
+    self.build_exec_plan(result_bitmap, projection, sort, limit)
+}
+```
+
+---
+
+## 重构日期
+2024-11-16
+
 ## 问题分析
 
 ### 1. 重复代码问题
