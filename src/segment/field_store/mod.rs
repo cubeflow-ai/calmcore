@@ -1041,12 +1041,34 @@ pub trait IndexReader: Send + Sync + 'static {
         end: &ScalarValue,
         end_inclusive: bool,
     ) -> Option<RoaringBitmap>;
-    
+
     /// 估算字段的基数（不同值的数量）
     /// 用于查询优化和成本估算
     /// 默认实现返回一个保守的估计值
     fn estimate_cardinality(&self) -> usize {
         1000 // 默认假设 1000 个不同的值
+    }
+
+    /// 按顺序扫描索引，返回有序的 doc_ids（ORDER BY 优化）
+    ///
+    /// # Arguments
+    /// * `ascending` - true 表示升序，false 表示降序
+    /// * `filter_bitmap` - 可选的过滤 bitmap（只返回在这个 bitmap 中的 doc_ids）
+    /// * `limit` - 可选的限制返回的文档数量
+    ///
+    /// # Returns
+    /// 返回按顺序的 doc_ids，如果索引不支持有序扫描则返回 None
+    ///
+    /// # Note
+    /// 默认实现返回 None，表示不支持有序扫描
+    /// 只有支持有序索引的类型（如数值、时间戳）才应该实现此方法
+    fn scan_ordered(
+        &self,
+        _ascending: bool,
+        _filter_bitmap: Option<&RoaringBitmap>,
+        _limit: Option<usize>,
+    ) -> Option<Vec<u32>> {
+        None // 默认不支持
     }
 }
 
@@ -1280,6 +1302,203 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
             InvertedIndex::Disk(r) => r.len() as usize,
             InvertedIndex::Memory(btree) => btree.len(),
         }
+    }
+
+    /// 按顺序扫描索引，返回有序的 doc_ids
+    ///
+    /// # Arguments
+    /// * `ascending` - true 表示升序，false 表示降序
+    /// * `filter_bitmap` - 可选的过滤 bitmap（只返回在这个 bitmap 中的 doc_ids）
+    /// * `limit` - 可选的限制返回的文档数量
+    ///
+    /// # Returns
+    /// 返回一个 Vec，包含按顺序的 doc_ids
+    ///
+    /// # 优化
+    /// - 支持正向和反向遍历
+    /// - 使用 bitmap 交集操作，避免逐个检查
+    pub(crate) fn scan_ordered(
+        &self,
+        ascending: bool,
+        filter_bitmap: Option<&RoaringBitmap>,
+        limit: Option<usize>,
+    ) -> Vec<u32> {
+        let mut result = Vec::new();
+        let mut count = 0;
+
+        match self {
+            InvertedIndex::Disk(reader) => {
+                if ascending {
+                    // 正向遍历：直接使用迭代器
+                    for item in reader.iter() {
+                        let (_key, bitmap, _ttl) = &*item;
+
+                        // 优化：使用 bitmap 交集，避免逐个检查
+                        let filtered_bitmap = if let Some(filter) = filter_bitmap {
+                            bitmap & filter
+                        } else {
+                            bitmap.clone()
+                        };
+
+                        // 遍历过滤后的 doc_ids
+                        for doc_id in filtered_bitmap.iter() {
+                            result.push(doc_id);
+                            count += 1;
+                        }
+
+                        // 应用 limit：在处理完一个 key 后检查
+                        // 原因：如果有多级排序（ORDER BY field1, field2），
+                        //       我们只处理 field1，field2 需要 DataFusion 处理
+                        //       必须收集完一个 field1 值的所有文档，才能保证 field2 排序正确
+                        if let Some(limit) = limit {
+                            if count >= limit {
+                                return result;
+                            }
+                        }
+                    }
+                } else {
+                    // 反向遍历：先收集所有 items，然后反向处理
+                    //
+                    // 实现说明：
+                    // 由于 TreeReader 的迭代器不支持反向遍历（需要在底层实现 prev() 方法），
+                    // 我们采用以下策略：
+                    // 1. 先正向收集所有 bitmaps 到 Vec
+                    // 2. 然后反向遍历这个 Vec
+                    //
+                    // 内存开销分析：
+                    // - 需要存储 O(n) 个 RoaringBitmap，其中 n 是索引中不同 key 的数量
+                    // - 对于大多数场景，key 的数量远小于 doc 的数量
+                    // - 例如：时间戳字段可能有几千个不同的值，远小于百万级的文档数
+                    // - RoaringBitmap 本身是压缩的，内存占用较小
+                    //
+                    // 未来优化：
+                    // - 在 TreeReader 中实现真正的反向迭代器（类似 BTree 的 prev() 方法）
+                    // - 这样可以避免预先收集所有 items
+                    let mut items: Vec<(RoaringBitmap, Option<std::time::Duration>)> = Vec::new();
+
+                    // 先正向收集所有 items
+                    for item in reader.iter() {
+                        let (_key, bitmap, ttl) = &*item;
+                        items.push((bitmap.clone(), *ttl));
+                    }
+
+                    // 然后反向遍历
+                    for (bitmap, _ttl) in items.iter().rev() {
+                        // 优化：使用 bitmap 交集，避免逐个检查
+                        let filtered_bitmap = if let Some(filter) = filter_bitmap {
+                            bitmap & filter
+                        } else {
+                            bitmap.clone()
+                        };
+
+                        // 遍历过滤后的 doc_ids
+                        for doc_id in filtered_bitmap.iter() {
+                            result.push(doc_id);
+                            count += 1;
+                        }
+
+                        // 应用 limit：在处理完一个 key 后检查
+                        if let Some(limit) = limit {
+                            if count >= limit {
+                                return result;
+                            }
+                        }
+                    }
+                }
+            }
+            InvertedIndex::Memory(btree) => {
+                // 使用 BTree 的迭代器，支持正向和反向
+                let mut iter = btree.iter();
+
+                if ascending {
+                    // 正向遍历：使用 next()
+                    while let Some(item) = iter.next() {
+                        let (_key, ids_lock, _ttl) = &*item;
+                        let ids = ids_lock.read().unwrap();
+
+                        // 优化：先转换为 bitmap，然后取交集
+                        let bitmap = RoaringBitmap::from_sorted_iter(ids.iter().copied()).unwrap();
+                        let filtered_bitmap = if let Some(filter) = filter_bitmap {
+                            &bitmap & filter
+                        } else {
+                            bitmap
+                        };
+
+                        // 遍历过滤后的 doc_ids
+                        for doc_id in filtered_bitmap.iter() {
+                            result.push(doc_id);
+                            count += 1;
+                        }
+
+                        // 应用 limit：在处理完一个 key 后检查
+                        if let Some(limit) = limit {
+                            if count >= limit {
+                                return result;
+                            }
+                        }
+                    }
+                } else {
+                    // 反向遍历：使用 prev()
+                    // 先 seek 到最后，然后使用 prev() 反向遍历
+                    if let Some(max_item) = btree.max() {
+                        let (max_key, _, _) = &**max_item;
+                        iter.seek(max_key);
+                        // seek 后需要先 next() 一次到达 max_key
+                        if let Some(item) = iter.next() {
+                            let (_key, ids_lock, _ttl) = &*item;
+                            let ids = ids_lock.read().unwrap();
+
+                            let bitmap =
+                                RoaringBitmap::from_sorted_iter(ids.iter().copied()).unwrap();
+                            let filtered_bitmap = if let Some(filter) = filter_bitmap {
+                                &bitmap & filter
+                            } else {
+                                bitmap
+                            };
+
+                            for doc_id in filtered_bitmap.iter() {
+                                result.push(doc_id);
+                                count += 1;
+                            }
+
+                            // 应用 limit：在处理完一个 key 后检查
+                            if let Some(limit) = limit {
+                                if count >= limit {
+                                    return result;
+                                }
+                            }
+                        }
+                    }
+
+                    // 然后使用 prev() 继续反向遍历
+                    while let Some(item) = iter.prev() {
+                        let (_key, ids_lock, _ttl) = &*item;
+                        let ids = ids_lock.read().unwrap();
+
+                        let bitmap = RoaringBitmap::from_sorted_iter(ids.iter().copied()).unwrap();
+                        let filtered_bitmap = if let Some(filter) = filter_bitmap {
+                            &bitmap & filter
+                        } else {
+                            bitmap
+                        };
+
+                        for doc_id in filtered_bitmap.iter() {
+                            result.push(doc_id);
+                            count += 1;
+                        }
+
+                        // 应用 limit：在处理完一个 key 后检查
+                        if let Some(limit) = limit {
+                            if count >= limit {
+                                return result;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        result
     }
 }
 

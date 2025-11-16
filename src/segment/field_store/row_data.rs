@@ -289,7 +289,7 @@ impl Clone for ParquetRowDataReader {
 /// 支持内存模式和磁盘模式（BTree 或 Parquet）
 #[derive(Clone)]
 pub enum RowDataStore {
-    // Disk(Arc<persist::TreeReader<u32, RecordBatch>>),
+    Disk(Arc<persist::TreeReader<u32, RecordBatch>>),
     Parquet(Arc<ParquetRowDataReader>),
     Memory(mem_btree::BTree<u32, RecordBatch>),
 }
@@ -348,7 +348,7 @@ impl RowDataStore {
         projection: Option<&[usize]>,
     ) -> Option<RecordBatch> {
         match self {
-            // RowDataStore::Disk(reader) => reader.get(key),
+            RowDataStore::Disk(reader) => reader.get(key),
             RowDataStore::Parquet(reader) => reader.get_with_projection(key, projection),
             RowDataStore::Memory(tree) => tree.get(key).cloned(),
         }

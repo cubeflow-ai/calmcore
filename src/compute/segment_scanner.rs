@@ -67,6 +67,10 @@ impl SegmentScanner {
     /// 创建执行计划 - 主入口方法
     ///
     /// 应用 filters，计算命中的文档，然后构建执行计划
+    ///
+    /// # 优化策略
+    /// 1. 如果有 ORDER BY + LIMIT，尝试使用索引有序扫描
+    /// 2. 否则使用普通的 bitmap 扫描
     pub fn create_plan(
         &self,
         filters: &[Expr],
@@ -86,7 +90,38 @@ impl SegmentScanner {
             sort
         );
 
-        // 构建执行计划
+        // 尝试使用索引有序扫描优化
+        if let Some((field_name, ascending)) = &sort {
+            if let Some(limit_val) = limit {
+                // 判断是否应该使用有序扫描
+                if self.should_use_ordered_scan(&result_bitmap, limit_val) {
+                    // 尝试使用索引有序扫描
+                    if let Some(ordered_plan) = self.try_ordered_scan(
+                        field_name,
+                        *ascending,
+                        &result_bitmap,
+                        projection,
+                        limit_val,
+                    ) {
+                        log::info!(
+                            "🚀 [SegmentScanner] Using index ordered scan for ORDER BY {} {}",
+                            field_name,
+                            if *ascending { "ASC" } else { "DESC" }
+                        );
+                        return Some(ordered_plan);
+                    }
+                } else {
+                    log::info!(
+                        "⏭️  [SegmentScanner] Skipping ordered scan: hit_ratio={:.1}%, hit_count={}, limit={}",
+                        result_bitmap.len() as f64 / self.valid_docs.len() as f64 * 100.0,
+                        result_bitmap.len(),
+                        limit_val
+                    );
+                }
+            }
+        }
+
+        // 否则使用普通的 bitmap 扫描
         self.build_exec_plan(result_bitmap, projection, sort, limit)
     }
 
@@ -105,6 +140,117 @@ impl SegmentScanner {
         } else {
             Some(result_bitmap)
         }
+    }
+
+    /// 判断是否应该使用有序扫描
+    ///
+    /// # 核心思想
+    /// 有序扫描的优势：只需要读取 LIMIT 条数据，而不是所有命中的数据
+    /// 但前提是：命中率不能太低，否则需要遍历太多索引 keys
+    ///
+    /// # 规则（3 条）
+    /// 1. 命中率 >= 0.1%：避免遍历太多索引 keys
+    /// 2. 命中数 >= 1000：确保排序开销足够大
+    /// 3. LIMIT < 命中数 × 10%：确保有序扫描只读少量数据
+    ///
+    /// # Arguments
+    /// * `result_bitmap` - 过滤后的文档 bitmap
+    /// * `limit` - LIMIT 值
+    fn should_use_ordered_scan(&self, result_bitmap: &RoaringBitmap, limit: usize) -> bool {
+        let hit_count = result_bitmap.len() as usize;
+        let total_count = self.valid_docs.len() as usize;
+        let hit_ratio = hit_count as f64 / total_count as f64;
+
+        // 规则 1：命中率必须 >= 0.1% (千分之一)
+        // 原因：命中率太低时，有序扫描需要遍历太多索引 keys
+        //
+        // 例子：
+        // ❌ 总数 1000万，命中 1万 (0.1%)，LIMIT 100
+        //    如果索引有 100万 个不同值，每个值平均 10 个文档
+        //    需要遍历 ~10000 个 keys 才能找到 100 条（太慢）
+        //
+        // ✅ 总数 1000万，命中 10万 (1%)，LIMIT 100
+        //    需要遍历 ~1000 个 keys 就能找到 100 条（可接受）
+        if hit_ratio < 0.001 {
+            return false;
+        }
+
+        // 规则 2：命中数必须 >= 1000
+        // 原因：命中数太少时，排序开销很小
+        //       例如：1000 条数据排序只需要 ~10000 次比较，非常快
+        if hit_count < 1000 {
+            return false;
+        }
+
+        // 规则 3：LIMIT 必须 < 命中数的 10%
+        // 原因：有序扫描的优势在于只读取 LIMIT 条数据
+        //       如果 LIMIT 太大（接近命中数），优势不明显
+        //
+        // 例子：
+        // ✅ 命中 10000 条，LIMIT 100 (1%)：读取 ~100 条 vs 10000 条（100x 提升）
+        // ❌ 命中 10000 条，LIMIT 2000 (20%)：读取 ~2000 条 vs 10000 条（5x 提升，不值得）
+        let limit_ratio = limit as f64 / hit_count as f64;
+        if limit_ratio >= 0.1 {
+            return false;
+        }
+
+        true
+    }
+
+    /// 尝试使用索引有序扫描（ORDER BY 优化）
+    ///
+    /// # Arguments
+    /// * `field_name` - 排序字段名
+    /// * `ascending` - 是否升序
+    /// * `filter_bitmap` - 过滤后的文档 bitmap
+    /// * `projection` - 投影列
+    /// * `limit` - LIMIT 值
+    ///
+    /// # Returns
+    /// 如果字段有索引且支持有序扫描，返回优化的执行计划；否则返回 None
+    fn try_ordered_scan(
+        &self,
+        field_name: &str,
+        ascending: bool,
+        filter_bitmap: &RoaringBitmap,
+        projection: Option<&Vec<usize>>,
+        limit: usize,
+    ) -> Option<Arc<dyn ExecutionPlan>> {
+        // 检查字段是否有索引
+        let index_reader = self.index_readers.get(field_name)?;
+
+        // 尝试使用索引的有序扫描
+        let ordered_doc_ids =
+            index_reader.scan_ordered(ascending, Some(filter_bitmap), Some(limit))?;
+
+        if ordered_doc_ids.is_empty() {
+            return None;
+        }
+
+        log::info!(
+            "🎯 [OrderedScan] Field '{}' returned {} docs (limit={})",
+            field_name,
+            ordered_doc_ids.len(),
+            limit
+        );
+
+        // 将有序的 doc_ids 转换为 bitmap
+        let ordered_bitmap = RoaringBitmap::from_sorted_iter(ordered_doc_ids.into_iter())
+            .unwrap_or_else(|_| RoaringBitmap::new());
+
+        // 构建执行计划
+        let projected_schema = self.build_projected_schema(projection);
+        let exec = SegmentExec::new(
+            self.raw_data.clone(),
+            self.schema.clone(),
+            projected_schema,
+            ordered_bitmap,
+            projection.map(|p| p.to_vec()),
+            Some((field_name.to_string(), ascending)),
+            Some(limit),
+        );
+
+        Some(Arc::new(exec))
     }
 
     /// 构建执行计划（通用方法）
