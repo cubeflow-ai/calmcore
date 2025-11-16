@@ -4,8 +4,9 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::*;
 
 use crate::compute::PartitionTableProvider;
+use crate::compute::optimizer::{analyze_query, QueryType};
 use crate::engine::Engine;
-use crate::utils::error::CoreResult;
+use crate::utils::error::{CoreError, CoreResult};
 
 use super::aggregation::AggregationMerger;
 use super::query_builder::QueryBuilder;
@@ -38,81 +39,176 @@ impl DistributedExecutor {
 
     /// 执行 SQL 查询
     ///
-    /// 这是一个通用的 SQL 查询接口，可被 MySQL、GraphQL、Elasticsearch 等协议层调用
-    ///
-    /// # 支持的查询类型
-    /// - ✅ SELECT * WHERE ... (简单过滤查询)
-    /// - ✅ 聚合函数 (COUNT/SUM/AVG/MAX/MIN) - 分布式聚合
-    /// - ✅ GROUP BY - 分布式分组聚合
-    /// - ⚠️  ORDER BY + LIMIT: 结果可能不完整（只取第一个分区）
+    /// 根据查询类型分为两个分支：
+    /// 1. 聚合查询 → execute_aggregation_query
+    /// 2. 普通查询 → execute_query
     pub async fn execute_sql(&self, sql: &str) -> CoreResult<QueryResult> {
-        let query_lower = sql.to_lowercase();
-
-        // 检查是否包含聚合函数
-        let has_aggregation = query_lower.contains("count(")
-            || query_lower.contains("sum(")
-            || query_lower.contains("avg(")
-            || query_lower.contains("max(")
-            || query_lower.contains("min(");
-
-        // 检查是否包含 GROUP BY
-        let has_group_by = query_lower.contains("group by");
-
-        if has_aggregation || has_group_by {
-            // 使用分布式聚合执行路径
-            return self.execute_aggregation_query(sql).await;
+        let plan = analyze_query(sql);
+        
+        // 分支 1：聚合查询（需要特殊合并）
+        if let Some(ref p) = plan {
+            if matches!(p.query_type, QueryType::Aggregation) {
+                return self.execute_aggregation_query(sql).await;
+            }
         }
-
-        // 提取表名
+        
+        // 分支 2：普通查询
+        // 提取需要的参数：sort_fields 和 sort_limit_info
+        let (sort_fields, sort_limit_info) = if let Some(p) = plan {
+            match p.query_type {
+                QueryType::SortLimit(info) => {
+                    (Some(info.sort_fields.clone()), Some(info))
+                }
+                _ => (None, None)
+            }
+        } else {
+            (None, None)
+        };
+        
+        self.execute_query(sql, sort_fields, sort_limit_info).await
+    }
+    
+    /// 执行普通查询（非聚合）
+    ///
+    /// # 参数
+    /// * `sql` - SQL 查询语句
+    /// * `sort_fields` - ORDER BY 字段（用于下发给 SegmentScanner）
+    /// * `sort_limit_info` - 完整的 sort + limit 信息（用于最终合并）
+    async fn execute_query(
+        &self,
+        sql: &str,
+        sort_fields: Option<Vec<(String, bool)>>,
+        sort_limit_info: Option<crate::compute::optimizer::SortLimitInfo>,
+    ) -> CoreResult<QueryResult> {
         let table_name = self.query_builder.extract_table_name(sql)?;
-
-        // 获取表元数据
         let meta = self.engine.get_table_meta(&table_name)?;
         let num_partitions = meta.parallel_workers;
-
-        eprintln!(
-            "🔍 [DistributedExecutor] Executing query on table '{}' with {} partitions",
-            table_name, num_partitions
+        
+        log::info!(
+            "🔍 [execute_query] table='{}', partitions={}, has_sort={}",
+            table_name,
+            num_partitions,
+            sort_fields.is_some()
         );
-
-        // 并行查询所有分区
+        
+        // 并行查询所有 partition
         let mut all_batches = Vec::new();
-
+        
         for partition_id in 0..num_partitions {
             match self
-                .execute_sql_on_partition(&table_name, partition_id as u64, sql)
+                .execute_on_partition(
+                    &table_name,
+                    partition_id as u64,
+                    sql,
+                    sort_fields.clone(),
+                )
                 .await
             {
                 Ok(batches) => {
-                    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
-                    eprintln!(
-                        "🔍 [DistributedExecutor] Partition {} returned {} rows",
-                        partition_id, row_count
-                    );
                     all_batches.extend(batches);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "⚠️  [DistributedExecutor] Failed to query partition {}: {}",
-                        partition_id, e
-                    );
-                    // 继续查询其他分区，不因为一个分区失败而整体失败
+                    log::warn!("⚠️  Partition {} failed: {}", partition_id, e);
                 }
             }
         }
-
-        eprintln!(
-            "🔍 [DistributedExecutor] Query completed: {} batches",
-            all_batches.len()
-        );
-
+        
+        // 如果有 ORDER BY，做最终排序
+        let final_batches = if let Some(info) = sort_limit_info {
+            self.apply_final_sort_limit(all_batches, &info)?
+        } else {
+            all_batches
+        };
+        
         Ok(QueryResult {
-            batches: all_batches,
+            batches: final_batches,
         })
     }
-
-    /// 在单个分区上执行 SQL 查询
-    async fn execute_sql_on_partition(
+    
+    /// 在单个 partition 上执行查询
+    async fn execute_on_partition(
+        &self,
+        table_name: &str,
+        partition_id: u64,
+        sql: &str,
+        sort_hints: Option<Vec<(String, bool)>>,
+    ) -> CoreResult<Vec<RecordBatch>> {
+        let ctx = SessionContext::new();
+        
+        let partition = self
+            .engine
+            .get_partition(table_name, partition_id)
+            .await
+            .ok_or_else(|| {
+                CoreError::NotExisted(format!(
+                    "Partition {} not found for table '{}'",
+                    partition_id, table_name
+                ))
+            })?;
+        
+        // 使用带 hints 的 Provider（sort 和 limit 都是 Option，自动传递）
+        let provider = Arc::new(crate::compute::PartitionTableProviderWithHints::new_with_sort_hints(
+            partition,
+            sort_hints,
+        ));
+        
+        ctx.register_table(table_name, provider)
+            .map_err(|e| CoreError::Internal(format!("Failed to register table: {}", e)))?;
+        
+        let df = ctx.sql(sql).await.map_err(|e| {
+            CoreError::InvalidParam(format!("Query parse error: {}", e))
+        })?;
+        
+        let batches = df.collect().await.map_err(|e| {
+            CoreError::Internal(format!("Query execution error: {}", e))
+        })?;
+        
+        Ok(batches)
+    }
+    /// 应用最终的排序和 LIMIT（在协调节点）
+    /// 使用 DataFusion API 实现
+    fn apply_final_sort_limit(
+        &self,
+        batches: Vec<RecordBatch>,
+        info: &crate::compute::optimizer::SortLimitInfo,
+    ) -> CoreResult<Vec<RecordBatch>> {
+        if batches.is_empty() {
+            return Ok(batches);
+        }
+        
+        log::info!(
+            "🔄 [apply_final_sort_limit] Sorting {} batches by {:?}, limit={}, offset={:?}",
+            batches.len(),
+            info.sort_fields,
+            info.limit,
+            info.offset
+        );
+        
+        // 方案：使用 TopKMerger（已经实现好的）
+        // 未来可以考虑使用 DataFusion 的 sort + limit API
+        use crate::compute::TopKMerger;
+        
+        let merger = TopKMerger::new(
+            info.sort_fields.clone(),
+            info.limit,
+            info.offset,
+        );
+        
+        // 将所有 batches 作为一个 partition 的结果
+        let result = merger.merge(vec![batches]).map_err(|e| {
+            CoreError::Internal(format!("Failed to merge results: {}", e))
+        })?;
+        
+        log::info!(
+            "✅ [apply_final_sort_limit] Sorted and limited to {} rows",
+            result.iter().map(|b| b.num_rows()).sum::<usize>()
+        );
+        
+        Ok(result)
+    }
+    
+    /// 在单个分区上执行 SQL 查询（旧实现，保留用于聚合查询）
+    async fn execute_sql_on_partition_old(
         &self,
         table_name: &str,
         partition_id: u64,
@@ -219,7 +315,7 @@ impl DistributedExecutor {
 
         for partition_id in 0..num_partitions {
             match self
-                .execute_sql_on_partition(&table_name, partition_id as u64, sql)
+                .execute_sql_on_partition_old(&table_name, partition_id as u64, sql)
                 .await
             {
                 Ok(batches) => {
@@ -249,4 +345,5 @@ impl DistributedExecutor {
             batches: vec![merged_batch],
         })
     }
+
 }

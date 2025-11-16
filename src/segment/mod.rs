@@ -402,6 +402,106 @@ impl Segment {
                     }
                 }
             }
+            FieldType::U32 => {
+                let pk_writer = pk_field
+                    .as_any()
+                    .downcast_ref::<U32Field>()
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "field:{:?} field_type:{:?} does not implement PkWriter",
+                            pk_field.name(),
+                            pk_field.field_type()
+                        ))
+                    })?;
+
+                let del = pk_writer.write_pk(data, start_id, info, lock)?;
+                if !del.is_empty() {
+                    self.deleted.write().unwrap().extend(del.iter());
+                }
+
+                // 将主键哈希值插入 BloomFilter
+                if let Some(hashes) = pk_hash {
+                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    for hash in hashes {
+                        bloom.set(&hash);
+                    }
+                }
+            }
+            FieldType::U64 => {
+                let pk_writer = pk_field
+                    .as_any()
+                    .downcast_ref::<U64Field>()
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "field:{:?} field_type:{:?} does not implement PkWriter",
+                            pk_field.name(),
+                            pk_field.field_type()
+                        ))
+                    })?;
+
+                let del = pk_writer.write_pk(data, start_id, info, lock)?;
+                if !del.is_empty() {
+                    self.deleted.write().unwrap().extend(del.iter());
+                }
+
+                // 将主键哈希值插入 BloomFilter
+                if let Some(hashes) = pk_hash {
+                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    for hash in hashes {
+                        bloom.set(&hash);
+                    }
+                }
+            }
+            FieldType::I32 => {
+                let pk_writer = pk_field
+                    .as_any()
+                    .downcast_ref::<I32Field>()
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "field:{:?} field_type:{:?} does not implement PkWriter",
+                            pk_field.name(),
+                            pk_field.field_type()
+                        ))
+                    })?;
+
+                let del = pk_writer.write_pk(data, start_id, info, lock)?;
+                if !del.is_empty() {
+                    self.deleted.write().unwrap().extend(del.iter());
+                }
+
+                // 将主键哈希值插入 BloomFilter
+                if let Some(hashes) = pk_hash {
+                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    for hash in hashes {
+                        bloom.set(&hash);
+                    }
+                }
+            }
+            FieldType::I64 => {
+                let pk_writer = pk_field
+                    .as_any()
+                    .downcast_ref::<I64Field>()
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "field:{:?} field_type:{:?} does not implement PkWriter",
+                            pk_field.name(),
+                            pk_field.field_type()
+                        ))
+                    })?;
+
+                let del = pk_writer.write_pk(data, start_id, info, lock)?;
+                if !del.is_empty() {
+                    self.deleted.write().unwrap().extend(del.iter());
+                }
+
+                // 将主键哈希值插入 BloomFilter
+                if let Some(hashes) = pk_hash {
+                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    for hash in hashes {
+                        bloom.set(&hash);
+                    }
+                }
+            }
             _ => {
                 return Err(CoreError::InvalidParam(format!(
                     "field:{:?} type not support pk: {:?}",

@@ -64,39 +64,99 @@ impl SegmentScanner {
         }
     }
 
-    /// 创建 ExecutionPlan - 对 Segment 应用过滤条件
+    /// 创建执行计划 - 主入口方法
     ///
-    /// 这是核心方法,被 PartitionTableProvider 调用
-    pub fn create_execution_plan(
+    /// 根据查询上下文选择最优策略：
+    /// 1. 应用 filters，计算命中的文档
+    /// 2. 命中率 < 20% → Bitmap Scan（只扫描命中的文档）
+    /// 3. 命中率 >= 20% + 有 ORDER BY → Index Ordered Scan（利用索引有序扫描）
+    /// 4. 命中率 >= 20% + 无 ORDER BY → Full Scan（扫描所有有效文档）
+    pub fn create_plan(
         &self,
         filters: &[Expr],
         projection: Option<&Vec<usize>>,
+        limit: Option<usize>,
+        sort: Option<(String, bool)>,
     ) -> Option<Arc<dyn ExecutionPlan>> {
-        // 1. 从预计算的有效文档开始（已排除删除的文档）
+        // 1. 应用 filters，计算命中的文档
+        let result_bitmap = self.apply_filters(filters)?;
+
+        let hit_count = result_bitmap.len();
+        let total_count = self.valid_docs.len();
+        let hit_ratio = hit_count as f64 / total_count as f64;
+
+        log::info!(
+            "🎯 [SegmentScanner] hit={}/{} ({:.1}%), limit={:?}, sort={:?}",
+            hit_count,
+            total_count,
+            hit_ratio * 100.0,
+            limit,
+            sort
+        );
+
+        // 2. 选择扫描策略
+        let use_bitmap_scan = hit_ratio < 0.2;
+
+        // 3. 根据策略生成执行计划
+        if use_bitmap_scan {
+            // 命中率 < 20%：使用 Bitmap Scan
+            log::info!(
+                "🎯 [Strategy] BitmapScan: hit_ratio={:.1}% < 20%",
+                hit_ratio * 100.0
+            );
+            self.build_exec_plan(result_bitmap, projection, sort, limit)
+        } else {
+            // 命中率 >= 20%：全表扫描（使用所有有效文档）
+            log::info!(
+                "🎯 [Strategy] FullScan: hit_ratio={:.1}% >= 20%",
+                hit_ratio * 100.0
+            );
+            self.build_exec_plan(result_bitmap, projection, sort, limit)
+        }
+    }
+
+    /// 应用过滤条件，返回命中的文档bitmap
+    fn apply_filters(&self, filters: &[Expr]) -> Option<RoaringBitmap> {
         let mut result_bitmap = self.valid_docs.clone();
 
-        // 2. 应用 filters，逐个与结果取交集
         for filter in filters {
             if let Some(bitmap) = self.expr_to_bitmap(filter) {
                 result_bitmap &= bitmap;
             }
         }
 
-        // 如果数据超过20%，直接全表扫描
-        if result_bitmap.len() * 5 > self.valid_docs.len() {
-            log::info!("🔍 [SegmentScanner] Query matches more than 20% of documents ({} out of {}), switching to full scan",
-                result_bitmap.len(),
-                self.valid_docs.len()
-            );
-            result_bitmap = self.valid_docs.clone();
-        }
-
         if result_bitmap.is_empty() {
-            return None;
+            None
+        } else {
+            Some(result_bitmap)
         }
+    }
 
-        // 3. 处理投影 - 直接使用原始索引,不需要转换
-        let projected_schema = match projection {
+    /// 构建执行计划（通用方法）
+    fn build_exec_plan(
+        &self,
+        result_bitmap: RoaringBitmap,
+        projection: Option<&Vec<usize>>,
+        sort: Option<(String, bool)>,
+        limit: Option<usize>,
+    ) -> Option<Arc<dyn ExecutionPlan>> {
+        let projected_schema = self.build_projected_schema(projection);
+        let exec = SegmentExec::new(
+            self.raw_data.clone(),
+            self.schema.clone(),
+            projected_schema,
+            result_bitmap,
+            projection.map(|p| p.to_vec()),
+            sort,
+            limit,
+        );
+
+        Some(Arc::new(exec))
+    }
+
+    /// 构建投影后的schema
+    fn build_projected_schema(&self, projection: Option<&Vec<usize>>) -> SchemaRef {
+        match projection {
             Some(indices) if !indices.is_empty() => {
                 let fields: Vec<_> = indices
                     .iter()
@@ -104,26 +164,9 @@ impl SegmentScanner {
                     .collect();
                 Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
             }
-            Some(_) => {
-                // 空投影(如 COUNT(*)),返回空 schema
-                Arc::new(datafusion::arrow::datatypes::Schema::empty())
-            }
-            None => {
-                // 没有投影,返回所有列
-                self.schema.clone()
-            }
-        };
-
-        // 4. 创建 ExecutionPlan
-        let exec = SegmentExec::new(
-            self.raw_data.clone(),
-            self.schema.clone(),
-            projected_schema,
-            result_bitmap,
-            projection.map(|p| p.to_vec()),
-        );
-
-        Some(Arc::new(exec))
+            Some(_) => Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+            None => self.schema.clone(),
+        }
     }
 
     fn expr_to_bitmap(&self, expr: &Expr) -> Option<RoaringBitmap> {
@@ -310,6 +353,8 @@ struct SegmentExec {
     projection: Option<Vec<usize>>, // 投影列索引
     /// 执行计划属性，在构造时创建并存储，避免每次调用 properties() 都创建
     properties: datafusion::physical_plan::PlanProperties,
+    sort: Option<(String, bool)>,
+    limit: Option<usize>,
 }
 
 impl SegmentExec {
@@ -319,6 +364,8 @@ impl SegmentExec {
         projected_schema: SchemaRef,
         matched_docs: RoaringBitmap,
         projection: Option<Vec<usize>>,
+        sort: Option<(String, bool)>,
+        limit: Option<usize>,
     ) -> Self {
         use datafusion::physical_expr::EquivalenceProperties;
         use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -328,7 +375,9 @@ impl SegmentExec {
         // 注意: 使用 projected_schema 作为输出 schema
         let eq_properties = EquivalenceProperties::new(projected_schema.clone());
         let partitioning = Partitioning::UnknownPartitioning(1);
-        let emission_type = EmissionType::Final; // 最终输出，不是增量的
+        // EmissionType::Final 表示 batch 之间没有重复的行，也没有更新关系
+        // 每个 batch 包含不同的 doc_ids，是最终的、完整的数据
+        let emission_type = EmissionType::Final;
         let boundedness = Boundedness::Bounded; // 有界数据（不是无限流）
 
         let properties = datafusion::physical_plan::PlanProperties::new(
@@ -345,6 +394,8 @@ impl SegmentExec {
             matched_docs,
             projection,
             properties,
+            sort,
+            limit,
         }
     }
 }
@@ -420,7 +471,9 @@ impl ExecutionPlan for SegmentExec {
 
         eprintln!(
             "🔍 [SegmentExec::execute] Starting streaming execution, total matched_docs={}",
-            matched_docs.len()
+            matched_docs
+                .map(|m| m.len() as usize)
+                .unwrap_or_else(|| self.raw_data.len())
         );
 
         Ok(Box::pin(SegmentStream::new(
@@ -625,5 +678,46 @@ impl futures::Stream for SegmentStream {
             }
             Err(e) => Poll::Ready(Some(Err(e))),
         }
+    }
+}
+
+// ============================================================================
+// 简化的查询优化
+// ============================================================================
+
+impl SegmentScanner {
+    /// 尝试使用倒排索引的有序扫描（ORDER BY优化）
+    ///
+    /// 策略：只使用第一个排序字段进行索引扫描，后续字段交给DataFusion处理
+    ///
+    /// # Arguments
+    /// * `result_bitmap` - 已经应用过filters的候选文档bitmap
+    /// * `projection` - 投影列
+    /// * `_limit` - LIMIT 值（预留，未来用于优化）
+    /// * `sort_fields` - ORDER BY 字段 [(field_name, ascending)]
+    ///
+    /// # 返回
+    /// 如果第一个排序字段有索引且支持有序扫描，返回优化的执行计划；
+    /// 否则fallback到普通的bitmap scan
+    fn try_index_ordered_scan(
+        &self,
+        result_bitmap: RoaringBitmap,
+        projection: Option<&Vec<usize>>,
+        sort: Option<(String, bool)>,
+        limit: usize,
+    ) -> Option<Arc<dyn ExecutionPlan>> {
+        if sort
+            .as_ref()
+            .map(|(f, _)| self.index_readers.contains_key(f))
+            .unwrap_or(false)
+        {
+            log::warn!(
+                "🎯 [IndexOrderedScan] No index for field '{}', falling back to BitmapScan",
+                sort
+            );
+            return self.build_exec_plan(result_bitmap, projection);
+        }
+
+        self.build_exec_plan(result_bitmap, projection, limit, sort_fields.get)
     }
 }

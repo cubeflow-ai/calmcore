@@ -797,6 +797,10 @@ fn format_arrow_value(array: &ArrayRef, index: usize) -> String {
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             arr.value(index).to_string()
         }
+        DataType::UInt32 => {
+            let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+            arr.value(index).to_string()
+        }
         DataType::UInt64 => {
             let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
             arr.value(index).to_string()

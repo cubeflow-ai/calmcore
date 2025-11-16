@@ -1041,6 +1041,13 @@ pub trait IndexReader: Send + Sync + 'static {
         end: &ScalarValue,
         end_inclusive: bool,
     ) -> Option<RoaringBitmap>;
+    
+    /// 估算字段的基数（不同值的数量）
+    /// 用于查询优化和成本估算
+    /// 默认实现返回一个保守的估计值
+    fn estimate_cardinality(&self) -> usize {
+        1000 // 默认假设 1000 个不同的值
+    }
 }
 
 pub trait IndexWriter: Send + Sync + 'static {
