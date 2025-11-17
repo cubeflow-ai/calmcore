@@ -165,6 +165,9 @@ pub mod i64_coder {
     pub fn read_delta<B: BufferRead>(buf: &B) -> Vec<i64> {
         let mut pos = 0;
         let len = zigzag::read_u32(buf, &mut pos);
+        if len == 0 {
+            return Vec::new();
+        }
         let mut value = zigzag::read_i64(buf, &mut pos);
         let mut result = Vec::with_capacity(len as usize);
         result.push(value);

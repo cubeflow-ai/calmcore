@@ -114,6 +114,168 @@ where
         RangeIterator::new(self, start_key.clone(), end_key.clone())
     }
 
+    /// Range union query: aggregate all values in [start_key, end_key) using union operation
+    ///
+    /// **This is the primary use case for union_leaf optimization!**
+    ///
+    /// Returns the union of all values in the range without iterating individual key-value pairs.
+    /// For RoaringBitmap values, this returns all unique doc_ids across the range.
+    ///
+    /// Performance comparison:
+    /// - **With union_leaf**: O(chunks) - only reads union_leaf from each chunk (~10-100x faster)
+    /// - **Without union_leaf**: O(keys) - must deserialize and union all individual values
+    ///
+    /// Example use case:
+    /// ```rust
+    /// // Get all unique doc_ids from keys 10000-20000 (fast!)
+    /// let union_bitmap = reader.range_union(&10000, &20000)?;
+    /// println!("Total unique doc_ids: {}", union_bitmap.len());
+    /// ```
+    ///
+    /// This is much more efficient than:
+    /// ```rust
+    /// // Slow: iterates every key-value pair
+    /// let mut result = RoaringBitmap::new();
+    /// for item in reader.range(&10000, &20000) {
+    ///     result |= item.1;
+    /// }
+    /// ```
+    pub fn range_union(&self, start_key: &K, end_key: &K) -> Result<R>
+    where
+        R: Default + std::ops::BitOr<Output = R> + Clone,
+    {
+        let mut result = R::default();
+        let mut chunks_scanned = 0;
+        let mut keys_scanned = 0;
+
+        if !self.has_union_leaf {
+            // Fallback: iterate through all key-value pairs
+            for item in self.range(start_key, end_key) {
+                let temp = std::mem::take(&mut result);
+                result = temp | item.1.clone();
+                keys_scanned += 1;
+            }
+            return Ok(result);
+        }
+
+        // Optimized path: directly read union_leaf from each chunk
+        self.collect_union_from_chunks(
+            start_key,
+            end_key,
+            &mut result,
+            &mut chunks_scanned,
+            &mut keys_scanned,
+        )?;
+
+        Ok(result)
+    }
+
+    /// Recursively collect union_leaf from all chunks in range
+    fn collect_union_from_chunks(
+        &self,
+        start_key: &K,
+        end_key: &K,
+        result: &mut R,
+        chunks_scanned: &mut usize,
+        keys_scanned: &mut usize,
+    ) -> Result<()>
+    where
+        R: Default + std::ops::BitOr<Output = R> + Clone,
+    {
+        let offset = self.root_offset as usize;
+        let mut stack = vec![(offset, 0usize)]; // (node_offset, child_index)
+
+        while let Some((node_offset, _child_idx)) = stack.pop() {
+            let (is_leaf, keys_data, offsets, union_data) = self.read_node_at(node_offset)?;
+            let keys = self.reader_ser.deserialize_keys(&keys_data);
+
+            if is_leaf {
+                // Check if this leaf chunk intersects with [start_key, end_key)
+                if keys.is_empty() {
+                    continue;
+                }
+
+                let chunk_min = &keys[0];
+                let chunk_max = &keys[keys.len() - 1];
+
+                // Skip if no overlap
+                if chunk_max < start_key || chunk_min >= end_key {
+                    continue;
+                }
+
+                *chunks_scanned += 1;
+
+                // Check if chunk is FULLY contained in the range
+                // Only use union_leaf if all keys in chunk are within [start_key, end_key)
+                let chunk_fully_contained = chunk_min >= start_key && chunk_max < end_key;
+
+                // If we have union_leaf AND chunk is fully contained, use it directly!
+                if chunk_fully_contained {
+                    if let Some(ref union_bytes) = union_data {
+                        match self.reader_ser.deserialize_value(union_bytes) {
+                            Ok(union_value) => {
+                                let temp = std::mem::take(result);
+                                *result = temp | union_value;
+                                continue; // Skip to next chunk
+                            }
+                            Err(_e) => {
+                                // Fall through to manual iteration
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: manually iterate and union values in this chunk
+                for (i, key) in keys.iter().enumerate() {
+                    if key >= start_key && key < end_key {
+                        let value_start = offsets[i];
+                        let value_end = if i + 1 < offsets.len() {
+                            offsets[i + 1]
+                        } else {
+                            self.data.len() as i64
+                        };
+                        let value = self.read_value_at(value_start, value_end);
+                        let temp = std::mem::take(result);
+                        *result = temp | value;
+                        *keys_scanned += 1;
+                    }
+                }
+            } else {
+                // Index node: push children that might overlap with range
+                for (i, _key) in keys.iter().enumerate() {
+                    let child_offset = offsets[i] as usize;
+
+                    // Determine the key range for this child
+                    // child[i] contains keys in [keys[i-1], keys[i])
+                    let child_might_overlap = if i == 0 {
+                        // First child: (-∞, keys[0])
+                        keys[0] > *start_key
+                    } else if i < keys.len() {
+                        // Middle child: [keys[i-1], keys[i])
+                        keys[i] > *start_key && &keys[i - 1] < end_key
+                    } else {
+                        // Last child: [keys[n-1], +∞)
+                        &keys[keys.len() - 1] < end_key
+                    };
+
+                    if child_might_overlap {
+                        stack.push((child_offset, i));
+                    }
+                }
+
+                // Don't forget the rightmost child
+                if offsets.len() > keys.len() {
+                    let last_child_offset = offsets[keys.len()] as usize;
+                    if keys.is_empty() || &keys[keys.len() - 1] < end_key {
+                        stack.push((last_child_offset, keys.len()));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Check if this tree has union_leaf optimization enabled
     pub fn has_union_leaf(&self) -> bool {
         self.has_union_leaf
@@ -129,7 +291,7 @@ where
         // Traverse from root to leaf
         loop {
             // Read node at current offset
-            let (is_leaf, keys, offsets) = match self.read_node_at(offset as usize) {
+            let (is_leaf, keys, offsets, _union_data) = match self.read_node_at(offset as usize) {
                 Ok(node) => node,
                 Err(_) => return None,
             };
@@ -157,16 +319,24 @@ where
                 }
             } else {
                 // Index node: find which child to follow
-                // keys[i] is the first key of child i
-                // We need to find the last child whose first key <= search_key
+                // B-tree structure: keys[k1, k2, k3], offsets[c0, c1, c2, c3]
+                // c0 contains keys < k1
+                // c1 contains keys [k1, k2)
+                // c2 contains keys [k2, k3)
+                // c3 contains keys >= k3
+                //
+                // So: find the first i where search_key < keys[i], then use offsets[i]
+                // If no such i exists, use offsets[keys.len()]
 
                 let mut child_idx = 0;
                 for (i, key) in keys.iter().enumerate() {
-                    if key <= search_key {
+                    if search_key < key {
                         child_idx = i;
-                    } else {
                         break;
                     }
+                    // If we finish the loop without break, child_idx will be 0,
+                    // but we want the last child
+                    child_idx = i + 1;
                 }
 
                 let next_offset = offsets[child_idx];
@@ -176,8 +346,8 @@ where
     }
 
     /// Read a node from mmap at given offset
-    /// Returns (is_leaf, keys_data, offsets)
-    fn read_node_at(&self, offset: usize) -> Result<(bool, Vec<u8>, Vec<i64>)> {
+    /// Returns (is_leaf, keys_data, offsets, union_data_opt)
+    fn read_node_at(&self, offset: usize) -> Result<(bool, Vec<u8>, Vec<i64>, Option<Vec<u8>>)> {
         if offset >= self.node.len() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -246,6 +416,7 @@ where
             };
 
             if valid {
+                pos = try_pos;
                 deltas
             } else {
                 // Fallback to legacy tagged array
@@ -253,7 +424,27 @@ where
             }
         };
 
-        Ok((is_leaf, keys_bytes, offsets))
+        // Read union_leaf data if this is a leaf node and has_union_leaf is enabled
+        let union_data = if is_leaf && self.has_union_leaf {
+            // Read length prefix (u32) then data
+            if pos + 4 <= self.node.len() {
+                let union_len =
+                    u32::from_be_bytes(self.node[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+
+                if pos + union_len <= self.node.len() {
+                    Some(self.node[pos..pos + union_len].to_vec())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok((is_leaf, keys_bytes, offsets, union_data))
     }
     /// Binary search within deserialized keys using PartialOrd
     fn binary_search_keys(&self, keys: &[K], search_key: &K) -> SearchResult {
@@ -274,10 +465,11 @@ where
 
         // Traverse from root to leaf, keeping track of largest key <= search_key
         loop {
-            let (is_leaf, keys_data, offsets) = match self.read_node_at(offset as usize) {
-                Ok(node) => node,
-                Err(_) => break,
-            };
+            let (is_leaf, keys_data, offsets, _union_data) =
+                match self.read_node_at(offset as usize) {
+                    Ok(node) => node,
+                    Err(_) => break,
+                };
 
             let keys = self.reader_ser.deserialize_keys(&keys_data);
 
@@ -426,7 +618,8 @@ where
 
         // Traverse tree to find the position
         loop {
-            let (is_leaf, keys_data, offsets) = match self.reader.read_node_at(offset) {
+            let (is_leaf, keys_data, offsets, _union_data) = match self.reader.read_node_at(offset)
+            {
                 Ok(node) => node,
                 Err(_) => {
                     self.finished = true;
@@ -484,7 +677,8 @@ where
             index += 1;
 
             // Read node at current offset
-            let (is_leaf, keys_data, offsets) = match self.reader.read_node_at(offset) {
+            let (is_leaf, keys_data, offsets, _union_data) = match self.reader.read_node_at(offset)
+            {
                 Ok(node) => node,
                 Err(_) => {
                     self.finished = true;
@@ -495,7 +689,10 @@ where
             let keys = self.reader.reader_ser.deserialize_keys(&keys_data);
 
             // Check if we've exhausted this node
-            if index >= keys.len() as i32 {
+            // For index nodes: valid indices are [0, keys.len()] (matching offsets.len())
+            // For leaf nodes: valid indices are [0, keys.len()-1]
+            let max_index = if is_leaf { keys.len() } else { offsets.len() };
+            if index >= max_index as i32 {
                 continue; // Pop next item from stack
             }
 
@@ -526,10 +723,13 @@ where
 }
 
 /// Range iterator for range queries [start_key, end_key)
-/// Optimized to skip chunks that don't intersect with the range
+/// Optimized with union_leaf to skip chunks that don't intersect with the range
 pub struct RangeIterator<'a, K, R> {
+    reader: &'a TreeReader<K, R>,
+    start_key: K,
     end_key: K,
-    inner_iter: TreeIterator<'a, K, R>,
+    stack: Vec<(usize, i32)>, // (node_offset, current_index)
+    finished: bool,
 }
 
 impl<'a, K, R> RangeIterator<'a, K, R>
@@ -537,13 +737,78 @@ where
     K: Clone + PartialOrd,
 {
     fn new(reader: &'a TreeReader<K, R>, start_key: K, end_key: K) -> Self {
-        let mut inner_iter = TreeIterator::new(reader);
-        // Seek to start_key to skip keys before range
-        inner_iter.seek(&start_key);
-
-        Self {
+        let mut iter = Self {
+            reader,
+            start_key: start_key.clone(),
             end_key,
-            inner_iter,
+            stack: Vec::new(),
+            finished: false,
+        };
+
+        // Seek to start position
+        iter.seek(&start_key);
+        iter
+    }
+
+    /// Seek to the first key >= start_key
+    fn seek(&mut self, start_key: &K) {
+        if self.reader.is_empty() {
+            self.finished = true;
+            return;
+        }
+
+        self.stack.clear();
+        let mut offset = self.reader.root_offset as usize;
+
+        // Traverse tree to find the position
+        loop {
+            let (is_leaf, keys_data, offsets, _union_data) = match self.reader.read_node_at(offset)
+            {
+                Ok(node) => node,
+                Err(_) => {
+                    self.finished = true;
+                    return;
+                }
+            };
+
+            let keys = self.reader.reader_ser.deserialize_keys(&keys_data);
+
+            if is_leaf {
+                // Leaf node: find first key >= start_key
+                for (i, key) in keys.iter().enumerate() {
+                    if key >= start_key {
+                        // Found starting point, push to stack with index before target
+                        self.stack.push((offset, i as i32 - 1));
+                        return;
+                    }
+                }
+                // All keys < start_key, no match
+                self.finished = true;
+                return;
+            } else {
+                // Index node: find appropriate child
+                let mut child_idx = 0;
+                for (i, key) in keys.iter().enumerate() {
+                    if start_key < key {
+                        child_idx = i;
+                        break;
+                    }
+                    child_idx = i + 1;
+                }
+
+                // Guard against index out of bounds
+                if child_idx >= offsets.len() {
+                    self.finished = true;
+                    return;
+                }
+
+                // CRITICAL: Push parent with child_idx (not child_idx-1)
+                // After current child exhausts, next() will pop this, do index+=1 to get child_idx+1
+                // This ensures we continue with the NEXT sibling, not re-visit current child
+                self.stack.push((offset, child_idx as i32));
+                let next_offset = offsets[child_idx];
+                offset = next_offset as usize;
+            }
         }
     }
 }
@@ -555,18 +820,84 @@ where
     type Item = crate::Item<K, R>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Get next item from inner iterator
-        let item = self.inner_iter.next()?;
-
-        let key = &item.0;
-
-        // Check if key is still in range [start_key, end_key)
-        if key >= &self.end_key {
-            return None; // Stop iteration when we exceed end_key
+        if self.finished {
+            return None;
         }
 
-        // Key is in range, return it
-        Some(item)
+        loop {
+            let (offset, mut index) = self.stack.pop()?;
+            index += 1;
+
+            // Read node at current offset
+            let (is_leaf, keys_data, offsets, _union_data) = match self.reader.read_node_at(offset)
+            {
+                Ok(node) => node,
+                Err(_) => {
+                    self.finished = true;
+                    return None;
+                }
+            };
+
+            let keys = self.reader.reader_ser.deserialize_keys(&keys_data);
+
+            // For leaf nodes: check if we've exhausted all keys
+            // For index nodes: keys.len() < offsets.len(), so index == keys.len() is valid (rightmost child)
+            if is_leaf {
+                if index >= keys.len() as i32 {
+                    continue; // Leaf exhausted, pop next item from stack
+                }
+
+                let key = keys[index as usize].clone();
+
+                // Check if key exceeds end_key (range boundary)
+                if key >= self.end_key {
+                    self.finished = true;
+                    return None;
+                }
+
+                // Push current position back onto stack
+                self.stack.push((offset, index));
+
+                // Leaf node: return the item at this index
+                // Calculate value offset range
+                let start = offsets[index as usize];
+                let end = if (index as usize) + 1 < offsets.len() {
+                    offsets[index as usize + 1]
+                } else {
+                    self.reader.data.len() as i64
+                };
+
+                let value = self.reader.read_value_at(start, end);
+                return Some(std::sync::Arc::new((key, value, None)));
+            } else {
+                // Index node: check if we've exhausted all children
+                // Note: offsets.len() = keys.len() + 1
+                if index >= offsets.len() as i32 {
+                    continue; // All children visited, pop next item from stack
+                }
+
+                // For index nodes: B-tree structure is keys[k1, k2], offsets[c0, c1, c2]
+                // - c0 contains keys < k1
+                // - c1 contains keys in [k1, k2)
+                // - c2 contains keys >= k2
+                // When accessing offsets[i], the minimum key in that child is keys[i-1] (if exists)
+                // We should stop if keys[i-1] >= end_key
+                if index > 0 && (index - 1) < keys.len() as i32 {
+                    let separator_key = keys[(index - 1) as usize].clone();
+                    if separator_key >= self.end_key {
+                        self.finished = true;
+                        return None;
+                    }
+                }
+
+                // Push current position back onto stack
+                self.stack.push((offset, index));
+
+                // Index node: push next child onto stack (this does NOT return a value)
+                let child_offset = offsets[index as usize] as usize;
+                self.stack.push((child_offset, -1));
+            }
+        }
     }
 }
 

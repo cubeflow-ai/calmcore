@@ -73,9 +73,12 @@ impl TreeWriter {
 
         data_file.flush()?;
 
-        // Add final offset to mark the end of the last chunk
+        // Add final offset to mark the end of the last value
+        // This is needed because we store n+1 offsets for n keys
+        // to calculate value sizes as: offsets[i+1] - offsets[i]
         cw.add_final_offset(offset_tracker)?;
 
+        // Release any remaining keys in current chunk
         cw.release_chunk()?;
 
         let level_index =
@@ -166,15 +169,15 @@ where
     }
 
     fn add_key_offset(&mut self, i: &Arc<(K, V, Option<Duration>)>, offset: i64) -> Result<()> {
+        // Check if current chunk is full (before adding new key)
         if self.current.keys.len() >= self.chunk_size {
-            // Add the ending offset for the last key in current chunk
-            // This allows calculating value size as: offsets[i+1] - offsets[i]
+            // Add ending offset for the last key in current chunk
             self.current.offsets.push(offset);
-
-            // move current to second level
+            // Release the full chunk
             self.release_chunk()?;
         }
 
+        // Add current key/offset/value to the new/current chunk
         self.current.keys.push(i.0.clone());
         self.current.offsets.push(offset);
         self.union_leaf.as_ref().map(|v| v.add_value(&i.1));
@@ -211,8 +214,19 @@ where
         // add to second level index
         // Store as positive offset (chunk type flag will distinguish leaf vs index)
         let last = self.second_level.last_mut().unwrap();
-        last.keys.push(first_key);
-        last.offsets.push(chunk_node_offset);
+
+        // B-tree index structure: keys [k1, k2], offsets [c0, c1, c2]
+        // where c0 < k1 <= c1 < k2 <= c2
+        // For the first chunk, we only add offset (leftmost child)
+        // For subsequent chunks, we add both key and offset
+        if last.offsets.is_empty() {
+            // First chunk: only add offset as leftmost child
+            last.offsets.push(chunk_node_offset);
+        } else {
+            // Subsequent chunks: add key (separator) and offset
+            last.keys.push(first_key);
+            last.offsets.push(chunk_node_offset);
+        }
 
         if last.is_finish() {
             self.second_level.push(Chunk::new(self.chunk_size));
@@ -244,8 +258,16 @@ where
 
             // add to second level
             let last = self.second_level.last_mut().unwrap();
-            last.keys.push(chunk.keys[0].clone());
-            last.offsets.push(root_offset);
+
+            // Same B-tree index logic: first chunk only adds offset, subsequent chunks add key + offset
+            if last.offsets.is_empty() {
+                // First chunk in this level: only add offset as leftmost child
+                last.offsets.push(root_offset);
+            } else {
+                // Subsequent chunks: add key (separator) and offset
+                last.keys.push(chunk.keys[0].clone());
+                last.offsets.push(root_offset);
+            }
 
             self.write_chunk(chunk, is_leaf)?;
         }
@@ -296,6 +318,10 @@ where
                     let v_ref = std::mem::transmute::<&U, &V>(union_data);
                     self.serializer.serialize_value(v_ref)
                 };
+                // Write length prefix (u32) then data
+                self.node_file
+                    .write_all(&(union_bytes.len() as u32).to_be_bytes())?;
+                self.node_file_offset += 4;
                 self.node_file.write_all(&union_bytes)?;
                 self.node_file_offset += union_bytes.len() as u64;
             }

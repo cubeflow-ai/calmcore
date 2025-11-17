@@ -29,4 +29,11 @@ pub trait UnionLeafSerializer<V>: Send + Sync {
 pub trait ReadSerializer<K, R>: Send + Sync {
     fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<K>;
     fn deserialize_value<'a>(&self, data: &'a [u8]) -> std::result::Result<R, Box<dyn Error>>;
+
+    /// Optional: Check if union_leaf intersects with query range [start_key, end_key)
+    /// Used for range query optimization - return false to skip entire chunk
+    /// Default implementation returns true (no filtering)
+    fn union_intersects_range(&self, _union_data: &[u8], _start_key: &K, _end_key: &K) -> bool {
+        true
+    }
 }
