@@ -133,14 +133,10 @@ impl<K: IndexKey> GenericIndexedField<K> {
 
         // 3. 持久化
         let serializer = K::new_serializer(zstd_level);
-        let writer = TreeWriter::new(
-            std::path::PathBuf::from(path),
-            chunk_size,
-            K::key_len() as u16,
-        );
+        let writer = TreeWriter::new(std::path::PathBuf::from(path), chunk_size);
 
         writer
-            .persist::<K, RoaringBitmap, RoaringBitmap>(len, Box::new(serializer), iter)
+            .persist::<K, RoaringBitmap, RoaringBitmap>(len, Box::new(serializer), None, iter)
             .map_err(|e| CoreError::IOError(e.to_string()))?;
 
         // 4. 创建磁盘索引

@@ -21,6 +21,11 @@ pub trait WriteSerializer<K, V>: Send + Sync {
     fn serialize_value<'a>(&self, value: &'a V) -> Cow<'a, [u8]>;
 }
 
+pub trait UnionLeafSerializer<V>: Send + Sync {
+    fn add_value<'a>(&self, values: &'a V);
+    fn release<'a>(&self) -> V;
+}
+
 pub trait ReadSerializer<K, R>: Send + Sync {
     fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<K>;
     fn deserialize_value<'a>(&self, data: &'a [u8]) -> std::result::Result<R, Box<dyn Error>>;

@@ -2,6 +2,8 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Seek, SeekFrom, Write},
     path::PathBuf,
+    sync::Arc,
+    time::Duration,
 };
 
 use byteorder::{BigEndian, WriteBytesExt};
@@ -11,16 +13,11 @@ use super::*;
 pub struct TreeWriter {
     dir: PathBuf,
     chunk_size: usize,
-    key_len: u16,
 }
 
 impl TreeWriter {
-    pub fn new(dir: PathBuf, chunk_size: usize, key_len: u16) -> Self {
-        Self {
-            dir,
-            chunk_size,
-            key_len,
-        }
+    pub fn new(dir: PathBuf, chunk_size: usize) -> Self {
+        Self { dir, chunk_size }
     }
 }
 
@@ -36,10 +33,11 @@ impl TreeWriter {
 ///    ]
 /// if key_len == 0 means not fixed key
 impl TreeWriter {
-    pub fn persist<'a, K: 'a + Clone, V, R>(
+    pub fn persist<'a, K: 'a + Clone, V: Clone, R>(
         &self,
         len: usize,
         serializer: Box<dyn WriteSerializer<K, V>>,
+        union_leaf: Option<Box<dyn UnionLeafSerializer<V>>>,
         iter: impl Iterator<Item = crate::Item<K, V>>,
     ) -> Result<()> {
         if !self.dir.exists() {
@@ -60,13 +58,13 @@ impl TreeWriter {
                 .open(self.dir.join(DATA_NAME))?,
         );
 
-        let mut cw = ChunkWriter::new(self.chunk_size, &serializer, node_file, self.key_len, len)?;
+        let mut cw = ChunkWriter::new(self.chunk_size, &serializer, union_leaf, node_file, len)?;
         data_file.write_all(MAGIC_VERSION)?;
 
         let mut offset_tracker = MAGIC_VERSION.len() as i64; // Track offset manually instead of calling stream_position()
 
         for (_i, item) in iter.enumerate() {
-            cw.add_key_offset(&item.0.clone(), offset_tracker)?;
+            cw.add_key_offset(&item, offset_tracker)?;
 
             let value_bytes = serializer.serialize_value(&item.1);
             data_file.write_all(&value_bytes)?;
@@ -91,18 +89,20 @@ impl TreeWriter {
 }
 
 #[derive(Clone)]
-struct Chunk<K> {
+struct Chunk<K, V> {
     chunk_size: usize,
     keys: Vec<K>,
     offsets: Vec<i64>,
+    union: Option<V>,
 }
 
-impl<K: Clone> Chunk<K> {
+impl<K: Clone, V> Chunk<K, V> {
     fn new(chunk_size: usize) -> Self {
         Self {
             chunk_size,
             keys: Vec::with_capacity(chunk_size),
             offsets: Vec::with_capacity(chunk_size),
+            union: None,
         }
     }
 
@@ -114,14 +114,16 @@ impl<K: Clone> Chunk<K> {
     fn clear(&mut self) {
         self.keys.clear();
         self.offsets.clear();
+        self.union = None;
     }
 }
 
 struct ChunkWriter<'a, K, V> {
-    second_level: Vec<Chunk<K>>,
+    second_level: Vec<Chunk<K, V>>,
     node_file: BufWriter<File>,
     serializer: &'a Box<dyn WriteSerializer<K, V>>,
-    current: Chunk<K>,
+    union_leaf: Option<Box<dyn UnionLeafSerializer<V>>>,
+    current: Chunk<K, V>,
     chunk_size: usize,
     node_file_offset: u64, // Track node file offset manually
 }
@@ -129,25 +131,29 @@ struct ChunkWriter<'a, K, V> {
 impl<'a, K, V> ChunkWriter<'a, K, V>
 where
     K: Clone,
+    V: Clone, // Add Clone bound for V
 {
     fn new(
         chunk_size: usize,
         serializer: &'a Box<dyn WriteSerializer<K, V>>,
+        union_leaf: Option<Box<dyn UnionLeafSerializer<V>>>,
         mut node_file: BufWriter<File>,
-        key_len: u16,
         len: usize,
     ) -> Result<ChunkWriter<'a, K, V>> {
+        let has_union_leaf = union_leaf.is_some();
+
         node_file.write_all(MAGIC_VERSION)?;
         node_file.write_all(&[0; 8])?; // root node offset placeholder
-        node_file.write_all(&key_len.to_be_bytes())?;
         node_file.write_all(&(len as u32).to_be_bytes())?;
+        node_file.write_all(&[if has_union_leaf { 1u8 } else { 0u8 }])?; // has_union_leaf flag
 
-        let initial_offset = MAGIC_VERSION.len() + 8 + 2 + 4; // MAGIC + root_offset + key_len + tree_len
+        let initial_offset = MAGIC_VERSION.len() + 8 + 4 + 1; // MAGIC + root_offset + tree_len + has_union_leaf
 
         Ok(Self {
             second_level: vec![Chunk::new(chunk_size)],
             node_file,
             serializer,
+            union_leaf,
             current: Chunk::new(chunk_size),
             chunk_size,
             node_file_offset: initial_offset as u64,
@@ -159,7 +165,7 @@ where
         self.current.clear();
     }
 
-    fn add_key_offset(&mut self, k: &K, offset: i64) -> Result<()> {
+    fn add_key_offset(&mut self, i: &Arc<(K, V, Option<Duration>)>, offset: i64) -> Result<()> {
         if self.current.keys.len() >= self.chunk_size {
             // Add the ending offset for the last key in current chunk
             // This allows calculating value size as: offsets[i+1] - offsets[i]
@@ -169,8 +175,9 @@ where
             self.release_chunk()?;
         }
 
-        self.current.keys.push(k.clone());
+        self.current.keys.push(i.0.clone());
         self.current.offsets.push(offset);
+        self.union_leaf.as_ref().map(|v| v.add_value(&i.1));
 
         Ok(())
     }
@@ -188,19 +195,23 @@ where
             return Ok(());
         }
 
+        self.current.union = self.union_leaf.as_ref().map(|u| u.release());
+
         // move current to second level
         let old_chunk = std::mem::replace(&mut self.current, Chunk::new(self.chunk_size));
 
         // Use manually tracked offset instead of system call
         let chunk_node_offset = self.node_file_offset as i64;
 
+        let first_key = old_chunk.keys[0].clone();
+
         // Write the chunk first (is_leaf=true, because this is from current level)
-        self.write_chunk(old_chunk.clone(), true)?;
+        self.write_chunk(old_chunk, true)?;
 
         // add to second level index
         // Store as positive offset (chunk type flag will distinguish leaf vs index)
-        let last: &mut Chunk<K> = self.second_level.last_mut().unwrap();
-        last.keys.push(old_chunk.keys[0].clone());
+        let last = self.second_level.last_mut().unwrap();
+        last.keys.push(first_key);
         last.offsets.push(chunk_node_offset);
 
         if last.is_finish() {
@@ -210,7 +221,10 @@ where
         Ok(())
     }
 
-    fn write_second_level(&mut self, level_index: Vec<Chunk<K>>, is_leaf: bool) -> Result<()> {
+    fn write_second_level<U>(&mut self, level_index: Vec<Chunk<K, U>>, is_leaf: bool) -> Result<()>
+    where
+        U: Clone,
+    {
         if level_index.len() == 1 {
             let root_offset = self.node_file_offset;
 
@@ -229,7 +243,7 @@ where
             let root_offset = self.node_file_offset as i64;
 
             // add to second level
-            let last: &mut Chunk<K> = self.second_level.last_mut().unwrap();
+            let last = self.second_level.last_mut().unwrap();
             last.keys.push(chunk.keys[0].clone());
             last.offsets.push(root_offset);
 
@@ -243,7 +257,10 @@ where
         return self.write_second_level(level_index, false);
     }
 
-    fn write_chunk(&mut self, chunk: Chunk<K>, is_leaf: bool) -> Result<()> {
+    fn write_chunk<U>(&mut self, chunk: Chunk<K, U>, is_leaf: bool) -> Result<()>
+    where
+        U: Clone,
+    {
         // Write chunk type: 1 = leaf (points to data file), 0 = index (points to node file)
         self.node_file
             .write_all(&[if is_leaf { 1u8 } else { 0u8 }])?;
@@ -266,6 +283,23 @@ where
         num_ser::i64_coder::write_delta(&mut temp_buf, &chunk.offsets)?;
         self.node_file.write_all(&temp_buf)?;
         self.node_file_offset += temp_buf.len() as u64;
+
+        // Only write union data for leaf nodes
+        if is_leaf {
+            if let Some(union_data) = &chunk.union {
+                // SAFETY: For leaf nodes, U must be V since they contain actual values
+                // Index nodes (is_leaf=false) never have union_data
+                let union_bytes = unsafe {
+                    // Transmute U to V - safe because:
+                    // 1. Leaf nodes are always Chunk<K, V>
+                    // 2. Index nodes never enter this branch (is_leaf check)
+                    let v_ref = std::mem::transmute::<&U, &V>(union_data);
+                    self.serializer.serialize_value(v_ref)
+                };
+                self.node_file.write_all(&union_bytes)?;
+                self.node_file_offset += union_bytes.len() as u64;
+            }
+        }
 
         Ok(())
     }

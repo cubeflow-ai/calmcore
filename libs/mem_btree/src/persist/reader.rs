@@ -8,6 +8,7 @@ pub struct TreeReader<K, R> {
     key_len: u16,
     tree_len: u32,
     root_offset: i64,
+    has_union_leaf: bool, // Whether this tree has union_leaf data for range query optimization
     node: memmap2::Mmap,
     data: memmap2::Mmap,
     reader_ser: Box<dyn ReadSerializer<K, R>>,
@@ -20,7 +21,7 @@ where
     /// Creates a new TreeReader instance using mmap for fast random access
     ///
     /// File format:
-    /// NODE file: MAGIC(2) + root_offset(8) + key_len(2) + tree_len(4) + nodes...
+    /// NODE file: MAGIC(2) + root_offset(8) + tree_len(4) + has_union_leaf(1) + nodes...
     /// DATA file: MAGIC(2) + values...
     ///
     pub fn new(dir: &Path, reader_ser: Box<dyn ReadSerializer<K, R>>) -> Result<Self> {
@@ -28,8 +29,8 @@ where
         let node = unsafe { memmap2::Mmap::map(&File::open(dir.join(NODE_NAME))?)? };
         Self::validate_magic(&node)?;
 
-        // Parse header: MAGIC(2) + root_offset(8) + key_len(2) + tree_len(4)
-        if node.len() < 16 {
+        // Parse header: MAGIC(2) + root_offset(8) + tree_len(4) + has_union_leaf(1)
+        if node.len() < 15 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Invalid node file: header too short",
@@ -37,17 +38,18 @@ where
         }
 
         let root_offset = i64::from_be_bytes(node[2..10].try_into().unwrap());
-        let key_len = u16::from_be_bytes(node[10..12].try_into().unwrap());
-        let tree_len = u32::from_be_bytes(node[12..16].try_into().unwrap());
+        let tree_len = u32::from_be_bytes(node[10..14].try_into().unwrap());
+        let has_union_leaf = node[14] == 1;
 
         // Memory map the data file
         let data = unsafe { memmap2::Mmap::map(&File::open(dir.join(DATA_NAME))?)? };
         Self::validate_magic(&data)?;
 
         Ok(Self {
-            key_len,
+            key_len: 0, // Deprecated, kept for compatibility
             tree_len,
             root_offset,
+            has_union_leaf,
             node,
             data,
             reader_ser,
@@ -102,6 +104,19 @@ where
     /// TODO: Implement full tree traversal
     pub fn iter(&self) -> TreeIterator<'_, K, R> {
         TreeIterator::new(self)
+    }
+
+    /// Range query: iterate over keys in [start_key, end_key)
+    /// Returns an iterator that yields key-value pairs within the range
+    ///
+    /// If union_leaf is enabled, this can skip chunks that don't intersect with the range
+    pub fn range(&self, start_key: &K, end_key: &K) -> RangeIterator<'_, K, R> {
+        RangeIterator::new(self, start_key.clone(), end_key.clone())
+    }
+
+    /// Check if this tree has union_leaf optimization enabled
+    pub fn has_union_leaf(&self) -> bool {
+        self.has_union_leaf
     }
 
     // ========== Internal Implementation ==========
@@ -223,8 +238,8 @@ where
                     let max_ok = deltas.last().copied().unwrap_or(0) <= self.data.len() as i64;
                     min_ok && max_ok
                 } else {
-                    // Index offsets point to NODE file (after header 16 bytes)
-                    let min_ok = deltas[0] >= 16; // MAGIC(2)+root(8)+key_len(2)+tree_len(4)
+                    // Index offsets point to NODE file (after header)
+                    let min_ok = deltas[0] >= 15; // MAGIC(2)+root(8)+tree_len(4)+has_union_leaf(1)
                     let max_ok = deltas.last().copied().unwrap_or(0) <= self.node.len() as i64;
                     min_ok && max_ok
                 }
@@ -510,6 +525,51 @@ where
     }
 }
 
+/// Range iterator for range queries [start_key, end_key)
+/// Optimized to skip chunks that don't intersect with the range
+pub struct RangeIterator<'a, K, R> {
+    end_key: K,
+    inner_iter: TreeIterator<'a, K, R>,
+}
+
+impl<'a, K, R> RangeIterator<'a, K, R>
+where
+    K: Clone + PartialOrd,
+{
+    fn new(reader: &'a TreeReader<K, R>, start_key: K, end_key: K) -> Self {
+        let mut inner_iter = TreeIterator::new(reader);
+        // Seek to start_key to skip keys before range
+        inner_iter.seek(&start_key);
+
+        Self {
+            end_key,
+            inner_iter,
+        }
+    }
+}
+
+impl<'a, K, R> Iterator for RangeIterator<'a, K, R>
+where
+    K: Clone + PartialOrd,
+{
+    type Item = crate::Item<K, R>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Get next item from inner iterator
+        let item = self.inner_iter.next()?;
+
+        let key = &item.0;
+
+        // Check if key is still in range [start_key, end_key)
+        if key >= &self.end_key {
+            return None; // Stop iteration when we exceed end_key
+        }
+
+        // Key is in range, return it
+        Some(item)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,8 +618,8 @@ mod tests {
             tree.put(i, i * 2);
         }
 
-        TreeWriter::new(test_dir.clone(), 128, 0)
-            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), tree.iter())
+        TreeWriter::new(test_dir.clone(), 128)
+            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), None, tree.iter())
             .unwrap();
 
         // Read back
@@ -610,8 +670,8 @@ mod tests {
             tree.put(i, i * 2);
         }
 
-        TreeWriter::new(test_dir.clone(), 128, 0)
-            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), tree.iter())
+        TreeWriter::new(test_dir.clone(), 128)
+            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), None, tree.iter())
             .unwrap();
 
         // Read back and test iterator
@@ -650,8 +710,8 @@ mod tests {
             tree.put(i, i * 10);
         }
 
-        TreeWriter::new(test_dir.clone(), 128, 0)
-            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), tree.iter())
+        TreeWriter::new(test_dir.clone(), 128)
+            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), None, tree.iter())
             .unwrap();
 
         let reader = TreeReader::new(&test_dir, Box::new(I64Serializer {})).unwrap();
@@ -696,29 +756,26 @@ mod tests {
         let test_dir = PathBuf::from("/tmp/test_tree_reader_range");
         std::fs::remove_dir_all(&test_dir).ok();
 
-        // Write test data
+        // Write test data without union_leaf
         let mut tree = BTree::new(32);
         for i in 0..100i64 {
             tree.put(i, i * 3);
         }
 
-        TreeWriter::new(test_dir.clone(), 128, 0)
-            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), tree.iter())
+        TreeWriter::new(test_dir.clone(), 128)
+            .persist::<i64, i64, i64>(tree.len(), Box::new(I64Serializer {}), None, tree.iter())
             .unwrap();
 
         let reader = TreeReader::new(&test_dir, Box::new(I64Serializer {})).unwrap();
 
-        // Test range [30, 40)
-        println!("Testing range query [30, 40)...");
-        let mut iter = reader.iter();
-        iter.seek(&30);
+        println!("has_union_leaf: {}", reader.has_union_leaf());
+        assert_eq!(reader.has_union_leaf(), false);
 
+        // Test range [30, 40) using new range() API
+        println!("Testing range query [30, 40)...");
         let mut keys = Vec::new();
-        while let Some(item) = iter.next() {
+        for item in reader.range(&30, &40) {
             let (key, value, _) = &*item;
-            if *key >= 40 {
-                break; // Stop at 40
-            }
             assert_eq!(*value, *key * 3, "Value mismatch");
             keys.push(*key);
         }
@@ -727,6 +784,19 @@ mod tests {
         assert_eq!(keys.len(), 10, "Should have 10 keys in range [30, 40)");
         assert_eq!(keys[0], 30);
         assert_eq!(keys[9], 39);
+
+        // Test edge cases
+        println!("Testing range [0, 5)...");
+        let keys: Vec<_> = reader.range(&0, &5).map(|item| item.0).collect();
+        assert_eq!(keys, vec![0, 1, 2, 3, 4]);
+
+        println!("Testing range [95, 100)...");
+        let keys: Vec<_> = reader.range(&95, &100).map(|item| item.0).collect();
+        assert_eq!(keys, vec![95, 96, 97, 98, 99]);
+
+        println!("Testing range [50, 50) - empty range...");
+        let keys: Vec<_> = reader.range(&50, &50).map(|item| item.0).collect();
+        assert_eq!(keys.len(), 0);
 
         println!("✅ Range query test passed");
     }
