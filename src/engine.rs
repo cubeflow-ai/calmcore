@@ -971,12 +971,11 @@ impl Engine {
     pub async fn execute_sql(
         self: &Arc<Self>,
         sql: &str,
-    ) -> CoreResult<Vec<datafusion::arrow::record_batch::RecordBatch>> {
+    ) -> CoreResult<crate::compute::QueryResult> {
         use crate::compute::DistributedExecutor;
 
         let executor = DistributedExecutor::new(self.clone());
-        let result = executor.execute_sql(sql).await?;
-        Ok(result.batches)
+        executor.execute_sql(sql).await
     }
 }
 

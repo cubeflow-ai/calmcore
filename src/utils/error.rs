@@ -55,3 +55,10 @@ impl CoreError {
         matches!(self, CoreError::Ok(_))
     }
 }
+
+// DataFusion 错误转换
+impl From<datafusion::error::DataFusionError> for CoreError {
+    fn from(err: datafusion::error::DataFusionError) -> Self {
+        CoreError::Internal(format!("DataFusion error: {}", err))
+    }
+}

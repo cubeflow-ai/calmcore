@@ -182,12 +182,12 @@ impl QueryRoot {
         let engine = ctx.data::<Arc<Engine>>()?;
 
         // 使用 Engine 的 execute_sql 方法
-        let batches = engine
+        let result = engine
             .execute_sql(&sql)
             .await
             .map_err(|e| async_graphql::Error::new(format!("Query failed: {}", e)))?;
 
-        if batches.is_empty() {
+        if result.batch.num_rows() == 0 {
             return Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
@@ -196,27 +196,23 @@ impl QueryRoot {
         }
 
         // 获取列名
-        let columns: Vec<String> = batches[0]
+        let columns: Vec<String> = result
+            .batch
             .schema()
             .fields()
             .iter()
             .map(|f| f.name().clone())
             .collect();
 
-        // 转换所有批次为 JSON
-        let mut all_rows = Vec::new();
-        for batch in batches {
-            let rows = arrow_utils::record_batch_to_json(&batch).map_err(|e| {
-                async_graphql::Error::new(format!("Failed to convert to JSON: {}", e))
-            })?;
-            all_rows.extend(rows);
-        }
+        // 转换为 JSON
+        let rows = arrow_utils::record_batch_to_json(&result.batch)
+            .map_err(|e| async_graphql::Error::new(format!("Failed to convert to JSON: {}", e)))?;
 
-        let total_rows = all_rows.len();
+        let total_rows = rows.len();
 
         Ok(QueryResult {
             columns,
-            rows: all_rows,
+            rows,
             total_rows,
         })
     }

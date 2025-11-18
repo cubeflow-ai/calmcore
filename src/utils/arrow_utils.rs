@@ -81,7 +81,6 @@ pub fn json_to_record_arrow(
 
 /// 将 RecordBatch 转换为 JSON 数组
 pub fn record_batch_to_json(batch: &RecordBatch) -> CoreResult<Vec<serde_json::Value>> {
-    use datafusion::arrow::json::writer::LineDelimited;
     use datafusion::arrow::json::ArrayWriter;
     use std::io::Cursor;
 
@@ -96,18 +95,13 @@ pub fn record_batch_to_json(batch: &RecordBatch) -> CoreResult<Vec<serde_json::V
             .map_err(|e| CoreError::Internal(format!("Failed to finish JSON: {}", e)))?;
     }
 
-    // 解析 NDJSON
+    // 解析 JSON 数组 (ArrayWriter 生成的是 JSON 数组格式，不是 NDJSON)
     let json_str = String::from_utf8(buffer)
         .map_err(|e| CoreError::Internal(format!("Invalid UTF-8: {}", e)))?;
 
-    let mut results = Vec::new();
-    for line in json_str.lines() {
-        if !line.trim().is_empty() {
-            let value: serde_json::Value = serde_json::from_str(line)
-                .map_err(|e| CoreError::Internal(format!("Failed to parse JSON: {}", e)))?;
-            results.push(value);
-        }
-    }
+    // ArrayWriter 输出的是 JSON 数组格式: [{"col1": val1}, {"col2": val2}, ...]
+    let results: Vec<serde_json::Value> = serde_json::from_str(&json_str)
+        .map_err(|e| CoreError::Internal(format!("Failed to parse JSON array: {}", e)))?;
 
     Ok(results)
 }

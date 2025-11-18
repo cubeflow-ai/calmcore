@@ -755,9 +755,13 @@ async fn search_impl(
 
     // 转换 ES DSL 查询为 SQL WHERE 条件
     if let Some(query) = &search_req.query {
+        eprintln!("🔍 [ES Search] Input query: {:?}", query);
         if let Some(where_sql) = convert_es_query_to_sql(query, &meta.schema) {
             where_clause = format!(" WHERE {}", where_sql);
             sql.push_str(&where_clause);
+            eprintln!("✅ [ES Search] Generated WHERE clause: {}", where_clause);
+        } else {
+            eprintln!("⚠️  [ES Search] convert_es_query_to_sql returned None");
         }
     }
 
@@ -785,9 +789,9 @@ async fn search_impl(
     // 先执行 COUNT 查询获取总数
     let count_sql = format!("SELECT COUNT(*) FROM {}{}", index, where_clause);
     let total_count = match server.engine.clone().execute_sql(&count_sql).await {
-        Ok(batches) if !batches.is_empty() => {
+        Ok(result) if result.batch.num_rows() > 0 => {
             use datafusion::arrow::array::*;
-            let batch = &batches[0];
+            let batch = &result.batch;
             if batch.num_columns() > 0 && batch.num_rows() > 0 {
                 let column = batch.column(0);
                 if let Some(int64_array) = column.as_any().downcast_ref::<Int64Array>() {
@@ -805,7 +809,7 @@ async fn search_impl(
     };
 
     // 执行实际查询
-    let batches = match server.engine.clone().execute_sql(&sql).await {
+    let result = match server.engine.clone().execute_sql(&sql).await {
         Ok(result) => result,
         Err(e) => {
             let msg = format!("Query execution failed: {}", e);
@@ -815,11 +819,30 @@ async fn search_impl(
     };
 
     // 将 RecordBatch 转换为 JSON
-    let mut all_docs = Vec::new();
-    for batch in batches {
-        if let Ok(docs) = crate::utils::arrow_utils::record_batch_to_json(&batch) {
-            all_docs.extend(docs);
+    let all_docs =
+        crate::utils::arrow_utils::record_batch_to_json(&result.batch).unwrap_or_else(|_| vec![]);
+
+    // 提取排序字段名称（如果有排序）
+    let sort_fields: Vec<String> = if let Some(sort) = &search_req.sort {
+        if let Some(arr) = sort.as_array() {
+            arr.iter()
+                .filter_map(|s| {
+                    if let Some(obj) = s.as_object() {
+                        obj.keys().next().map(|k| k.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            vec![]
         }
+    } else {
+        vec![]
+    };
+
+    if !sort_fields.is_empty() {
+        eprintln!("🔍 [ES Sort] Extracted sort fields: {:?}", sort_fields);
     }
 
     // 注意: LIMIT 和 OFFSET 已经在 SQL 中处理了,这里不需要再分页
@@ -842,13 +865,35 @@ async fn search_impl(
                 .unwrap_or("unknown")
                 .to_string();
 
-            json!({
+            // 提取排序值
+            let sort_values: Vec<Value> = sort_fields
+                .iter()
+                .filter_map(|field| source.get(field).cloned())
+                .collect();
+
+            if !sort_values.is_empty() {
+                eprintln!(
+                    "🔍 [ES Sort] Document id={}, sort values={:?}",
+                    id, sort_values
+                );
+            }
+
+            let mut hit = json!({
                 "_index": index,
-                "_type": "_doc",  // 添加 _type 字段
+                "_type": "_doc",
                 "_id": id,
                 "_score": 1.0,
                 "_source": source
-            })
+            });
+
+            // 如果有排序，添加 sort 字段
+            if !sort_values.is_empty() {
+                if let Some(obj) = hit.as_object_mut() {
+                    obj.insert("sort".to_string(), json!(sort_values));
+                }
+            }
+
+            hit
         })
         .collect();
 
@@ -891,6 +936,68 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
         // match_all 查询 - 不需要 WHERE 条件
         if query_obj.contains_key("match_all") {
             return None;
+        }
+
+        // 处理 bool 查询
+        if let Some(bool_query) = query_obj.get("bool") {
+            if let Some(bool_obj) = bool_query.as_object() {
+                let mut conditions = Vec::new();
+
+                // 处理 must 子句（AND 条件）
+                if let Some(must) = bool_obj.get("must") {
+                    if let Some(must_array) = must.as_array() {
+                        for sub_query in must_array {
+                            // 递归调用处理每个子查询
+                            if let Some(sub_where) = convert_es_query_to_sql(sub_query, schema) {
+                                conditions.push(format!("({})", sub_where));
+                            }
+                        }
+                    }
+                }
+
+                // 处理 filter 子句（AND 条件，但不影响评分）
+                if let Some(filter) = bool_obj.get("filter") {
+                    if let Some(filter_array) = filter.as_array() {
+                        for sub_query in filter_array {
+                            if let Some(sub_where) = convert_es_query_to_sql(sub_query, schema) {
+                                conditions.push(format!("({})", sub_where));
+                            }
+                        }
+                    }
+                }
+
+                // 处理 should 子句（OR 条件）
+                if let Some(should) = bool_obj.get("should") {
+                    if let Some(should_array) = should.as_array() {
+                        let mut should_conditions = Vec::new();
+                        for sub_query in should_array {
+                            if let Some(sub_where) = convert_es_query_to_sql(sub_query, schema) {
+                                should_conditions.push(sub_where);
+                            }
+                        }
+                        if !should_conditions.is_empty() {
+                            conditions.push(format!("({})", should_conditions.join(" OR ")));
+                        }
+                    }
+                }
+
+                // 处理 must_not 子句（NOT 条件）
+                if let Some(must_not) = bool_obj.get("must_not") {
+                    if let Some(must_not_array) = must_not.as_array() {
+                        for sub_query in must_not_array {
+                            if let Some(sub_where) = convert_es_query_to_sql(sub_query, schema) {
+                                conditions.push(format!("NOT ({})", sub_where));
+                            }
+                        }
+                    }
+                }
+
+                if !conditions.is_empty() {
+                    return Some(conditions.join(" AND "));
+                } else {
+                    return None;
+                }
+            }
         }
 
         // term 查询 - 精确匹配
@@ -937,6 +1044,104 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
             }
         }
 
+        // wildcard 查询 - 通配符匹配
+        if let Some(wildcard) = query_obj.get("wildcard") {
+            if let Some(wildcard_obj) = wildcard.as_object() {
+                eprintln!(
+                    "🔍 [ES Wildcard] Processing wildcard query: {:?}",
+                    wildcard_obj
+                );
+
+                let conditions: Vec<String> = wildcard_obj
+                    .iter()
+                    .filter_map(|(field, value)| {
+                        // wildcard可能是字符串或对象格式
+                        let pattern = if let Some(s) = value.as_str() {
+                            s.to_string()
+                        } else if let Some(obj) = value.as_object() {
+                            // 支持 {"field": {"wildcard": "*pattern*", "boost": 1.0}} 格式
+                            if let Some(wildcard_str) = obj.get("wildcard") {
+                                wildcard_str.as_str()?.to_string()
+                            } else if let Some(value_str) = obj.get("value") {
+                                // 支持 {"field": {"value": "*pattern*"}} 格式
+                                value_str.as_str()?.to_string()
+                            } else {
+                                return None;
+                            }
+                        } else {
+                            return None;
+                        };
+
+                        // 转换ES wildcard pattern到SQL LIKE pattern
+                        // ES: * = 任意字符, ? = 单个字符
+                        // SQL: % = 任意字符, _ = 单个字符
+                        let sql_pattern = pattern
+                            .replace("\\", "\\\\") // 先转义反斜杠
+                            .replace("%", "\\%") // 转义SQL中的%
+                            .replace("_", "\\_") // 转义SQL中的_
+                            .replace("*", "%") // ES * -> SQL %
+                            .replace("?", "_") // ES ? -> SQL _
+                            .replace("'", "''"); // 转义单引号
+
+                        eprintln!(
+                            "🔍 [ES Wildcard] Field: {}, Pattern: {} -> SQL LIKE: {}",
+                            field, pattern, sql_pattern
+                        );
+
+                        Some(format!("{} LIKE '{}'", field, sql_pattern))
+                    })
+                    .collect();
+
+                if !conditions.is_empty() {
+                    let result = conditions.join(" AND ");
+                    eprintln!("✅ [ES Wildcard] Generated WHERE: {}", result);
+                    return Some(result);
+                }
+            }
+        }
+
+        // prefix 查询 - 前缀匹配
+        if let Some(prefix) = query_obj.get("prefix") {
+            if let Some(prefix_obj) = prefix.as_object() {
+                eprintln!("🔍 [ES Prefix] Processing prefix query: {:?}", prefix_obj);
+
+                let conditions: Vec<String> = prefix_obj
+                    .iter()
+                    .filter_map(|(field, value)| {
+                        // prefix可能是字符串或对象格式
+                        let prefix_val = if let Some(s) = value.as_str() {
+                            s.to_string()
+                        } else if let Some(obj) = value.as_object() {
+                            obj.get("value")?.as_str()?.to_string()
+                        } else {
+                            return None;
+                        };
+
+                        // 转义SQL特殊字符
+                        let sql_prefix = prefix_val
+                            .replace("\\", "\\\\")
+                            .replace("%", "\\%")
+                            .replace("_", "\\_")
+                            .replace("'", "''");
+
+                        eprintln!(
+                            "🔍 [ES Prefix] Field: {}, Prefix: {} -> SQL LIKE: {}%",
+                            field, prefix_val, sql_prefix
+                        );
+
+                        // 前缀匹配转换为 LIKE 'prefix%'
+                        Some(format!("{} LIKE '{}%'", field, sql_prefix))
+                    })
+                    .collect();
+
+                if !conditions.is_empty() {
+                    let result = conditions.join(" AND ");
+                    eprintln!("✅ [ES Prefix] Generated WHERE: {}", result);
+                    return Some(result);
+                }
+            }
+        }
+
         // range 查询
         if let Some(range) = query_obj.get("range") {
             if let Some(range_obj) = range.as_object() {
@@ -946,26 +1151,57 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
                         if let Some(spec_obj) = range_spec.as_object() {
                             let mut parts = Vec::new();
 
+                            // 处理 gte (greater than or equal)
                             if let Some(gte) = spec_obj.get("gte") {
-                                // 使用改写器处理日期字符串
                                 let rewritten = rewriter.rewrite_value(field, gte);
                                 let val = format_sql_value(&rewritten)?;
                                 parts.push(format!("{} >= {}", field, val));
                             }
+
+                            // 处理 gt (greater than)
                             if let Some(gt) = spec_obj.get("gt") {
                                 let rewritten = rewriter.rewrite_value(field, gt);
                                 let val = format_sql_value(&rewritten)?;
                                 parts.push(format!("{} > {}", field, val));
                             }
+
+                            // 处理 lte (less than or equal)
                             if let Some(lte) = spec_obj.get("lte") {
                                 let rewritten = rewriter.rewrite_value(field, lte);
                                 let val = format_sql_value(&rewritten)?;
                                 parts.push(format!("{} <= {}", field, val));
                             }
+
+                            // 处理 lt (less than)
                             if let Some(lt) = spec_obj.get("lt") {
                                 let rewritten = rewriter.rewrite_value(field, lt);
                                 let val = format_sql_value(&rewritten)?;
                                 parts.push(format!("{} < {}", field, val));
+                            }
+
+                            // 处理 from 和 to (另一种 range 语法)
+                            if let Some(from) = spec_obj.get("from") {
+                                let rewritten = rewriter.rewrite_value(field, from);
+                                let val = format_sql_value(&rewritten)?;
+                                // 检查 include_lower，默认为 true
+                                let include_lower = spec_obj
+                                    .get("include_lower")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                let op = if include_lower { ">=" } else { ">" };
+                                parts.push(format!("{} {} {}", field, op, val));
+                            }
+
+                            if let Some(to) = spec_obj.get("to") {
+                                let rewritten = rewriter.rewrite_value(field, to);
+                                let val = format_sql_value(&rewritten)?;
+                                // 检查 include_upper，默认为 true
+                                let include_upper = spec_obj
+                                    .get("include_upper")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                let op = if include_upper { "<=" } else { "<" };
+                                parts.push(format!("{} {} {}", field, op, val));
                             }
 
                             if parts.is_empty() {

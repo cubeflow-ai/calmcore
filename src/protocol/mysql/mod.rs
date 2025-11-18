@@ -210,7 +210,7 @@ async fn execute_query<W: io::Read + io::Write>(
     query: &str,
     results: QueryResultWriter<'_, W>,
 ) -> io::Result<()> {
-    let batches = match engine.clone().execute_sql(query).await {
+    let result = match engine.clone().execute_sql(query).await {
         Ok(result) => result,
         Err(e) => {
             let msg = format!("SQL execution failed: {}", e);
@@ -220,35 +220,27 @@ async fn execute_query<W: io::Read + io::Write>(
     };
 
     eprintln!("🔍 [MySQL Query] {}", query);
-    eprintln!("🔍 [MySQL Result] batches.len() = {}", batches.len());
-
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-
-    for (i, batch) in batches.iter().enumerate() {
-        eprintln!(
-            "  Batch {}: {} rows, {} columns",
-            i,
-            batch.num_rows(),
-            batch.num_columns()
-        );
-    }
+    eprintln!(
+        "🔍 [MySQL Result] matched_docs={}, result_rows={}",
+        result.matched_docs,
+        result.batch.num_rows()
+    );
 
     // 检查是否有数据
-    if batches.is_empty() {
-        eprintln!("⚠️  [MySQL Query] No batches returned - query returned empty result");
+    if result.batch.num_rows() == 0 {
+        eprintln!("⚠️  [MySQL Query] No rows returned - query returned empty result");
         return results.completed(0, 0);
     }
 
-    if total_rows == 0 {
-        eprintln!("⚠️  [MySQL Query] Batches exist but total_rows = 0");
-        // 仍然返回 schema，但没有数据
-    } else {
-        eprintln!("✅ [MySQL Query] Returning {} total rows", total_rows);
-    }
+    eprintln!(
+        "✅ [MySQL Query] Returning {} rows (matched {} docs)",
+        result.batch.num_rows(),
+        result.matched_docs
+    );
 
-    // 有 batch 但可能没有行，仍然需要返回 schema
-    let schema = batches[0].schema();
-    write_query_result(results, &schema, &batches)
+    // 返回单个 batch
+    let schema = result.batch.schema();
+    write_query_result(results, &schema, &[result.batch])
 }
 
 /// CREATE TABLE 处理
@@ -682,7 +674,7 @@ async fn handle_delete<W: io::Read + io::Write>(
     let where_clause = &query_clean[where_pos.unwrap() + 6..];
     let select_query = format!("SELECT * FROM {} WHERE {}", table_name, where_clause);
 
-    let batches = match engine.clone().execute_sql(&select_query).await {
+    let result = match engine.clone().execute_sql(&select_query).await {
         Ok(result) => result,
         Err(e) => {
             let msg = format!("Query execution failed: {}", e);
@@ -690,7 +682,7 @@ async fn handle_delete<W: io::Read + io::Write>(
         }
     };
 
-    if batches.is_empty() {
+    if result.batch.num_rows() == 0 {
         return results.completed(0, 0);
     }
 
@@ -702,54 +694,51 @@ async fn handle_delete<W: io::Read + io::Write>(
 
     let mut total_deleted = 0u64;
 
-    for batch in batches {
-        let pk_array = batch.column_by_name(pk_field).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "Primary key column not found")
-        })?;
+    let batch = result.batch;
+    let pk_array = batch
+        .column_by_name(pk_field)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Primary key column not found"))?;
 
-        // 对每个主键值进行路由和删除
-        for i in 0..pk_array.len() {
-            let pk_value = format_arrow_value(pk_array, i);
+    // 对每个主键值进行路由和删除
+    for i in 0..pk_array.len() {
+        let pk_value = format_arrow_value(pk_array, i);
 
-            let partition_id = engine
-                .route_partition(&table_name, &pk_value)
-                .map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, format!("Routing failed: {}", e))
-                })?;
+        let partition_id = engine
+            .route_partition(&table_name, &pk_value)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Routing failed: {}", e)))?;
 
-            let partition = engine
-                .get_partition(&table_name, partition_id)
-                .await
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Partition not found"))?;
+        let partition = engine
+            .get_partition(&table_name, partition_id)
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Partition not found"))?;
 
-            // 创建单个值的数组用于删除
-            let pk_array_single = match pk_array.data_type() {
-                DataType::Int64 => {
-                    let typed = pk_array.as_any().downcast_ref::<Int64Array>().unwrap();
-                    Arc::new(Int64Array::from(vec![typed.value(i)])) as ArrayRef
-                }
-                DataType::UInt64 => {
-                    let typed = pk_array.as_any().downcast_ref::<UInt64Array>().unwrap();
-                    Arc::new(UInt64Array::from(vec![typed.value(i)])) as ArrayRef
-                }
-                DataType::Utf8 => {
-                    let typed = pk_array.as_any().downcast_ref::<StringArray>().unwrap();
-                    Arc::new(StringArray::from(vec![typed.value(i)])) as ArrayRef
-                }
-                _ => {
-                    return results.error(
-                        ErrorKind::ER_NOT_SUPPORTED_YET,
-                        b"Unsupported primary key type for DELETE",
-                    );
-                }
-            };
+        // 创建单个值的数组用于删除
+        let pk_array_single = match pk_array.data_type() {
+            DataType::Int64 => {
+                let typed = pk_array.as_any().downcast_ref::<Int64Array>().unwrap();
+                Arc::new(Int64Array::from(vec![typed.value(i)])) as ArrayRef
+            }
+            DataType::UInt64 => {
+                let typed = pk_array.as_any().downcast_ref::<UInt64Array>().unwrap();
+                Arc::new(UInt64Array::from(vec![typed.value(i)])) as ArrayRef
+            }
+            DataType::Utf8 => {
+                let typed = pk_array.as_any().downcast_ref::<StringArray>().unwrap();
+                Arc::new(StringArray::from(vec![typed.value(i)])) as ArrayRef
+            }
+            _ => {
+                return results.error(
+                    ErrorKind::ER_NOT_SUPPORTED_YET,
+                    b"Unsupported primary key type for DELETE",
+                );
+            }
+        };
 
-            let deleted = partition.delete_by_pk(&pk_array_single).map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Delete failed: {}", e))
-            })?;
+        let deleted = partition
+            .delete_by_pk(&pk_array_single)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Delete failed: {}", e)))?;
 
-            total_deleted += deleted;
-        }
+        total_deleted += deleted;
     }
 
     results.completed(total_deleted, 0)
@@ -831,6 +820,43 @@ fn format_arrow_value(array: &ArrayRef, index: usize) -> String {
         DataType::Boolean => {
             let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
             arr.value(index).to_string()
+        }
+        DataType::Timestamp(unit, _) => {
+            // 处理时间戳类型
+            use chrono::{DateTime, TimeZone, Utc};
+            use datafusion::arrow::array::PrimitiveArray;
+            use datafusion::arrow::datatypes::TimestampMillisecondType;
+
+            match unit {
+                datafusion::arrow::datatypes::TimeUnit::Millisecond => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<PrimitiveArray<TimestampMillisecondType>>()
+                        .unwrap();
+                    let timestamp_ms = arr.value(index);
+                    // 转换为可读的日期时间格式
+                    let dt = Utc.timestamp_millis_opt(timestamp_ms).unwrap();
+                    dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+                }
+                datafusion::arrow::datatypes::TimeUnit::Second => {
+                    let arr = array.as_any().downcast_ref::<PrimitiveArray<datafusion::arrow::datatypes::TimestampSecondType>>().unwrap();
+                    let timestamp_s = arr.value(index);
+                    let dt = Utc.timestamp_opt(timestamp_s, 0).unwrap();
+                    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                }
+                datafusion::arrow::datatypes::TimeUnit::Microsecond => {
+                    let arr = array.as_any().downcast_ref::<PrimitiveArray<datafusion::arrow::datatypes::TimestampMicrosecondType>>().unwrap();
+                    let timestamp_us = arr.value(index);
+                    let dt = Utc.timestamp_micros(timestamp_us).unwrap();
+                    dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+                }
+                datafusion::arrow::datatypes::TimeUnit::Nanosecond => {
+                    let arr = array.as_any().downcast_ref::<PrimitiveArray<datafusion::arrow::datatypes::TimestampNanosecondType>>().unwrap();
+                    let timestamp_ns = arr.value(index);
+                    let dt = Utc.timestamp_nanos(timestamp_ns);
+                    dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string()
+                }
+            }
         }
         _ => format!("{:?}", array),
     }
