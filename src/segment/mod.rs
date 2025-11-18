@@ -106,6 +106,10 @@ impl Segment {
                     let field = BooleanField::new(field_opt);
                     fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
+                FieldOption::Timestamp { .. } => {
+                    let field = field_store::TimestampField::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
             }
         }
 
@@ -221,6 +225,10 @@ impl Segment {
                 }
                 FieldOption::Boolean { .. } => {
                     let field = BooleanField::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::Timestamp { .. } => {
+                    let field = field_store::TimestampField::new(field_opt);
                     fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
             }
@@ -791,6 +799,10 @@ impl Segment {
                     let field = BooleanField::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
+                FieldOption::Timestamp { .. } => {
+                    let field = field_store::TimestampField::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
             }
         }
 
@@ -1198,6 +1210,10 @@ impl Segment {
                 }
                 FieldOption::Boolean { .. } => {
                     let field = BooleanField::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::Timestamp { .. } => {
+                    let field = field_store::TimestampField::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
             }

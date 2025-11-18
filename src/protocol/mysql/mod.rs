@@ -219,8 +219,11 @@ async fn execute_query<W: io::Read + io::Write>(
         }
     };
 
-    eprintln!("🔍 [SQL Query] {}", query);
-    eprintln!("🔍 [Query Result] batches.len() = {}", batches.len());
+    eprintln!("🔍 [MySQL Query] {}", query);
+    eprintln!("🔍 [MySQL Result] batches.len() = {}", batches.len());
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
     for (i, batch) in batches.iter().enumerate() {
         eprintln!(
             "  Batch {}: {} rows, {} columns",
@@ -232,7 +235,15 @@ async fn execute_query<W: io::Read + io::Write>(
 
     // 检查是否有数据
     if batches.is_empty() {
+        eprintln!("⚠️  [MySQL Query] No batches returned - query returned empty result");
         return results.completed(0, 0);
+    }
+
+    if total_rows == 0 {
+        eprintln!("⚠️  [MySQL Query] Batches exist but total_rows = 0");
+        // 仍然返回 schema，但没有数据
+    } else {
+        eprintln!("✅ [MySQL Query] Returning {} total rows", total_rows);
     }
 
     // 有 batch 但可能没有行，仍然需要返回 schema
@@ -882,6 +893,7 @@ async fn handle_describe(
             FieldOption::F32 { .. } => "float",
             FieldOption::F64 { .. } => "double",
             FieldOption::Boolean { .. } => "tinyint(1)",
+            FieldOption::Timestamp { .. } => "timestamp",
         };
         field_types.push(field_type.to_string());
 

@@ -102,7 +102,7 @@ impl Catalog {
         };
 
         // 删除表目录
-        let table_dir = meta.table_dir();
+        let table_dir = meta.table_dir(&self.work_dir);
         if table_dir.exists() {
             fs::remove_dir_all(&table_dir).map_err(|e| {
                 CoreError::IOError(format!("Failed to remove table directory: {}", e))
@@ -120,7 +120,9 @@ impl Catalog {
         partition_id: usize,
     ) -> CoreResult<PartitionMeta> {
         let table = self.get_table(table_name)?;
-        let partition_meta_path = table.partition_dir(partition_id).join("meta.json");
+        let partition_meta_path = table
+            .partition_dir(&self.work_dir, partition_id)
+            .join("meta.json");
 
         if !partition_meta_path.exists() {
             return Err(CoreError::NotExisted(format!(
@@ -141,7 +143,9 @@ impl Catalog {
     /// 保存 partition 元数据
     pub fn save_partition_meta(&self, table_name: &str, meta: &PartitionMeta) -> CoreResult<()> {
         let table = self.get_table(table_name)?;
-        let partition_meta_path = table.partition_dir(meta.partition_id).join("meta.json");
+        let partition_meta_path = table
+            .partition_dir(&self.work_dir, meta.partition_id)
+            .join("meta.json");
 
         let content = serde_json::to_string_pretty(meta).map_err(|e| {
             CoreError::IOError(format!("Failed to serialize partition meta: {}", e))
@@ -157,7 +161,7 @@ impl Catalog {
 
     /// 创建表目录结构
     fn create_table_directories(&self, meta: &TableMeta) -> CoreResult<()> {
-        let table_dir = meta.table_dir();
+        let table_dir = meta.table_dir(&self.work_dir);
         let partitions_dir = table_dir.join("partitions");
 
         fs::create_dir_all(&partitions_dir).map_err(|e| {
@@ -169,7 +173,7 @@ impl Catalog {
 
     /// 保存表元数据到文件
     fn save_table_meta(&self, meta: &TableMeta) -> CoreResult<()> {
-        let meta_path = meta.table_dir().join("meta.json");
+        let meta_path = meta.table_dir(&self.work_dir).join("meta.json");
         let content = serde_json::to_string_pretty(meta)
             .map_err(|e| CoreError::IOError(format!("Failed to serialize table meta: {}", e)))?;
 
@@ -181,7 +185,7 @@ impl Catalog {
 
     /// 创建 partition 目录和元数据
     fn create_partition(&self, partition_id: usize, table_meta: &TableMeta) -> CoreResult<()> {
-        let partition_dir = table_meta.partition_dir(partition_id);
+        let partition_dir = table_meta.partition_dir(&self.work_dir, partition_id);
         let segments_dir = partition_dir.join("segments");
 
         // 创建目录
@@ -290,7 +294,6 @@ mod tests {
                 num_partitions: 4,
             },
             4,
-            temp_dir.path().to_path_buf(),
         );
 
         catalog.create_table(meta).unwrap();
@@ -301,13 +304,13 @@ mod tests {
         assert_eq!(table.parallel_workers, 4);
 
         // 验证目录结构
-        let table_dir = table.table_dir();
+        let table_dir = table.table_dir(&catalog.work_dir);
         assert!(table_dir.exists());
         assert!(table_dir.join("meta.json").exists());
         assert!(table_dir.join("partitions").exists());
 
         for i in 0..4 {
-            let partition_dir = table.partition_dir(i);
+            let partition_dir = table.partition_dir(&catalog.work_dir, i);
             assert!(partition_dir.exists());
             assert!(partition_dir.join("meta.json").exists());
             assert!(partition_dir.join("segments").exists());

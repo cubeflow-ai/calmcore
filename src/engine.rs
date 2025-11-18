@@ -249,7 +249,6 @@ impl Engine {
             schema.clone(),
             partition_strategy,
             num_partitions,
-            self.config.data_dir.clone(),
         );
 
         // 在 Catalog 中创建表（会创建目录结构和元数据）

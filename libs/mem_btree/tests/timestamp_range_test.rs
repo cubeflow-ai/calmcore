@@ -176,7 +176,7 @@ fn test_timestamp_range_query() {
 
     // 验证数据完整性
     println!("🔍 验证数据完整性...");
-    let full_count = reader.range(&0, &TOTAL_MS).count();
+    let full_count = reader.range(Some(&0), true, Some(&TOTAL_MS), false).count();
     println!("  - range(0, {}) 返回: {} 条", TOTAL_MS, full_count);
     println!("  - 期望: {} 条", expected_data.len());
     assert_eq!(full_count, expected_data.len(), "数据完整性检查失败！");
@@ -211,7 +211,7 @@ fn test_timestamp_range_query() {
             .count();
 
         // 实际查询
-        let actual_count = reader.range(&start, &end).count();
+        let actual_count = reader.range(Some(&start), true, Some(&end), false).count();
 
         // 验证
         let status = if actual_count == expected_count {
@@ -256,7 +256,7 @@ fn test_timestamp_range_query() {
         let iter_start = std::time::Instant::now();
         let mut result1 = RoaringBitmap::new();
         let mut count1 = 0;
-        for item in reader.range(&start, &end) {
+        for item in reader.range(Some(&start), true, Some(&end), false) {
             result1 |= item.1.clone();
             count1 += 1;
         }
@@ -264,7 +264,9 @@ fn test_timestamp_range_query() {
 
         // 方法2: range_union 优化
         let union_start = std::time::Instant::now();
-        let result2 = reader.range_union(&start, &end).unwrap();
+        let result2 = reader
+            .range_union(Some(&start), true, Some(&end), false)
+            .unwrap();
         let union_duration = union_start.elapsed();
 
         // 验证结果一致性
@@ -304,17 +306,19 @@ fn test_timestamp_range_query() {
     println!("╚══════════════════════════════════════════════════════════════════════════════╝\n");
 
     // 空范围
-    let empty_count = reader.range(&100, &100).count();
+    let empty_count = reader.range(Some(&100), true, Some(&100), false).count();
     assert_eq!(empty_count, 0, "空范围应该返回0条记录");
     println!("  ✅ 空范围查询: range(100, 100) = {} 条", empty_count);
 
     // 单个时间戳
-    let single_count = reader.range(&1000, &1001).count();
+    let single_count = reader.range(Some(&1000), true, Some(&1001), false).count();
     println!("  ✅ 单时间戳查询: range(1000, 1001) = {} 条", single_count);
 
     // 超出范围
     let beyond_end = TOTAL_MS + 1000;
-    let beyond_count = reader.range(&TOTAL_MS, &beyond_end).count();
+    let beyond_count = reader
+        .range(Some(&TOTAL_MS), true, Some(&beyond_end), false)
+        .count();
     assert_eq!(beyond_count, 0, "超出范围应该返回0条记录");
     println!(
         "  ✅ 超出范围查询: range({}, {}) = {} 条",
@@ -322,7 +326,7 @@ fn test_timestamp_range_query() {
     );
 
     // 反向范围（start > end）
-    let reverse_count = reader.range(&1000, &100).count();
+    let reverse_count = reader.range(Some(&1000), true, Some(&100), false).count();
     assert_eq!(reverse_count, 0, "反向范围应该返回0条记录");
     println!("  ✅ 反向范围查询: range(1000, 100) = {} 条", reverse_count);
 

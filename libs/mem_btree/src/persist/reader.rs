@@ -109,9 +109,27 @@ where
     /// Range query: iterate over keys in [start_key, end_key)
     /// Returns an iterator that yields key-value pairs within the range
     ///
+    /// # Arguments
+    /// * `start` - Optional start bound (None means no lower bound)
+    /// * `start_inclusive` - Whether start bound is inclusive (>=) or exclusive (>)
+    /// * `end` - Optional end bound (None means no upper bound)
+    /// * `end_inclusive` - Whether end bound is inclusive (<=) or exclusive (<)
+    ///
     /// If union_leaf is enabled, this can skip chunks that don't intersect with the range
-    pub fn range(&self, start_key: &K, end_key: &K) -> RangeIterator<'_, K, R> {
-        RangeIterator::new(self, start_key.clone(), end_key.clone())
+    pub fn range(
+        &self,
+        start: Option<&K>,
+        start_inclusive: bool,
+        end: Option<&K>,
+        end_inclusive: bool,
+    ) -> RangeIterator<'_, K, R> {
+        RangeIterator::new(
+            self,
+            start.cloned(),
+            start_inclusive,
+            end.cloned(),
+            end_inclusive,
+        )
     }
 
     /// Range union query: aggregate all values in [start_key, end_key) using union operation
@@ -127,8 +145,8 @@ where
     ///
     /// Example use case:
     /// ```rust
-    /// // Get all unique doc_ids from keys 10000-20000 (fast!)
-    /// let union_bitmap = reader.range_union(&10000, &20000)?;
+    /// // Get all unique doc_ids from keys [10000, 20000) (fast!)
+    /// let union_bitmap = reader.range_union(Some(&10000), true, Some(&20000), false)?;
     /// println!("Total unique doc_ids: {}", union_bitmap.len());
     /// ```
     ///
@@ -136,11 +154,17 @@ where
     /// ```rust
     /// // Slow: iterates every key-value pair
     /// let mut result = RoaringBitmap::new();
-    /// for item in reader.range(&10000, &20000) {
+    /// for item in reader.range(Some(&10000), true, Some(&20000), false) {
     ///     result |= item.1;
     /// }
     /// ```
-    pub fn range_union(&self, start_key: &K, end_key: &K) -> Result<R>
+    pub fn range_union(
+        &self,
+        start: Option<&K>,
+        start_inclusive: bool,
+        end: Option<&K>,
+        end_inclusive: bool,
+    ) -> Result<R>
     where
         R: Default + std::ops::BitOr<Output = R> + Clone,
     {
@@ -150,7 +174,7 @@ where
 
         if !self.has_union_leaf {
             // Fallback: iterate through all key-value pairs
-            for item in self.range(start_key, end_key) {
+            for item in self.range(start, start_inclusive, end, end_inclusive) {
                 let temp = std::mem::take(&mut result);
                 result = temp | item.1.clone();
                 keys_scanned += 1;
@@ -160,8 +184,10 @@ where
 
         // Optimized path: directly read union_leaf from each chunk
         self.collect_union_from_chunks(
-            start_key,
-            end_key,
+            start,
+            start_inclusive,
+            end,
+            end_inclusive,
             &mut result,
             &mut chunks_scanned,
             &mut keys_scanned,
@@ -173,8 +199,10 @@ where
     /// Recursively collect union_leaf from all chunks in range
     fn collect_union_from_chunks(
         &self,
-        start_key: &K,
-        end_key: &K,
+        start: Option<&K>,
+        start_inclusive: bool,
+        end: Option<&K>,
+        end_inclusive: bool,
         result: &mut R,
         chunks_scanned: &mut usize,
         keys_scanned: &mut usize,
@@ -190,7 +218,7 @@ where
             let keys = self.reader_ser.deserialize_keys(&keys_data);
 
             if is_leaf {
-                // Check if this leaf chunk intersects with [start_key, end_key)
+                // Check if this leaf chunk intersects with the range
                 if keys.is_empty() {
                     continue;
                 }
@@ -198,16 +226,63 @@ where
                 let chunk_min = &keys[0];
                 let chunk_max = &keys[keys.len() - 1];
 
+                // Check overlap with start bound
+                let overlaps_start = match start {
+                    Some(s) => {
+                        if start_inclusive {
+                            chunk_max >= s // chunk_max >= start
+                        } else {
+                            chunk_max > s // chunk_max > start
+                        }
+                    }
+                    None => true, // No lower bound
+                };
+
+                // Check overlap with end bound
+                let overlaps_end = match end {
+                    Some(e) => {
+                        if end_inclusive {
+                            chunk_min <= e // chunk_min <= end
+                        } else {
+                            chunk_min < e // chunk_min < end
+                        }
+                    }
+                    None => true, // No upper bound
+                };
+
                 // Skip if no overlap
-                if chunk_max < start_key || chunk_min >= end_key {
+                if !overlaps_start || !overlaps_end {
                     continue;
                 }
 
                 *chunks_scanned += 1;
 
                 // Check if chunk is FULLY contained in the range
-                // Only use union_leaf if all keys in chunk are within [start_key, end_key)
-                let chunk_fully_contained = chunk_min >= start_key && chunk_max < end_key;
+                let chunk_fully_contained = {
+                    let start_ok = match start {
+                        Some(s) => {
+                            if start_inclusive {
+                                chunk_min >= s // [start, ...)
+                            } else {
+                                chunk_min > s // (start, ...)
+                            }
+                        }
+                        None => true,
+                    };
+
+                    let end_ok = match end {
+                        Some(e) => {
+                            if end_inclusive {
+                                chunk_max <= e // (..., end]
+                            } else {
+                                chunk_max < e // (..., end)
+                            }
+                        }
+                        None => true,
+                    };
+
+                    start_ok && end_ok
+                };
 
                 // If we have union_leaf AND chunk is fully contained, use it directly!
                 if chunk_fully_contained {
@@ -227,7 +302,31 @@ where
 
                 // Fallback: manually iterate and union values in this chunk
                 for (i, key) in keys.iter().enumerate() {
-                    if key >= start_key && key < end_key {
+                    // Check start bound
+                    let satisfies_start = match start {
+                        Some(s) => {
+                            if start_inclusive {
+                                key >= s
+                            } else {
+                                key > s
+                            }
+                        }
+                        None => true,
+                    };
+
+                    // Check end bound
+                    let satisfies_end = match end {
+                        Some(e) => {
+                            if end_inclusive {
+                                key <= e
+                            } else {
+                                key < e
+                            }
+                        }
+                        None => true,
+                    };
+
+                    if satisfies_start && satisfies_end {
                         let value_start = offsets[i];
                         let value_end = if i + 1 < offsets.len() {
                             offsets[i + 1]
@@ -241,34 +340,11 @@ where
                     }
                 }
             } else {
-                // Index node: push children that might overlap with range
-                for (i, _key) in keys.iter().enumerate() {
+                // Index node: push all children (simplified approach)
+                // A more optimized approach would check key ranges to skip non-overlapping children
+                for (i, _) in offsets.iter().enumerate() {
                     let child_offset = offsets[i] as usize;
-
-                    // Determine the key range for this child
-                    // child[i] contains keys in [keys[i-1], keys[i])
-                    let child_might_overlap = if i == 0 {
-                        // First child: (-∞, keys[0])
-                        keys[0] > *start_key
-                    } else if i < keys.len() {
-                        // Middle child: [keys[i-1], keys[i])
-                        keys[i] > *start_key && &keys[i - 1] < end_key
-                    } else {
-                        // Last child: [keys[n-1], +∞)
-                        &keys[keys.len() - 1] < end_key
-                    };
-
-                    if child_might_overlap {
-                        stack.push((child_offset, i));
-                    }
-                }
-
-                // Don't forget the rightmost child
-                if offsets.len() > keys.len() {
-                    let last_child_offset = offsets[keys.len()] as usize;
-                    if keys.is_empty() || &keys[keys.len() - 1] < end_key {
-                        stack.push((last_child_offset, keys.len()));
-                    }
+                    stack.push((child_offset, i));
                 }
             }
         }
@@ -722,12 +798,16 @@ where
     }
 }
 
-/// Range iterator for range queries [start_key, end_key)
+/// Range iterator for range queries with flexible boundary conditions
+/// Supports open/closed intervals: [start, end], (start, end), [start, end), (start, end]
 /// Optimized with union_leaf to skip chunks that don't intersect with the range
 pub struct RangeIterator<'a, K, R> {
     reader: &'a TreeReader<K, R>,
-    start_key: K,
-    end_key: K,
+    #[allow(dead_code)]
+    start_key: Option<K>,
+    start_inclusive: bool,
+    end_key: Option<K>,
+    end_inclusive: bool,
     stack: Vec<(usize, i32)>, // (node_offset, current_index)
     finished: bool,
 }
@@ -736,21 +816,38 @@ impl<'a, K, R> RangeIterator<'a, K, R>
 where
     K: Clone + PartialOrd,
 {
-    fn new(reader: &'a TreeReader<K, R>, start_key: K, end_key: K) -> Self {
+    fn new(
+        reader: &'a TreeReader<K, R>,
+        start_key: Option<K>,
+        start_inclusive: bool,
+        end_key: Option<K>,
+        end_inclusive: bool,
+    ) -> Self {
         let mut iter = Self {
             reader,
             start_key: start_key.clone(),
-            end_key,
+            start_inclusive,
+            end_key: end_key.clone(),
+            end_inclusive,
             stack: Vec::new(),
             finished: false,
         };
 
-        // Seek to start position
-        iter.seek(&start_key);
+        // Seek to start position if specified
+        if let Some(sk) = &start_key {
+            iter.seek(sk);
+        } else {
+            // No start bound, start from beginning
+            if !reader.is_empty() {
+                iter.stack.push((reader.root_offset as usize, -1));
+            } else {
+                iter.finished = true;
+            }
+        }
         iter
     }
 
-    /// Seek to the first key >= start_key
+    /// Seek to the first key that satisfies the start bound
     fn seek(&mut self, start_key: &K) {
         if self.reader.is_empty() {
             self.finished = true;
@@ -774,15 +871,21 @@ where
             let keys = self.reader.reader_ser.deserialize_keys(&keys_data);
 
             if is_leaf {
-                // Leaf node: find first key >= start_key
+                // Leaf node: find first key that satisfies the start bound
                 for (i, key) in keys.iter().enumerate() {
-                    if key >= start_key {
+                    let satisfies_start = if self.start_inclusive {
+                        key >= start_key // [start_key, ...)
+                    } else {
+                        key > start_key // (start_key, ...)
+                    };
+
+                    if satisfies_start {
                         // Found starting point, push to stack with index before target
                         self.stack.push((offset, i as i32 - 1));
                         return;
                     }
                 }
-                // All keys < start_key, no match
+                // All keys don't satisfy start bound, no match
                 self.finished = true;
                 return;
             } else {
@@ -849,11 +952,23 @@ where
 
                 let key = keys[index as usize].clone();
 
-                // Check if key exceeds end_key (range boundary)
-                if key >= self.end_key {
-                    self.finished = true;
-                    return None;
+                // Check if key satisfies end bound
+                if let Some(ref end) = self.end_key {
+                    let exceeds_end = if self.end_inclusive {
+                        &key > end // (..., end]
+                    } else {
+                        &key >= end // (..., end)
+                    };
+
+                    if exceeds_end {
+                        self.finished = true;
+                        return None;
+                    }
                 }
+
+                // NOTE: No need to check start bound here!
+                // seek() already positioned us at the first key >= start_key
+                // All subsequent keys from the iterator are guaranteed to satisfy start bound
 
                 // Push current position back onto stack
                 self.stack.push((offset, index));
@@ -881,12 +996,20 @@ where
                 // - c1 contains keys in [k1, k2)
                 // - c2 contains keys >= k2
                 // When accessing offsets[i], the minimum key in that child is keys[i-1] (if exists)
-                // We should stop if keys[i-1] >= end_key
-                if index > 0 && (index - 1) < keys.len() as i32 {
-                    let separator_key = keys[(index - 1) as usize].clone();
-                    if separator_key >= self.end_key {
-                        self.finished = true;
-                        return None;
+                // We should stop if keys[i-1] exceeds end bound
+                if let Some(ref end) = self.end_key {
+                    if index > 0 && (index - 1) < keys.len() as i32 {
+                        let separator_key = &keys[(index - 1) as usize];
+                        let exceeds_end = if self.end_inclusive {
+                            separator_key > end
+                        } else {
+                            separator_key >= end
+                        };
+
+                        if exceeds_end {
+                            self.finished = true;
+                            return None;
+                        }
                     }
                 }
 
@@ -1105,7 +1228,7 @@ mod tests {
         // Test range [30, 40) using new range() API
         println!("Testing range query [30, 40)...");
         let mut keys = Vec::new();
-        for item in reader.range(&30, &40) {
+        for item in reader.range(Some(&30), true, Some(&40), false) {
             let (key, value, _) = &*item;
             assert_eq!(*value, *key * 3, "Value mismatch");
             keys.push(*key);
@@ -1118,15 +1241,24 @@ mod tests {
 
         // Test edge cases
         println!("Testing range [0, 5)...");
-        let keys: Vec<_> = reader.range(&0, &5).map(|item| item.0).collect();
+        let keys: Vec<_> = reader
+            .range(Some(&0), true, Some(&5), false)
+            .map(|item| item.0)
+            .collect();
         assert_eq!(keys, vec![0, 1, 2, 3, 4]);
 
         println!("Testing range [95, 100)...");
-        let keys: Vec<_> = reader.range(&95, &100).map(|item| item.0).collect();
+        let keys: Vec<_> = reader
+            .range(Some(&95), true, Some(&100), false)
+            .map(|item| item.0)
+            .collect();
         assert_eq!(keys, vec![95, 96, 97, 98, 99]);
 
         println!("Testing range [50, 50) - empty range...");
-        let keys: Vec<_> = reader.range(&50, &50).map(|item| item.0).collect();
+        let keys: Vec<_> = reader
+            .range(Some(&50), true, Some(&50), false)
+            .map(|item| item.0)
+            .collect();
         assert_eq!(keys.len(), 0);
 
         println!("✅ Range query test passed");

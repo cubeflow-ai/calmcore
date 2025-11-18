@@ -52,12 +52,11 @@ pub trait IndexKey: Clone + Ord + Hash + Eq + Send + Sync + 'static {
     fn key_len() -> usize;
 
     /// 标准化键（例如 String 的大小写转换）
-    fn normalize(&self, case_sensitive: bool) -> Self {
-        // 默认实现：不做转换
-        let _ = case_sensitive;
-        self.clone()
-    }
-
+    ///
+    /// 每个类型都必须实现此方法
+    /// - 数字类型：直接返回 *self（Copy trait）
+    /// - String：根据 case_sensitive 返回原值或小写版本
+    fn normalize(&self, case_sensitive: bool) -> Self;
     /// 是否支持范围查询
     fn supports_range() -> bool {
         true
@@ -169,7 +168,7 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
         // 提取键值对并构建临时索引
         for (row_idx, key) in K::extract_from_array(arr) {
             let id = start_id + row_idx as u32;
-            let normalized_key = key.normalize(self.field.case_sensitive());
+            let normalized_key = (&key).normalize(self.field.case_sensitive());
 
             if let Some(list) = mtp.get_mut(&normalized_key) {
                 if list.last() != Some(&id) {
@@ -203,7 +202,7 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
         let indexs = self.indexs.read().unwrap();
 
         for (_row_idx, key) in K::extract_from_array(column) {
-            let normalized_key = key.normalize(self.field.case_sensitive());
+            let normalized_key = (&key).normalize(self.field.case_sensitive());
             if let Some(bitmap) = indexs.get_bitmap(&normalized_key) {
                 result_ids.extend(bitmap.iter());
             }
@@ -243,7 +242,7 @@ impl<K: IndexKey> PkWriter for GenericIndexedField<K> {
         // 使用start_id + row_idx 生成文档ID
         for (row_idx, key) in K::extract_from_array(pk) {
             let id = start_id + row_idx as u32;
-            let normalized_key = key.normalize(self.field.case_sensitive());
+            let normalized_key = (&key).normalize(self.field.case_sensitive());
             if let Some(list) = mtp.get_mut(&normalized_key) {
                 if !list.is_empty() {
                     cur_dels.extend(list.clone());
@@ -288,7 +287,7 @@ impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
 
     fn query(&self, value: &datafusion::scalar::ScalarValue) -> Option<RoaringBitmap> {
         K::from_scalar(value).and_then(|key| {
-            let normalized_key = key.normalize(self.field.case_sensitive());
+            let normalized_key = (&key).normalize(self.field.case_sensitive());
             let indexs = self.indexs.read().unwrap();
             indexs.get_bitmap(&normalized_key)
         })

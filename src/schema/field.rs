@@ -14,6 +14,7 @@ pub enum FieldType {
     F32,
     F64,
     Boolean,
+    Timestamp, // Unix 时间戳(毫秒),底层存储为 i64
 }
 
 /// 持久化配置选项
@@ -103,6 +104,16 @@ pub enum FieldOption {
         name: String,
         index: bool,
     },
+    Timestamp {
+        name: String,
+        index: bool,
+        /// 输入/输出时间格式,支持:
+        /// - "iso8601": ISO 8601 格式 (2024-01-01T10:00:00Z)
+        /// - "rfc3339": RFC 3339 格式
+        /// - 自定义格式如 "yyyy-MM-dd HH:mm:ss"
+        /// None 表示只接受数值型时间戳
+        format: Option<String>,
+    },
 }
 
 impl FieldOption {
@@ -120,6 +131,7 @@ impl FieldOption {
             FieldOption::F32 { name, .. } => name,
             FieldOption::F64 { name, .. } => name,
             FieldOption::Boolean { name, .. } => name,
+            FieldOption::Timestamp { name, .. } => name,
         }
     }
 
@@ -137,6 +149,7 @@ impl FieldOption {
             FieldOption::F32 { index, .. } => *index,
             FieldOption::F64 { index, .. } => *index,
             FieldOption::Boolean { index, .. } => *index,
+            FieldOption::Timestamp { index, .. } => *index,
         }
     }
 
@@ -154,6 +167,7 @@ impl FieldOption {
             FieldOption::F32 { .. } => false,
             FieldOption::F64 { .. } => false,
             FieldOption::Boolean { .. } => false,
+            FieldOption::Timestamp { .. } => false,
         }
     }
 
@@ -200,6 +214,15 @@ impl FieldOption {
             FieldOption::F32 { .. } => FieldType::F32,
             FieldOption::F64 { .. } => FieldType::F64,
             FieldOption::Boolean { .. } => FieldType::Boolean,
+            FieldOption::Timestamp { .. } => FieldType::Timestamp,
+        }
+    }
+
+    /// 获取时间格式(仅 Timestamp 类型有效)
+    pub fn timestamp_format(&self) -> Option<&str> {
+        match self {
+            FieldOption::Timestamp { format, .. } => format.as_deref(),
+            _ => None,
         }
     }
 }

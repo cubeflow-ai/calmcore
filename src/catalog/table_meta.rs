@@ -19,9 +19,6 @@ pub struct TableMeta {
     /// 并行工作数（partition 数量）
     pub parallel_workers: usize,
 
-    /// 工作目录
-    pub work_dir: PathBuf,
-
     /// 创建时间（Unix 时间戳）
     pub created_at: u64,
 
@@ -145,7 +142,6 @@ impl TableMeta {
         schema: Schema,
         partition_strategy: PartitionStrategy,
         parallel_workers: usize,
-        work_dir: PathBuf,
     ) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -157,27 +153,32 @@ impl TableMeta {
             schema,
             partition_strategy,
             parallel_workers,
-            work_dir,
             created_at: now,
             updated_at: now,
         }
     }
 
     /// 获取表的目录路径
-    pub fn table_dir(&self) -> PathBuf {
-        self.work_dir.join("tables").join(&self.table_name)
+    pub fn table_dir(&self, work_dir: &PathBuf) -> PathBuf {
+        work_dir.join("tables").join(&self.table_name)
     }
 
     /// 获取 partition 目录路径
-    pub fn partition_dir(&self, partition_id: usize) -> PathBuf {
-        self.table_dir()
+    pub fn partition_dir(&self, work_dir: &PathBuf, partition_id: usize) -> PathBuf {
+        self.table_dir(work_dir)
             .join("partitions")
             .join(format!("partition-{}", partition_id))
     }
 
     /// 获取 segment 目录路径
-    pub fn segment_dir(&self, partition_id: usize, start: u64, end: u64) -> PathBuf {
-        self.partition_dir(partition_id)
+    pub fn segment_dir(
+        &self,
+        work_dir: &PathBuf,
+        partition_id: usize,
+        start: u64,
+        end: u64,
+    ) -> PathBuf {
+        self.partition_dir(work_dir, partition_id)
             .join("segments")
             .join(format!("segment-{}-{}", start, end))
     }

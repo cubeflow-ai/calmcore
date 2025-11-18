@@ -445,21 +445,35 @@ impl RowDataStore {
         match self {
             RowDataStore::Parquet(reader) => reader.get_batch_with_projection(keys, projection),
             RowDataStore::Disk(reader) => {
-                // Fallback: individual reads for BTree format
+                // For Disk format (TreeReader), read full batch and then project
                 let mut result = HashMap::new();
                 for key in keys {
                     if let Some(batch) = reader.get(key) {
-                        result.insert(*key, batch);
+                        // Apply projection if needed
+                        if let Some(proj_indices) = projection {
+                            if let Ok(projected_batch) = batch.project(proj_indices) {
+                                result.insert(*key, projected_batch);
+                            }
+                        } else {
+                            result.insert(*key, batch);
+                        }
                     }
                 }
                 result
             }
             RowDataStore::Memory(tree) => {
-                // Fallback: individual reads for Memory format
+                // For Memory format, read full batch and then project
                 let mut result = HashMap::new();
                 for key in keys {
                     if let Some(batch) = tree.get(key) {
-                        result.insert(*key, batch.clone());
+                        // Apply projection if needed
+                        if let Some(proj_indices) = projection {
+                            if let Ok(projected_batch) = batch.project(proj_indices) {
+                                result.insert(*key, projected_batch);
+                            }
+                        } else {
+                            result.insert(*key, batch.clone());
+                        }
                     }
                 }
                 result

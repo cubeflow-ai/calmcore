@@ -88,6 +88,10 @@ impl Schema {
                 field::FieldOption::F32 { .. } => (DataType::Float32, true),
                 field::FieldOption::F64 { .. } => (DataType::Float64, true),
                 field::FieldOption::Boolean { .. } => (DataType::Boolean, true),
+                field::FieldOption::Timestamp { .. } => (
+                    DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                    true,
+                ),
             };
 
             // Convert field name to lowercase for case-insensitive SQL queries

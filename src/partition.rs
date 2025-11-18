@@ -66,8 +66,24 @@ impl Partition {
     }
 
     pub fn upsert_json(&self, data: &[serde_json::Value]) -> CoreResult<Vec<u64>> {
+        // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
+        let normalized_data: Vec<serde_json::Value> = data
+            .iter()
+            .map(|value| {
+                if let serde_json::Value::Object(map) = value {
+                    let mut new_map = serde_json::Map::new();
+                    for (key, val) in map {
+                        new_map.insert(key.to_lowercase(), val.clone());
+                    }
+                    serde_json::Value::Object(new_map)
+                } else {
+                    value.clone()
+                }
+            })
+            .collect();
+
         // 将 JSON 数据转换为 RecordBatch
-        let batch = arrow_utils::json_to_record_batch(data, self.arrow_schema.clone())?;
+        let batch = arrow_utils::json_to_record_batch(&normalized_data, self.arrow_schema.clone())?;
         // 调用现有的 upsert 方法
         self.upsert(batch)
     }

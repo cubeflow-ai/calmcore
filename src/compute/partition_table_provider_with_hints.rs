@@ -22,6 +22,8 @@ pub struct PartitionTableProviderWithHints {
     schema: SchemaRef,
     /// ORDER BY 字段 [(field_name, ascending)]
     sort: Option<(String, bool)>,
+    /// LIMIT hint (用于 ORDER BY + LIMIT 优化)
+    limit_hint: Option<usize>,
 }
 
 impl std::fmt::Debug for PartitionTableProviderWithHints {
@@ -48,7 +50,28 @@ impl PartitionTableProviderWithHints {
         Self {
             partition,
             schema,
-            sort: sort_hints.and_then(|l|l.into_iter().next()),
+            sort: sort_hints.and_then(|l| l.into_iter().next()),
+            limit_hint: None,
+        }
+    }
+
+    /// 创建带有 sort 和 limit hints 的 TableProvider
+    ///
+    /// # Arguments
+    /// * `partition` - Partition
+    /// * `sort_hints` - ORDER BY 字段 [(field_name, ascending)]
+    /// * `limit_hint` - LIMIT 提示
+    pub fn new_with_hints(
+        partition: Arc<Partition>,
+        sort_hints: Option<Vec<(String, bool)>>,
+        limit_hint: Option<usize>,
+    ) -> Self {
+        let schema = partition.arrow_schema.clone();
+        Self {
+            partition,
+            schema,
+            sort: sort_hints.and_then(|l| l.into_iter().next()),
+            limit_hint,
         }
     }
 
@@ -88,7 +111,10 @@ impl TableProvider for PartitionTableProviderWithHints {
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
         // 策略：全部返回 Unsupported，让 DataFusion 把 filters 传给 scan()
-        Ok(vec![TableProviderFilterPushDown::Unsupported; filters.len()])
+        Ok(vec![
+            TableProviderFilterPushDown::Unsupported;
+            filters.len()
+        ])
     }
 
     async fn scan(
@@ -100,11 +126,16 @@ impl TableProvider for PartitionTableProviderWithHints {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let mut segment_plans: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
 
+        // 🔧 使用 limit_hint 而不是 DataFusion 传递的 limit（对于 ORDER BY + LIMIT，DataFusion 不会下推 limit）
+        let effective_limit = self.limit_hint.or(limit);
+
         log::info!(
-            "🔍 [PartitionTableProviderWithHints::scan] Starting scan for partition {}, filters={:?}, limit={:?}, sort={:?}",
+            "🔍 [PartitionTableProviderWithHints::scan] Starting scan for partition {}, filters={:?}, limit={:?}, limit_hint={:?}, effective_limit={:?}, sort={:?}",
             self.partition.id(),
             filters,
             limit,
+            self.limit_hint,
+            effective_limit,
             self.sort
         );
 
@@ -115,13 +146,10 @@ impl TableProvider for PartitionTableProviderWithHints {
 
             if doc_count > 0 {
                 let scanner = self.create_segment_scanner(&*current_segment)?;
-                // 🚀 关键：传递 sort 给 SegmentScanner
-                if let Some(plan) = scanner.create_plan(
-                    filters,
-                    projection,
-                    limit,
-                    self.sort.clone(), 
-                ) {
+                // 🚀 关键：传递 sort 和 effective_limit 给 SegmentScanner
+                if let Some(plan) =
+                    scanner.create_plan(filters, projection, effective_limit, self.sort.clone())
+                {
                     segment_plans.push(plan);
                 }
             }
@@ -133,13 +161,10 @@ impl TableProvider for PartitionTableProviderWithHints {
 
             for (_seg_id, segment) in frozen_segments.iter() {
                 let scanner = self.create_segment_scanner(segment)?;
-                // 🚀 关键：传递 sort 给 SegmentScanner
-                if let Some(plan) = scanner.create_plan(
-                    filters,
-                    projection,
-                    limit,
-                    self.sort.clone(), 
-                ) {
+                // 🚀 关键：传递 sort 和 effective_limit 给 SegmentScanner
+                if let Some(plan) =
+                    scanner.create_plan(filters, projection, effective_limit, self.sort.clone())
+                {
                     segment_plans.push(plan);
                 }
             }

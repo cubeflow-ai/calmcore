@@ -1,6 +1,7 @@
 pub(crate) mod arrow_utils;
 pub mod datetime_utils;
 pub mod error;
+pub mod timestamp;
 
 #[macro_export]
 macro_rules! arrow_downcast {

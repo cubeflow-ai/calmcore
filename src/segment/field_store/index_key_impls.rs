@@ -111,6 +111,10 @@ impl IndexKey for i64 {
     fn key_len() -> usize {
         8
     }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
+    }
 }
 
 // ============================================================================
@@ -146,6 +150,10 @@ impl IndexKey for u64 {
 
     fn key_len() -> usize {
         8
+    }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
     }
 }
 
@@ -183,6 +191,10 @@ impl IndexKey for u32 {
     fn key_len() -> usize {
         4
     }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
+    }
 }
 
 // ============================================================================
@@ -218,6 +230,10 @@ impl IndexKey for i32 {
 
     fn key_len() -> usize {
         4
+    }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
     }
 }
 
@@ -258,6 +274,14 @@ impl IndexKey for OrderedF64 {
     fn key_len() -> usize {
         8
     }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
+    }
+
+    fn supports_range() -> bool {
+        true
+    }
 }
 
 // ============================================================================
@@ -296,6 +320,14 @@ impl IndexKey for OrderedF32 {
     fn key_len() -> usize {
         4
     }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
+    }
+
+    fn supports_range() -> bool {
+        true
+    }
 }
 
 // ============================================================================
@@ -331,6 +363,10 @@ impl IndexKey for u8 {
 
     fn key_len() -> usize {
         1
+    }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
     }
 }
 
@@ -368,6 +404,10 @@ impl IndexKey for i8 {
     fn key_len() -> usize {
         1
     }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
+    }
 }
 
 // ============================================================================
@@ -403,6 +443,10 @@ impl IndexKey for u16 {
 
     fn key_len() -> usize {
         2
+    }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
     }
 }
 
@@ -440,6 +484,10 @@ impl IndexKey for i16 {
     fn key_len() -> usize {
         2
     }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
+    }
 }
 
 // ============================================================================
@@ -476,6 +524,10 @@ impl IndexKey for bool {
 
     fn key_len() -> usize {
         1
+    }
+
+    fn normalize(&self, _case_sensitive: bool) -> Self {
+        *self
     }
 
     fn supports_range() -> bool {

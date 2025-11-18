@@ -24,6 +24,7 @@ pub mod generic_index;
 pub mod index_key_impls;
 pub mod ordered_f32;
 pub mod ordered_f64; // OrderedF64 类型定义 // OrderedF32 类型定义
+pub mod timestamp_key; // Timestamp 类型支持
 
 // 其他模块
 pub mod row_data;
@@ -48,6 +49,10 @@ pub type I8Field = GenericIndexedField<i8>;
 pub type U16Field = GenericIndexedField<u16>;
 pub type I16Field = GenericIndexedField<i16>;
 pub type BooleanField = GenericIndexedField<bool>;
+
+// Timestamp 类型: 底层使用 TimestampKey (包装 i64) 存储毫秒级 Unix 时间戳
+// 查询时支持字符串时间格式自动转换
+pub type TimestampField = GenericIndexedField<timestamp_key::TimestampKey>;
 
 /// Serializer for i64 keys with RoaringBitmap values
 #[derive(Clone)]

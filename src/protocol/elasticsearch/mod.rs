@@ -771,6 +771,15 @@ async fn search_impl(
         }
     }
 
+    // 添加 LIMIT (ES 的 from + size)
+    let from = search_req.from.unwrap_or(0);
+    let size = search_req.size.unwrap_or(10);
+    if from > 0 {
+        sql.push_str(&format!(" LIMIT {} OFFSET {}", size, from));
+    } else {
+        sql.push_str(&format!(" LIMIT {}", size));
+    }
+
     eprintln!("🔍 [ES Search] Generated SQL: {}", sql);
 
     // 先执行 COUNT 查询获取总数
@@ -813,14 +822,9 @@ async fn search_impl(
         }
     }
 
-    // 分页
-    let from = search_req.from.unwrap_or(0);
-    let size = search_req.size.unwrap_or(10);
-
+    // 注意: LIMIT 和 OFFSET 已经在 SQL 中处理了,这里不需要再分页
     let hits: Vec<Value> = all_docs
         .into_iter()
-        .skip(from)
-        .take(size)
         .map(|doc: Value| {
             // 处理 _source：如果是数组，取第一个元素；否则直接使用
             let source = if doc.is_array() {

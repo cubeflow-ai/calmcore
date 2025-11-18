@@ -78,6 +78,14 @@ impl SegmentScanner {
         limit: Option<usize>,
         sort: Option<(String, bool)>,
     ) -> Option<Arc<dyn ExecutionPlan>> {
+        log::info!(
+            "🔍 [SegmentScanner::create_plan] filters={:?}, projection={:?}, limit={:?}, sort={:?}",
+            filters,
+            projection,
+            limit,
+            sort
+        );
+
         // 应用 filters，计算命中的文档
         let result_bitmap = self.apply_filters(filters)?;
 

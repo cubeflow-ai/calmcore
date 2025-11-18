@@ -25,6 +25,51 @@ pub fn create_schema(engine: Arc<Engine>) -> CalmGraphQLSchema {
 
 // ===== 类型定义 =====
 
+/// 字段类型枚举
+#[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq)]
+pub enum FieldTypeEnum {
+    /// 关键字/文本类型
+    Keyword,
+    /// 文本类型 (keyword 的别名)
+    Text,
+    /// 8位有符号整数
+    I8,
+    /// 16位有符号整数
+    I16,
+    /// 32位有符号整数
+    I32,
+    /// 整数 (i32 的别名)
+    Integer,
+    /// 64位有符号整数
+    I64,
+    /// 长整数 (i64 的别名)
+    Long,
+    /// 8位无符号整数
+    U8,
+    /// 16位无符号整数
+    U16,
+    /// 32位无符号整数
+    U32,
+    /// 64位无符号整数
+    U64,
+    /// 32位浮点数
+    F32,
+    /// 浮点数 (f32 的别名)
+    Float,
+    /// 64位浮点数
+    F64,
+    /// 双精度浮点数 (f64 的别名)
+    Double,
+    /// 布尔类型
+    Boolean,
+    /// 布尔类型别名
+    Bool,
+    /// 时间戳类型 (毫秒级)
+    Timestamp,
+    /// 时间类型 (timestamp 的别名)
+    Datetime,
+}
+
 #[derive(SimpleObject)]
 pub struct Table {
     pub name: String,
@@ -51,9 +96,12 @@ pub struct CreateTableInput {
 #[derive(async_graphql::InputObject)]
 pub struct FieldInput {
     pub name: String,
-    pub field_type: String,
+    pub field_type: FieldTypeEnum,
     pub indexed: Option<bool>,
+    // Keyword 特定配置
     pub case_sensitive: Option<bool>,
+    // Timestamp 特定配置
+    pub format: Option<String>,
 }
 
 #[derive(SimpleObject)]
@@ -109,6 +157,7 @@ impl QueryRoot {
                     FieldOption::Boolean { .. } => "boolean",
                     FieldOption::I32 { .. } => "i32",
                     FieldOption::F32 { .. } => "f32",
+                    FieldOption::Timestamp { .. } => "timestamp",
                     _ => "unknown",
                 };
 
@@ -187,42 +236,67 @@ impl MutationRoot {
         let mut fields = Vec::new();
         for field_input in input.fields {
             let indexed = field_input.indexed.unwrap_or(true);
-            let case_sensitive = field_input.case_sensitive.unwrap_or(true);
 
-            let field = match field_input.field_type.as_str() {
-                "keyword" | "text" => FieldOption::Keyword {
-                    name: field_input.name.clone(),
-                    index: indexed,
-                    is_array: false,
-                    persist_option: None,
-                    case_sensitive,
-                },
-                "i64" | "long" => FieldOption::I64 {
-                    name: field_input.name.clone(),
-                    index: indexed,
-                },
-                "f64" | "double" => FieldOption::F64 {
-                    name: field_input.name.clone(),
-                    index: indexed,
-                },
-                "boolean" | "bool" => FieldOption::Boolean {
-                    name: field_input.name.clone(),
-                    index: indexed,
-                },
-                "i32" | "integer" => FieldOption::I32 {
-                    name: field_input.name.clone(),
-                    index: indexed,
-                },
-                "f32" | "float" => FieldOption::F32 {
-                    name: field_input.name.clone(),
-                    index: indexed,
-                },
-                _ => {
-                    return Err(async_graphql::Error::new(format!(
-                        "Unsupported field type: {}",
-                        field_input.field_type
-                    )));
+            let field = match field_input.field_type {
+                FieldTypeEnum::Keyword | FieldTypeEnum::Text => {
+                    let case_sensitive = field_input.case_sensitive.unwrap_or(true);
+                    FieldOption::Keyword {
+                        name: field_input.name.clone(),
+                        index: indexed,
+                        is_array: false,
+                        persist_option: None,
+                        case_sensitive,
+                    }
                 }
+                FieldTypeEnum::I64 | FieldTypeEnum::Long => FieldOption::I64 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::F64 | FieldTypeEnum::Double => FieldOption::F64 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::Boolean | FieldTypeEnum::Bool => FieldOption::Boolean {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::I32 | FieldTypeEnum::Integer => FieldOption::I32 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::F32 | FieldTypeEnum::Float => FieldOption::F32 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::I8 => FieldOption::I8 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::I16 => FieldOption::I16 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::U8 => FieldOption::U8 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::U16 => FieldOption::U16 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::U32 => FieldOption::U32 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::U64 => FieldOption::U64 {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                },
+                FieldTypeEnum::Timestamp | FieldTypeEnum::Datetime => FieldOption::Timestamp {
+                    name: field_input.name.clone(),
+                    index: indexed,
+                    format: field_input.format,
+                },
             };
 
             fields.push(field);
@@ -273,6 +347,7 @@ impl MutationRoot {
                     FieldOption::Boolean { .. } => "boolean",
                     FieldOption::I32 { .. } => "i32",
                     FieldOption::F32 { .. } => "f32",
+                    FieldOption::Timestamp { .. } => "timestamp",
                     _ => "unknown",
                 };
 
@@ -314,6 +389,11 @@ impl MutationRoot {
             .map_err(|e| async_graphql::Error::new(format!("Failed to flush table: {}", e)))?;
 
         Ok(true)
+    }
+
+    /// 持久化表（别名，与 flush_table 功能相同）
+    async fn table_persist(&self, ctx: &Context<'_>, name: String) -> Result<bool> {
+        self.flush_table(ctx, name).await
     }
 
     /// 插入数据
