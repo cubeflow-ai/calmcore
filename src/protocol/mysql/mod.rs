@@ -822,39 +822,42 @@ fn format_arrow_value(array: &ArrayRef, index: usize) -> String {
             arr.value(index).to_string()
         }
         DataType::Timestamp(unit, _) => {
-            // 处理时间戳类型
-            use chrono::{DateTime, TimeZone, Utc};
+            // 处理时间戳类型，转换为本地时区显示
+            use chrono::{Local, TimeZone, Utc};
             use datafusion::arrow::array::PrimitiveArray;
-            use datafusion::arrow::datatypes::TimestampMillisecondType;
 
             match unit {
                 datafusion::arrow::datatypes::TimeUnit::Millisecond => {
                     let arr = array
                         .as_any()
-                        .downcast_ref::<PrimitiveArray<TimestampMillisecondType>>()
+                        .downcast_ref::<PrimitiveArray<datafusion::arrow::datatypes::TimestampMillisecondType>>()
                         .unwrap();
                     let timestamp_ms = arr.value(index);
-                    // 转换为可读的日期时间格式
-                    let dt = Utc.timestamp_millis_opt(timestamp_ms).unwrap();
-                    dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+                    // 先转换为 UTC，再转为本地时区
+                    let dt_utc = Utc.timestamp_millis_opt(timestamp_ms).unwrap();
+                    let dt_local = dt_utc.with_timezone(&Local);
+                    dt_local.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
                 }
                 datafusion::arrow::datatypes::TimeUnit::Second => {
                     let arr = array.as_any().downcast_ref::<PrimitiveArray<datafusion::arrow::datatypes::TimestampSecondType>>().unwrap();
                     let timestamp_s = arr.value(index);
-                    let dt = Utc.timestamp_opt(timestamp_s, 0).unwrap();
-                    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                    let dt_utc = Utc.timestamp_opt(timestamp_s, 0).unwrap();
+                    let dt_local = dt_utc.with_timezone(&Local);
+                    dt_local.format("%Y-%m-%d %H:%M:%S").to_string()
                 }
                 datafusion::arrow::datatypes::TimeUnit::Microsecond => {
                     let arr = array.as_any().downcast_ref::<PrimitiveArray<datafusion::arrow::datatypes::TimestampMicrosecondType>>().unwrap();
                     let timestamp_us = arr.value(index);
-                    let dt = Utc.timestamp_micros(timestamp_us).unwrap();
-                    dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+                    let dt_utc = Utc.timestamp_micros(timestamp_us).unwrap();
+                    let dt_local = dt_utc.with_timezone(&Local);
+                    dt_local.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
                 }
                 datafusion::arrow::datatypes::TimeUnit::Nanosecond => {
                     let arr = array.as_any().downcast_ref::<PrimitiveArray<datafusion::arrow::datatypes::TimestampNanosecondType>>().unwrap();
                     let timestamp_ns = arr.value(index);
-                    let dt = Utc.timestamp_nanos(timestamp_ns);
-                    dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string()
+                    let dt_utc = Utc.timestamp_nanos(timestamp_ns);
+                    let dt_local = dt_utc.with_timezone(&Local);
+                    dt_local.format("%Y-%m-%d %H:%M:%S%.9f").to_string()
                 }
             }
         }
