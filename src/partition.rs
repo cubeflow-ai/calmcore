@@ -213,7 +213,10 @@ impl Partition {
 
                 self.write(&data, Some(pk_hash), Some(WriteInfo(dels)))
             }
-            None => self.write(&data, None, None),
+            None => {
+                let _write_guard = self.write_lock.lock().unwrap();
+                self.write(&data, None, None)
+            }
         }
     }
 
