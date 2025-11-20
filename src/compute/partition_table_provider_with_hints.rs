@@ -110,11 +110,8 @@ impl TableProvider for PartitionTableProviderWithHints {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
-        // 策略：全部返回 Unsupported，让 DataFusion 把 filters 传给 scan()
-        Ok(vec![
-            TableProviderFilterPushDown::Unsupported;
-            filters.len()
-        ])
+        // 策略：返回 Exact，让 DataFusion 把 filters 传给 scan()
+        Ok(vec![TableProviderFilterPushDown::Exact; filters.len()])
     }
 
     async fn scan(

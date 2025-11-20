@@ -166,7 +166,6 @@ impl TableMeta {
     /// 获取 partition 目录路径
     pub fn partition_dir(&self, work_dir: &PathBuf, partition_id: usize) -> PathBuf {
         self.table_dir(work_dir)
-            .join("partitions")
             .join(format!("partition-{}", partition_id))
     }
 
@@ -179,7 +178,6 @@ impl TableMeta {
         end: u64,
     ) -> PathBuf {
         self.partition_dir(work_dir, partition_id)
-            .join("segments")
             .join(format!("segment-{}-{}", start, end))
     }
 }

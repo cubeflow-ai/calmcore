@@ -481,13 +481,12 @@ impl Partition {
 
     /// Persist a specific segment to disk by segment ID
     pub fn persist_segment(&self, seg_id: u64) -> CoreResult<()> {
-        let base_dir = self
+        let partition_path = self
             .base_dir
             .to_str()
             .ok_or_else(|| CoreError::Internal("Invalid base_dir path".to_string()))?;
 
-        let partition_path = format!("{}/partition-{}", base_dir, self.id);
-        std::fs::create_dir_all(&partition_path)
+        std::fs::create_dir_all(partition_path)
             .map_err(|e| CoreError::IOError(format!("Failed to create partition dir: {}", e)))?;
 
         // Find the frozen segment
@@ -600,7 +599,7 @@ impl Partition {
         );
 
         // 1. Find all segment directories
-        let partition_path = format!("{}/partition-{}", base_dir_str, id);
+        let partition_path = base_dir_str;
         if !std::path::Path::new(&partition_path).exists() {
             // No persisted data, create new partition
             return Ok(Self::new(
@@ -744,6 +743,11 @@ impl Partition {
     /// 获取 Partition ID
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Get schema reference
+    pub fn schema(&self) -> &Arc<Schema> {
+        &self.schema
     }
 
     /// Get read-only access to the current segment

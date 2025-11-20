@@ -161,9 +161,7 @@ impl Engine {
                     .data_dir
                     .join("tables")
                     .join(&table_name)
-                    .join("partitions")
-                    .join(format!("partition-{}", i))
-                    .join("segments");
+                    .join(format!("partition-{}", i));
 
                 // 检查目录是否存在
                 if !partition_dir.exists() {
@@ -266,9 +264,7 @@ impl Engine {
                 .data_dir
                 .join("tables")
                 .join(table_name)
-                .join("partitions")
-                .join(format!("partition-{}", i))
-                .join("segments");
+                .join(format!("partition-{}", i));
 
             log::debug!(
                 "🔍 [DEBUG create_table] Creating partition {} at {:?}",
@@ -452,9 +448,7 @@ impl Engine {
             .data_dir
             .join("tables")
             .join(table_name)
-            .join("partitions")
-            .join(format!("partition-{}", id))
-            .join("segments");
+            .join(format!("partition-{}", id));
         let partition = Partition::load(
             id,
             table_name.to_string(),
@@ -867,10 +861,25 @@ impl Engine {
         };
 
         // 检查是否需要持久化（基于 schema 的 PersistPolicy）
+        let max_age = partition.schema().persist_policy.max_segment_age;
         let segments_to_persist = partition
             .get_unpersisted_segments()
             .into_iter()
-            .filter(|(_, segment)| !segment.is_persisted())
+            .filter(|(_, segment)| {
+                // 检查是否未持久化 AND (文档数超标 OR 年龄超标)
+                if segment.is_persisted() {
+                    return false;
+                }
+
+                // 检查文档数阈值
+                let doc_threshold_met =
+                    segment.doc_count() >= partition.schema().persist_policy.max_docs_per_segment;
+
+                // 检查时间阈值
+                let age_threshold_met = segment.age() >= max_age;
+
+                doc_threshold_met || age_threshold_met
+            })
             .collect_vec();
 
         if segments_to_persist.is_empty() {

@@ -90,15 +90,15 @@ impl TableProvider for PartitionTableProvider {
     //。     有limit 没有 order 此时应该scan的时候值返回limit+ size 条数是不是就可以
     //       没有limit 只有order 数据量肯定不大 返回全量数据即可吧。
     // 所以这个函数是否返回全量是不好说的。我们可以在查询前有个预查询，或者其他方式来确定这个返回情况。你看看怎么做回更好呢？
-     
+
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
-        // 策略：全部返回 Unsupported，让 DataFusion 把 filters 传给 scan()
+        // 策略：返回 Exact，让 DataFusion 把 filters 传给 scan()
         // 在 scan() 中，SegmentScanner 会根据完整的查询上下文（filters + limit + projection）
         // 做智能决策，选择最优的执行策略
-        Ok(vec![TableProviderFilterPushDown::Unsupported; filters.len()])
+        Ok(vec![TableProviderFilterPushDown::Exact; filters.len()])
     }
 
     async fn scan(
@@ -122,7 +122,7 @@ impl TableProvider for PartitionTableProvider {
         {
             let current_segment = self.partition.get_current_segment();
             let doc_count = current_segment.doc_count();
-            
+
             if doc_count > 0 {
                 let scanner = self.create_segment_scanner(&*current_segment)?;
                 // 使用新的优化方法，传递完整的查询上下文
@@ -135,7 +135,7 @@ impl TableProvider for PartitionTableProvider {
         // Add frozen segments
         {
             let frozen_segments = self.partition.get_frozen_segments();
-            
+
             for (_seg_id, segment) in frozen_segments.iter() {
                 let scanner = self.create_segment_scanner(segment)?;
                 // 使用新的优化方法，传递完整的查询上下文
@@ -152,7 +152,9 @@ impl TableProvider for PartitionTableProvider {
 
         // Handle empty partition case - return empty plan instead of error
         if segment_plans.is_empty() {
-            log::warn!("⚠️  [PartitionTableProvider::scan] No segments found, returning empty plan");
+            log::warn!(
+                "⚠️  [PartitionTableProvider::scan] No segments found, returning empty plan"
+            );
             use datafusion::physical_plan::empty::EmptyExec;
 
             // 使用投影后的schema(如果有),否则使用完整schema
