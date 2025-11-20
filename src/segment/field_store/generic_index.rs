@@ -304,14 +304,24 @@ impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
             return None;
         }
 
-        let start_key = K::from_scalar(start)?;
-        let end_key = K::from_scalar(end)?;
+        // 处理 NULL 作为无界的情况
+        let start_key = if matches!(start, datafusion::scalar::ScalarValue::Null) {
+            None
+        } else {
+            Some(K::from_scalar(start)?)
+        };
+
+        let end_key = if matches!(end, datafusion::scalar::ScalarValue::Null) {
+            None
+        } else {
+            Some(K::from_scalar(end)?)
+        };
 
         let indexs = self.indexs.read().unwrap();
         let result = indexs.range_query(
-            Some(&start_key),
+            start_key.as_ref(),
             start_inclusive,
-            Some(&end_key),
+            end_key.as_ref(),
             end_inclusive,
         );
         Some(result)
@@ -328,16 +338,26 @@ impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
             return None;
         }
 
-        let start_key = K::from_scalar(start)?;
-        let end_key = K::from_scalar(end)?;
+        // 处理 NULL 作为无界的情况
+        let start_key = if matches!(start, datafusion::scalar::ScalarValue::Null) {
+            None
+        } else {
+            Some(K::from_scalar(start)?)
+        };
+
+        let end_key = if matches!(end, datafusion::scalar::ScalarValue::Null) {
+            None
+        } else {
+            Some(K::from_scalar(end)?)
+        };
 
         let indexs = self.indexs.read().unwrap();
         // 尝试使用底层 mem_btree 的 range_union() 优化
         // 如果不支持(内存索引)，返回 None 让调用方回退到 range()
         indexs.range_union(
-            Some(&start_key),
+            start_key.as_ref(),
             start_inclusive,
-            Some(&end_key),
+            end_key.as_ref(),
             end_inclusive,
         )
     }
