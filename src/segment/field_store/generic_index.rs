@@ -316,6 +316,31 @@ impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
         );
         Some(result)
     }
+
+    fn range_union(
+        &self,
+        start: &datafusion::scalar::ScalarValue,
+        start_inclusive: bool,
+        end: &datafusion::scalar::ScalarValue,
+        end_inclusive: bool,
+    ) -> Option<RoaringBitmap> {
+        if !K::supports_range() {
+            return None;
+        }
+
+        let start_key = K::from_scalar(start)?;
+        let end_key = K::from_scalar(end)?;
+
+        let indexs = self.indexs.read().unwrap();
+        // 尝试使用底层 mem_btree 的 range_union() 优化
+        // 如果不支持(内存索引)，返回 None 让调用方回退到 range()
+        indexs.range_union(
+            Some(&start_key),
+            start_inclusive,
+            Some(&end_key),
+            end_inclusive,
+        )
+    }
 }
 
 // 注意：类型别名已在 mod.rs 中定义并导出

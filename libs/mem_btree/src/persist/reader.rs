@@ -340,11 +340,95 @@ where
                     }
                 }
             } else {
-                // Index node: push all children (simplified approach)
-                // A more optimized approach would check key ranges to skip non-overlapping children
-                for (i, _) in offsets.iter().enumerate() {
-                    let child_offset = offsets[i] as usize;
-                    stack.push((child_offset, i));
+                // Index node: optimize by only visiting children that might overlap with the query range
+                // B-Tree structure: keys[i] is the separator, child[i] contains keys < keys[i]
+                // child[0]: (-∞, keys[0])
+                // child[1]: [keys[0], keys[1])
+                // child[n]: [keys[n-1], +∞)
+
+                if keys.is_empty() {
+                    // Single child node, must visit
+                    if !offsets.is_empty() {
+                        stack.push((offsets[0] as usize, 0));
+                    }
+                    continue;
+                }
+
+                // Check first child: (-∞, keys[0])
+                let first_child_overlaps = match start {
+                    Some(s) => {
+                        // Child range: (-∞, keys[0])
+                        // Overlaps if start < keys[0] (considering inclusivity)
+                        if start_inclusive {
+                            s < &keys[0] // [start, ...) overlaps (-∞, keys[0]) if start < keys[0]
+                        } else {
+                            s < &keys[0] // (start, ...) overlaps (-∞, keys[0]) if start < keys[0]
+                        }
+                    }
+                    None => true, // No start bound, must check
+                };
+
+                if first_child_overlaps && !offsets.is_empty() {
+                    stack.push((offsets[0] as usize, 0));
+                }
+
+                // Check middle children: [keys[i-1], keys[i])
+                for i in 1..keys.len() {
+                    let child_start = &keys[i - 1];
+                    let child_end = &keys[i];
+
+                    // Check if [child_start, child_end) overlaps with query range
+                    let overlaps_start = match start {
+                        Some(s) => {
+                            // Child range: [child_start, child_end)
+                            // Overlaps if child_end > start (considering inclusivity)
+                            if start_inclusive {
+                                child_end > s // [child_start, child_end) overlaps [start, ...) if child_end > start
+                            } else {
+                                child_end > s // [child_start, child_end) overlaps (start, ...) if child_end > start
+                            }
+                        }
+                        None => true,
+                    };
+
+                    let overlaps_end = match end {
+                        Some(e) => {
+                            // Child range: [child_start, child_end)
+                            // Overlaps if child_start < end (considering inclusivity)
+                            if end_inclusive {
+                                child_start <= e // [child_start, child_end) overlaps (..., end] if child_start <= end
+                            } else {
+                                child_start < e // [child_start, child_end) overlaps (..., end) if child_start < end
+                            }
+                        }
+                        None => true,
+                    };
+
+                    if overlaps_start && overlaps_end && i < offsets.len() {
+                        stack.push((offsets[i] as usize, i));
+                    }
+                }
+
+                // Check last child: [keys[n-1], +∞)
+                let last_idx = keys.len();
+                if last_idx < offsets.len() {
+                    let last_child_overlaps = match end {
+                        Some(e) => {
+                            // Child range: [keys[n-1], +∞)
+                            // Overlaps if end > keys[n-1] (considering inclusivity)
+                            let last_key = &keys[keys.len() - 1];
+                            if end_inclusive {
+                                e >= last_key // [keys[n-1], +∞) overlaps (..., end] if end >= keys[n-1]
+                            } else {
+                                e > last_key // [keys[n-1], +∞) overlaps (..., end) if end > keys[n-1]
+                            }
+                        }
+                        None => true, // No end bound, must check
+                    };
+
+                    if last_child_overlaps {
+                        stack.push((offsets[last_idx] as usize, last_idx));
+                    }
                 }
             }
         }

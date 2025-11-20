@@ -140,7 +140,7 @@ fn benchmark_range_union() {
     let mut count = 0;
     let mut last_key = None;
     let mut first_duplicate_at = None;
-    for item in reader_no_union.range(&0, &200) {
+    for item in reader_no_union.range(Some(&0), true, Some(&200), false) {
         if let Some(prev) = last_key {
             if item.0 <= prev {
                 if first_duplicate_at.is_none() {
@@ -160,19 +160,25 @@ fn benchmark_range_union() {
     }
     eprintln!("  Total: {} items (expected: 200)", count);
 
-    let test_count = reader_no_union.range(&0, &1000).count();
+    let test_count = reader_no_union
+        .range(Some(&0), true, Some(&1000), false)
+        .count();
     eprintln!(
         "  - Test range(0, 1000) count: {} (expected: 1000)",
         test_count
     );
-    let test_count2 = reader_no_union.range(&0, &100).count();
+    let test_count2 = reader_no_union
+        .range(Some(&0), true, Some(&100), false)
+        .count();
     eprintln!(
         "  - Test range(0, 100) count: {} (expected: 100)",
         test_count2
     );
 
     // 验证数据完整性
-    let full_count = reader_no_union.range(&0, &100000).count();
+    let full_count = reader_no_union
+        .range(Some(&0), true, Some(&100000), false)
+        .count();
     eprintln!(
         "  - Full range(0, 100000) count: {} (expected: 100000)",
         full_count
@@ -219,8 +225,12 @@ fn benchmark_range_union() {
     for (start, end, desc) in test_ranges {
         // 预热
         for _ in 0..WARMUP_RUNS {
-            let _ = reader_no_union.range_union(&start, &end).unwrap();
-            let _ = reader_with_union.range_union(&start, &end).unwrap();
+            let _ = reader_no_union
+                .range_union(Some(&start), true, Some(&end), false)
+                .unwrap();
+            let _ = reader_with_union
+                .range_union(Some(&start), true, Some(&end), false)
+                .unwrap();
         }
 
         // 方法1: range() 迭代器 + 手动 union (无优化 - 标准做法)
@@ -230,7 +240,7 @@ fn benchmark_range_union() {
             let t1 = Instant::now();
             let mut result = RoaringBitmap::new();
             let mut count = 0;
-            for item in reader_no_union.range(&start, &end) {
+            for item in reader_no_union.range(Some(&start), true, Some(&end), false) {
                 result = result | item.1.clone();
                 count += 1;
             }
@@ -245,7 +255,9 @@ fn benchmark_range_union() {
         let mut union_opt_times = Vec::new();
         for _ in 0..BENCH_RUNS {
             let t2 = Instant::now();
-            let union_opt = reader_with_union.range_union(&start, &end).unwrap();
+            let union_opt = reader_with_union
+                .range_union(Some(&start), true, Some(&end), false)
+                .unwrap();
             union_opt_times.push(t2.elapsed());
             std::hint::black_box(union_opt);
         }
@@ -253,8 +265,12 @@ fn benchmark_range_union() {
             union_opt_times.iter().sum::<std::time::Duration>() / BENCH_RUNS as u32;
 
         // 验证结果一致性
-        let result1 = reader_no_union.range_union(&start, &end).unwrap();
-        let result2 = reader_with_union.range_union(&start, &end).unwrap();
+        let result1 = reader_no_union
+            .range_union(Some(&start), true, Some(&end), false)
+            .unwrap();
+        let result2 = reader_with_union
+            .range_union(Some(&start), true, Some(&end), false)
+            .unwrap();
         assert_eq!(result1.len(), result2.len());
 
         let speedup = range_time.as_secs_f64() / union_opt_time.as_secs_f64();

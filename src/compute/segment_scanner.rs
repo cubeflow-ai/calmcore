@@ -458,8 +458,13 @@ impl SegmentScanner {
     ) -> Option<RoaringBitmap> {
         match self.index_readers.get(field_name) {
             Some(reader) => {
-                // 有索引,调用 reader.range()
-                // 如果查询失败(不支持范围查询等),返回空 bitmap
+                // 优先尝试 range_union() - 100-200x faster for large ranges
+                if let Some(bitmap) = reader.range_union(start, start_inclusive, end, end_inclusive)
+                {
+                    return Some(bitmap);
+                }
+
+                // 回退到普通 range() - 兼容不支持 range_union 的索引类型
                 Some(
                     reader
                         .range(start, start_inclusive, end, end_inclusive)
