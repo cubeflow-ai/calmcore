@@ -288,7 +288,23 @@ impl DistributedExecutor {
     ) -> CoreResult<QueryResult> {
         let table_name = self.query_builder.extract_table_name(sql)?;
         let meta = self.engine.get_table_meta(&table_name)?;
-        let num_partitions = meta.parallel_workers;
+
+        // 根据分区策略获取分区列表
+        let partition_ids = match &meta.partition_strategy {
+            crate::catalog::PartitionStrategy::Custom => {
+                // Custom 分区：动态查询实际存在的分区
+                self.engine.list_partitions(&table_name).await
+            }
+            _ => {
+                // 其他分区策略：使用 parallel_workers 生成分区 ID
+                (0..meta.parallel_workers)
+                    .map(|idx| {
+                        meta.partition_strategy
+                            .generate_partition_id(&table_name, idx, None)
+                    })
+                    .collect()
+            }
+        };
 
         // 🔧 提取 limit hint 和生成分区 SQL
         let (limit_hint, partition_sql) = if let Some(info) = &sort_limit_info {
@@ -308,7 +324,7 @@ impl DistributedExecutor {
         log::info!(
             "🔍 [execute_query] table='{}', partitions={}, has_sort={}, limit_hint={:?}, partition_sql='{}'",
             table_name,
-            num_partitions,
+            partition_ids.len(),
             sort_fields.is_some(),
             limit_hint,
             partition_sql
@@ -317,12 +333,11 @@ impl DistributedExecutor {
         // 并行查询所有 partition
         let mut all_batches = Vec::new();
 
-        for partition_index in 0..num_partitions {
-            let partition_id = meta.partition_strategy.generate_partition_id(&table_name, partition_index, None);
+        for partition_id in &partition_ids {
             match self
                 .execute_on_partition(
                     &table_name,
-                    &partition_id,
+                    partition_id,
                     &partition_sql,
                     sort_fields.clone(),
                     limit_hint,
@@ -343,7 +358,7 @@ impl DistributedExecutor {
             "📊 [execute_query] Collected {} batches with {} total rows from {} partitions",
             all_batches.len(),
             total_rows_before,
-            num_partitions
+            partition_ids.len()
         );
 
         // matched_docs 就是返回的总行数（在 LIMIT 之前）
@@ -652,20 +667,35 @@ impl DistributedExecutor {
         let table_name = self.query_builder.extract_table_name(sql)?;
 
         let meta = self.engine.get_table_meta(&table_name)?;
-        let num_partitions = meta.parallel_workers;
+
+        // 根据分区策略获取分区列表
+        let partition_ids = match &meta.partition_strategy {
+            crate::catalog::PartitionStrategy::Custom => {
+                // Custom 分区：动态查询实际存在的分区
+                self.engine.list_partitions(&table_name).await
+            }
+            _ => {
+                // 其他分区策略：使用 parallel_workers 生成分区 ID
+                (0..meta.parallel_workers)
+                    .map(|idx| {
+                        meta.partition_strategy
+                            .generate_partition_id(&table_name, idx, None)
+                    })
+                    .collect()
+            }
+        };
 
         eprintln!(
             "🔍 [DistributedExecutor] Executing distributed aggregation on table '{}' with {} partitions",
-            table_name, num_partitions
+            table_name, partition_ids.len()
         );
 
         // 并行在所有分区上执行聚合
         let mut partition_results = Vec::new();
 
-        for partition_index in 0..num_partitions {
-            let partition_id = meta.partition_strategy.generate_partition_id(&table_name, partition_index, None);
+        for partition_id in &partition_ids {
             match self
-                .execute_sql_on_partition_old(&table_name, &partition_id, sql)
+                .execute_sql_on_partition_old(&table_name, partition_id, sql)
                 .await
             {
                 Ok(batches) => {
@@ -710,7 +740,22 @@ impl DistributedExecutor {
 
         // 获取表的元数据以生成 partition_id
         let meta = self.engine.get_table_meta(table_name)?;
-        let partition_id = meta.partition_strategy.generate_partition_id(table_name, 0, None);
+
+        // 根据分区策略获取第一个分区 ID
+        let partition_id = match &meta.partition_strategy {
+            crate::catalog::PartitionStrategy::Custom => {
+                // Custom 分区：查询实际存在的第一个分区
+                let partitions = self.engine.list_partitions(table_name).await;
+                partitions.into_iter().next().ok_or_else(|| {
+                    CoreError::NotExisted(format!("No partitions found for table '{}'", table_name))
+                })?
+            }
+            _ => {
+                // 其他分区策略：使用索引 0 生成分区 ID
+                meta.partition_strategy
+                    .generate_partition_id(table_name, 0, None)
+            }
+        };
 
         // 获取第一个partition来注册表（只是为了获取schema）
         let partition = self
@@ -718,7 +763,10 @@ impl DistributedExecutor {
             .get_partition(table_name, &partition_id)
             .await
             .ok_or_else(|| {
-                CoreError::NotExisted(format!("Partition {} not found for table '{}'", partition_id, table_name))
+                CoreError::NotExisted(format!(
+                    "Partition {} not found for table '{}'",
+                    partition_id, table_name
+                ))
             })?;
 
         let provider = Arc::new(crate::compute::PartitionTableProvider::new(partition));

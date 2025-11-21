@@ -325,7 +325,7 @@ impl Partition {
     /// * `parquet_path` - Path to the Parquet file to add
     ///
     /// # Returns
-    /// The segment ID of the newly added segment
+    /// The number of rows in the newly added segment
     ///
     /// # Example
     /// ```no_run
@@ -367,8 +367,23 @@ impl Partition {
         // 3. Allocate segment ID
         let seg_id = self.segment_id_counter.fetch_add(1, Ordering::SeqCst);
 
-        // 4. Read all data from Parquet to build indexes
+        // 4. Only read indexed fields from Parquet to build indexes
         println!("  🔨 Building indexes for segment {}...", seg_id);
+
+        // Get list of indexed field names
+        let indexed_fields: Vec<String> = self
+            .schema
+            .fields
+            .iter()
+            .filter(|f| f.is_index())
+            .map(|f| f.name().to_string())
+            .collect();
+
+        println!(
+            "  📋 Indexed fields: {} out of {} total fields",
+            indexed_fields.len(),
+            self.schema.fields.len()
+        );
 
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -378,7 +393,79 @@ impl Partition {
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| CoreError::IOError(format!("Failed to create parquet reader: {}", e)))?;
 
+        // Validate schema types before loading
+        let parquet_schema = builder.schema();
+        println!("  🔍 Validating schema types...");
+
+        let mut type_mismatches = Vec::new();
+        for schema_field in &self.schema.fields {
+            // field_with_name returns Result<&Field, ArrowError>
+            if let Ok(parquet_field) = parquet_schema.field_with_name(schema_field.name()) {
+                let schema_type = schema_field.field_type();
+                let parquet_type = parquet_field.data_type();
+
+                // Convert FieldType to Arrow DataType for comparison
+                use datafusion::arrow::datatypes::DataType;
+                let expected_arrow_type = match schema_type {
+                    crate::schema::field::FieldType::Keyword => DataType::Utf8,
+                    crate::schema::field::FieldType::I8 => DataType::Int8,
+                    crate::schema::field::FieldType::I16 => DataType::Int16,
+                    crate::schema::field::FieldType::I32 => DataType::Int32,
+                    crate::schema::field::FieldType::I64 => DataType::Int64,
+                    crate::schema::field::FieldType::U8 => DataType::UInt8,
+                    crate::schema::field::FieldType::U16 => DataType::UInt16,
+                    crate::schema::field::FieldType::U32 => DataType::UInt32,
+                    crate::schema::field::FieldType::U64 => DataType::UInt64,
+                    crate::schema::field::FieldType::F32 => DataType::Float32,
+                    crate::schema::field::FieldType::F64 => DataType::Float64,
+                    crate::schema::field::FieldType::Boolean => DataType::Boolean,
+                    crate::schema::field::FieldType::Timestamp => DataType::Int64,
+                };
+
+                // Compare types - they must match exactly
+                if &expected_arrow_type != parquet_type {
+                    type_mismatches.push(format!(
+                        "Field '{}': expected {:?}, but Parquet has {:?}",
+                        schema_field.name(),
+                        expected_arrow_type,
+                        parquet_type
+                    ));
+                }
+            }
+        }
+
+        if !type_mismatches.is_empty() {
+            let error_msg = format!(
+                "Schema validation failed - type mismatches found:\n  {}",
+                type_mismatches.join("\n  ")
+            );
+            println!("  ❌ {}", error_msg);
+            return Err(CoreError::InvalidParam(error_msg));
+        }
+
+        println!("  ✅ Schema validation passed");
+
+        // Project only indexed columns
+        let mut projection_indices = Vec::new();
+
+        for (idx, field) in parquet_schema.fields().iter().enumerate() {
+            if indexed_fields.contains(&field.name().to_lowercase()) {
+                projection_indices.push(idx);
+            }
+        }
+
+        println!(
+            "  📊 Projecting {} columns for indexing",
+            projection_indices.len()
+        );
+
+        // Create projection mask from indices
+        use datafusion::parquet::arrow::ProjectionMask;
+        let projection_mask =
+            ProjectionMask::roots(builder.parquet_schema(), projection_indices.iter().copied());
+
         let mut reader = builder
+            .with_projection(projection_mask)
             .build()
             .map_err(|e| CoreError::IOError(format!("Failed to build parquet reader: {}", e)))?;
 
@@ -389,15 +476,24 @@ impl Partition {
             all_batches.push(batch);
         }
 
-        // Combine all batches
-        let combined_batch = if all_batches.len() == 1 {
+        // Combine all batches (only indexed fields)
+        let combined_batch = if all_batches.is_empty() {
+            // No indexed fields, create empty batch with correct row count
+            let empty_schema = Arc::new(datafusion::arrow::datatypes::Schema::empty());
+            RecordBatch::new_empty(empty_schema)
+        } else if all_batches.len() == 1 {
             all_batches.into_iter().next().unwrap()
         } else {
-            arrow::compute::concat_batches(&self.arrow_schema, &all_batches)
+            let batch_schema = all_batches[0].schema();
+            arrow::compute::concat_batches(&batch_schema, &all_batches)
                 .map_err(|e| CoreError::Internal(format!("Failed to combine batches: {}", e)))?
         };
 
-        println!("  ✓ Read {} rows from Parquet", combined_batch.num_rows());
+        println!(
+            "  ✓ Read {} rows ({} indexed fields) from Parquet",
+            combined_batch.num_rows(),
+            combined_batch.num_columns()
+        );
 
         // 5. Create new segment and build indexes
         let segment = Segment::from_parquet(
@@ -429,7 +525,7 @@ impl Partition {
             seg_id, num_rows, start_id, end_id
         );
 
-        Ok(seg_id)
+        Ok(num_rows)
     }
 
     /// Get list of segments that need to be persisted (not yet persisted)

@@ -51,7 +51,7 @@ where
 
         let (values, old) = self.children[index].put(m, k, v, ttl);
 
-        let mut children = Vec::with_capacity(self.children.len() + values.len());
+        let mut children = Vec::with_capacity(self.children.len().saturating_add(values.len()));
 
         children.extend(self.children[..index].iter().cloned());
         children.extend(values);
@@ -186,7 +186,7 @@ where
     }
 
     pub fn write(&self, m: usize, mut actions: BTreeMap<K, Action<V>>) -> Vec<N<K, V>> {
-        let mut children = Vec::with_capacity(self.children.len() + actions.len());
+        let mut children = Vec::with_capacity(self.children.len().saturating_add(actions.len()));
 
         let mut start_index = 0;
 
@@ -229,7 +229,7 @@ where
     }
 
     pub fn merge(&self, m: usize, mut actions: BTree<K, V>) -> Vec<N<K, V>> {
-        let mut children = Vec::with_capacity(self.children.len() + actions.len());
+        let mut children = Vec::with_capacity(self.children.len().saturating_add(actions.len()));
 
         let mut start_index = 0;
 

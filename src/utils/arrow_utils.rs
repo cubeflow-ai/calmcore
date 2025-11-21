@@ -55,7 +55,8 @@ pub fn json_to_record_arrow(
     }
 
     // 从 Schema 获取 Arrow Schema
-    let estimated_size = data.len() * 100; // 估算每条记录约 100 字节
+    // 使用 saturating_mul 防止溢出
+    let estimated_size = data.len().saturating_mul(100).min(100 * 1024 * 1024); // 最大 100MB
     let mut buffer = Vec::with_capacity(estimated_size);
 
     for (i, value) in data.iter().enumerate() {

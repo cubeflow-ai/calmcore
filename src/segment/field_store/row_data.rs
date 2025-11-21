@@ -58,13 +58,21 @@ impl ParquetRowDataReader {
             }
         }
 
-        // Fallback: if no metadata, read first row of each RowGroup
+        // Fallback: if no metadata, calculate cumulative row counts as keys
+        // For external Parquet files, doc_id = row_index (0-based)
         if key_to_rowgroup.is_empty() {
-            println!("  Warning: No row_group_keys metadata found, reading from RowGroups...");
+            println!("  Warning: No row_group_keys metadata found, using cumulative row counts...");
+            let mut cumulative_rows = 0u32;
             for rg_idx in 0..num_row_groups {
-                if let Ok(key) = Self::read_first_doc_id(&reader, rg_idx) {
-                    key_to_rowgroup.insert(key, rg_idx);
-                }
+                key_to_rowgroup.insert(cumulative_rows, rg_idx);
+                eprintln!(
+                    "    [ParquetRowDataReader] RowGroup {} -> key={} (cumulative rows)",
+                    rg_idx, cumulative_rows
+                );
+
+                // Add this RowGroup's row count to cumulative total
+                let rg_meta = metadata.row_group(rg_idx);
+                cumulative_rows = cumulative_rows.saturating_add(rg_meta.num_rows() as u32);
             }
         }
 
@@ -75,18 +83,95 @@ impl ParquetRowDataReader {
         })
     }
 
-    /// Read the first doc_id (internal_id) from a RowGroup
-    /// Opens the file and reads just the first row from the specified RowGroup
+    /// Read the first doc_id (internal_id) from a RowGroup by actually reading the file
+    fn read_first_internal_id_from_file(file_path: &str, row_group_idx: usize) -> CoreResult<u32> {
+        use datafusion::arrow::array::UInt32Array;
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let file = File::open(file_path)
+            .map_err(|e| crate::utils::error::CoreError::IOError(e.to_string()))?;
+
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+            crate::utils::error::CoreError::Internal(format!(
+                "Failed to build ParquetRecordBatchReaderBuilder: {}",
+                e
+            ))
+        })?;
+
+        // Check if RowGroup index is valid
+        if row_group_idx >= builder.metadata().num_row_groups() {
+            return Err(crate::utils::error::CoreError::Internal(format!(
+                "Invalid row_group_idx: {}",
+                row_group_idx
+            )));
+        }
+
+        // Read only the internal_id column (index 0) from the first RowGroup
+        let mut reader = builder
+            .with_row_groups(vec![row_group_idx])
+            .with_limit(1) // Read only first row
+            .build()
+            .map_err(|e| {
+                crate::utils::error::CoreError::Internal(format!("Failed to build reader: {}", e))
+            })?;
+
+        // Read the first batch
+        if let Some(batch_result) = reader.next() {
+            let batch = batch_result.map_err(|e| {
+                crate::utils::error::CoreError::Internal(format!("Failed to read batch: {}", e))
+            })?;
+
+            if batch.num_rows() == 0 {
+                return Err(crate::utils::error::CoreError::Internal(
+                    "RowGroup has no rows".to_string(),
+                ));
+            }
+
+            // Get internal_id column (should be first column)
+            let internal_id_col = batch.column(0);
+            let internal_id_array = internal_id_col
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| {
+                    crate::utils::error::CoreError::Internal(
+                        "internal_id column is not UInt32Array".to_string(),
+                    )
+                })?;
+
+            // Get the first value
+            let first_id = internal_id_array.value(0);
+            Ok(first_id)
+        } else {
+            Err(crate::utils::error::CoreError::Internal(
+                "No batches in RowGroup".to_string(),
+            ))
+        }
+    }
+
+    /// Read the first doc_id (internal_id) from a RowGroup (old fallback, not used now)
     fn read_first_doc_id(
         reader: &datafusion::parquet::file::reader::SerializedFileReader<File>,
         row_group_idx: usize,
     ) -> CoreResult<u32> {
-        let _ = row_group_idx; // Suppress warning
-        let _ = reader; // For now, just return 0 as we'll rely on the metadata stored in the file
-                        // This is a fallback that should rarely be used
-        Ok(0)
-    }
+        use datafusion::parquet::file::reader::FileReader;
 
+        let metadata = reader.metadata();
+        if row_group_idx >= metadata.num_row_groups() {
+            return Err(crate::utils::error::CoreError::Internal(
+                "Invalid row_group_idx".to_string(),
+            ));
+        }
+
+        // Calculate based on cumulative row counts as before, but this is only
+        // used as a fallback for files without metadata
+        let mut cumulative_rows = 0u32;
+        for i in 0..row_group_idx {
+            let rg_meta = metadata.row_group(i);
+            cumulative_rows = cumulative_rows.saturating_add(rg_meta.num_rows() as u32);
+        }
+
+        Ok(cumulative_rows)
+    }
     /// Get a RecordBatch by its starting doc_id
     pub fn get(&self, key: &u32) -> Option<RecordBatch> {
         self.get_with_projection(key, None)
@@ -152,10 +237,18 @@ impl ParquetRowDataReader {
 
     /// Get the batch key (start_id) for a given doc_id without loading data
     /// This is a metadata-only operation - just looks up the key_to_rowgroup map
+    /// Get the batch key (starting doc_id) for a specific doc_id
+    /// This returns the starting doc_id of the RowGroup containing this doc_id
     pub fn get_batch_key_for_doc(&self, doc_id: u32) -> Option<u32> {
         // Find the batch that contains this doc_id by looking up in the metadata map
-        let (k, _idx) = self.key_to_rowgroup.range(..=doc_id).next_back()?;
-        Some(*k)
+        let result = self.key_to_rowgroup.range(..=doc_id).next_back();
+        if let Some((k, rg_idx)) = result {
+            eprintln!("  [ParquetRowDataReader::get_batch_key_for_doc] doc_id={}, found batch_key={}, rg_idx={}", doc_id, k, rg_idx);
+            Some(*k)
+        } else {
+            eprintln!("  [ParquetRowDataReader::get_batch_key_for_doc] doc_id={}, NOT FOUND! key_to_rowgroup keys: {:?}", doc_id, self.key_to_rowgroup.keys().collect::<Vec<_>>());
+            None
+        }
     }
 
     /// Batch read multiple RowGroups at once with column projection
@@ -183,9 +276,15 @@ impl ParquetRowDataReader {
     ) -> HashMap<u32, RecordBatch> {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
+        eprintln!(
+            "  [get_batch_with_projection] Called with keys: {:?}, projection: {:?}",
+            keys, projection
+        );
+
         let mut result = HashMap::new();
 
         if keys.is_empty() {
+            eprintln!("  [get_batch_with_projection] No keys provided, returning empty");
             return result;
         }
 
@@ -195,78 +294,138 @@ impl ParquetRowDataReader {
 
         for key in keys {
             if let Some(&rg_idx) = self.key_to_rowgroup.get(key) {
+                eprintln!(
+                    "  [get_batch_with_projection] key={} -> rg_idx={}",
+                    key, rg_idx
+                );
                 row_group_indices.push(rg_idx);
                 key_to_rg_idx.insert(rg_idx, *key);
+            } else {
+                eprintln!(
+                    "  [get_batch_with_projection] key={} NOT FOUND in key_to_rowgroup",
+                    key
+                );
             }
         }
 
         if row_group_indices.is_empty() {
+            eprintln!("  [get_batch_with_projection] No valid row groups found, returning empty");
             return result;
         }
+
+        eprintln!(
+            "  [get_batch_with_projection] Will read {} RowGroups",
+            row_group_indices.len()
+        );
 
         // Sort RowGroup indices for better I/O performance (sequential reads)
         row_group_indices.sort_unstable();
         row_group_indices.dedup(); // Remove duplicates if any
 
-        // Open file and create builder
-        let file = match File::open(&self.file_path) {
-            Ok(f) => f,
-            Err(_) => return result,
-        };
+        // Read each RowGroup separately to avoid batch-to-rowgroup mapping issues
+        for &rg_idx in &row_group_indices {
+            // Get the original key for this RowGroup
+            let key = match key_to_rg_idx.get(&rg_idx) {
+                Some(&k) => k,
+                None => continue,
+            };
 
-        let mut builder = match ParquetRecordBatchReaderBuilder::try_new(file) {
-            Ok(b) => b,
-            Err(_) => return result,
-        };
+            // Open file and create a new builder for this RowGroup
+            let file = match File::open(&self.file_path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
 
-        // Apply column projection if specified
-        if let Some(cols) = projection {
-            // 使用更简单的方法: 通过schema的字段选择创建投影
-            // 注意: with_projection需要ProjectionMask,我们通过select方法创建
-            let schema_descr = builder.metadata().file_metadata().schema_descr();
-            let num_fields = schema_descr.num_columns();
+            let mut builder = match ParquetRecordBatchReaderBuilder::try_new(file) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
 
-            // 创建一个bool数组,标记哪些列要读取
-            let mut column_mask = vec![false; num_fields];
-            for &col_idx in cols {
-                if col_idx < num_fields {
-                    column_mask[col_idx] = true;
+            // Apply column projection if specified
+            if let Some(cols) = projection {
+                let schema_descr = builder.metadata().file_metadata().schema_descr();
+                let num_fields = schema_descr.num_columns();
+
+                let mut column_mask = vec![false; num_fields];
+                for &col_idx in cols {
+                    if col_idx < num_fields {
+                        column_mask[col_idx] = true;
+                    }
+                }
+
+                use datafusion::parquet::arrow::ProjectionMask;
+                let mask = ProjectionMask::leaves(
+                    schema_descr,
+                    column_mask
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(i, enabled)| if enabled { Some(i) } else { None }),
+                );
+
+                builder = builder.with_projection(mask);
+            }
+
+            // Read only this RowGroup
+            let mut reader = match builder.with_row_groups(vec![rg_idx]).build() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            // Collect all batches from this RowGroup and concatenate them
+            let mut batches = Vec::new();
+            while let Some(batch_result) = reader.next() {
+                if let Ok(batch) = batch_result {
+                    eprintln!(
+                        "  [get_batch_with_projection] Read batch with {} rows from RowGroup {}",
+                        batch.num_rows(),
+                        rg_idx
+                    );
+                    batches.push(batch);
+                } else {
+                    eprintln!(
+                        "  [get_batch_with_projection] Error reading batch from RowGroup {}",
+                        rg_idx
+                    );
+                    break;
                 }
             }
 
-            // 使用ProjectionMask::leaves来指定要读取的叶子列
-            use datafusion::parquet::arrow::ProjectionMask;
-            let mask = ProjectionMask::leaves(
-                schema_descr,
-                column_mask
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(i, enabled)| if enabled { Some(i) } else { None }),
-            );
+            // Concatenate batches if there are multiple
+            if !batches.is_empty() {
+                let combined_batch = if batches.len() == 1 {
+                    batches.into_iter().next().unwrap()
+                } else {
+                    match datafusion::arrow::compute::concat_batches(&batches[0].schema(), &batches)
+                    {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!(
+                                "  [get_batch_with_projection] Error concatenating batches: {}",
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                };
 
-            builder = builder.with_projection(mask);
-        }
-
-        // Build reader with all selected RowGroups
-        let mut reader = match builder.with_row_groups(row_group_indices.clone()).build() {
-            Ok(r) => r,
-            Err(_) => return result,
-        };
-
-        // Read all batches (one per RowGroup)
-        let mut rg_batch_idx = 0;
-        while let Some(batch_result) = reader.next() {
-            if let Ok(batch) = batch_result {
-                // Map the batch back to its original key
-                if let Some(&key) = key_to_rg_idx.get(&row_group_indices[rg_batch_idx]) {
-                    result.insert(key, batch);
-                }
-                rg_batch_idx += 1;
+                eprintln!(
+                    "  [get_batch_with_projection] Inserting key={} with {} rows",
+                    key,
+                    combined_batch.num_rows()
+                );
+                result.insert(key, combined_batch);
             } else {
-                break;
+                eprintln!(
+                    "  [get_batch_with_projection] No batches read for RowGroup {}",
+                    rg_idx
+                );
             }
         }
 
+        eprintln!(
+            "  [get_batch_with_projection] Returning {} batches",
+            result.len()
+        );
         result
     }
 

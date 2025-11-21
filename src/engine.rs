@@ -147,24 +147,56 @@ impl Engine {
                 }
             };
 
-            let num_partitions = meta.parallel_workers;
-            log::info!(
-                "🔍 [Engine] Table {} has {} partitions",
-                table_name,
-                num_partitions
-            );
+            let table_dir = self.config.data_dir.join("tables").join(&table_name);
+
+            // 对于 Custom 分区策略，扫描实际的分区目录
+            let partition_ids: Vec<String> = if matches!(
+                meta.partition_strategy,
+                PartitionStrategy::Custom
+            ) {
+                log::info!("🔍 [Engine] Table {} uses Custom partition strategy, scanning partition directories...", table_name);
+
+                let mut ids = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&table_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                                if dir_name.starts_with("partition-") {
+                                    let partition_id =
+                                        dir_name.strip_prefix("partition-").unwrap().to_string();
+                                    ids.push(partition_id);
+                                }
+                            }
+                        }
+                    }
+                }
+                log::info!(
+                    "🔍 [Engine] Found {} custom partitions for table {}",
+                    ids.len(),
+                    table_name
+                );
+                ids
+            } else {
+                // 对于其他分区策略，使用 parallel_workers
+                let num_partitions = meta.parallel_workers;
+                log::info!(
+                    "🔍 [Engine] Table {} has {} partitions",
+                    table_name,
+                    num_partitions
+                );
+
+                (0..num_partitions)
+                    .map(|i| {
+                        meta.partition_strategy
+                            .generate_partition_id(&table_name, i, None)
+                    })
+                    .collect()
+            };
 
             // 加载所有 partition
-            for i in 0..num_partitions {
-                let partition_id =
-                    meta.partition_strategy
-                        .generate_partition_id(&table_name, i, None);
-                let partition_dir = self
-                    .config
-                    .data_dir
-                    .join("tables")
-                    .join(&table_name)
-                    .join(format!("partition-{}", partition_id));
+            for partition_id in partition_ids {
+                let partition_dir = table_dir.join(format!("partition-{}", partition_id));
 
                 // 检查目录是否存在
                 if !partition_dir.exists() {
@@ -196,7 +228,7 @@ impl Engine {
                         Err(e) => {
                             log::error!(
                                 "⚠️  Failed to load partition {} for table {}: {}",
-                                i,
+                                partition_id,
                                 table_name,
                                 e
                             );
@@ -205,10 +237,12 @@ impl Engine {
                 }
             }
 
+            let loaded_count = self.list_partitions(&table_name).await.len();
+
             log::info!(
                 "✅ Loaded table '{}' with {} partitions",
                 table_name,
-                num_partitions
+                loaded_count
             );
         }
 
@@ -1039,7 +1073,7 @@ impl Engine {
         partition_id: Option<String>,
         partition_value: Option<String>,
         file_path: PathBuf,
-        handler_type: crate::segment_loader::FileHandlerType,
+        handler_type: Option<crate::segment_loader::FileHandlerType>,
     ) -> CoreResult<usize> {
         // 获取表的元数据
         let meta = self.catalog.get_table(table_name)?;
@@ -1063,37 +1097,39 @@ impl Engine {
             ));
         };
 
-        // 检查 partition 是否存在，不存在则创建
-        let partition = if let Some(p) = self.get_partition(table_name, &partition_id).await {
-            p
-        } else {
-            // 创建新的 partition
-            log::info!(
-                "Creating new partition {} for table {}",
-                partition_id,
-                table_name
-            );
+        // 检查 partition 是否已存在
+        if let Some(_) = self.get_partition(table_name, &partition_id).await {
+            return Err(crate::utils::error::CoreError::InvalidParam(format!(
+                "Partition {} already exists for table {}. Cannot load duplicate partition.",
+                partition_id, table_name
+            )));
+        }
 
-            let partition_dir = self
-                .config
-                .data_dir
-                .join("tables")
-                .join(table_name)
-                .join(format!("partition-{}", partition_id));
+        // 创建新的 partition
+        log::info!(
+            "Creating new partition {} for table {}",
+            partition_id,
+            table_name
+        );
 
-            let partition = Partition::new(
-                partition_id.clone(),
-                table_name.to_string(),
-                partition_dir,
-                meta.schema.clone(),
-                self.partition_notify_tx.clone(),
-            );
+        let partition_dir = self
+            .config
+            .data_dir
+            .join("tables")
+            .join(table_name)
+            .join(format!("partition-{}", partition_id));
 
-            let partition = Arc::new(partition);
-            self.add_partition_with_table(table_name, partition.clone())
-                .await;
-            partition
-        };
+        let partition = Partition::new(
+            partition_id.clone(),
+            table_name.to_string(),
+            partition_dir,
+            meta.schema.clone(),
+            self.partition_notify_tx.clone(),
+        );
+
+        let partition = Arc::new(partition);
+        self.add_partition_with_table(table_name, partition.clone())
+            .await;
 
         // 使用 SegmentLoader 加载文件
         use crate::segment_loader::SegmentLoader;

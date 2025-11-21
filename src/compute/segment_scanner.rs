@@ -736,6 +736,20 @@ impl SegmentStream {
 
         let _doc_count = batch_groups.values().map(|v| v.len()).sum::<usize>();
 
+        eprintln!(
+            "  [SegmentStream] batch_groups: {} groups, {} total doc_ids",
+            batch_groups.len(),
+            _doc_count
+        );
+        for (batch_start_id, doc_ids) in batch_groups.iter().take(3) {
+            eprintln!(
+                "    batch_start_id={}: {} doc_ids (first few: {:?})",
+                batch_start_id,
+                doc_ids.len(),
+                &doc_ids[..doc_ids.len().min(5)]
+            );
+        }
+
         // 2. 批量读取这一批的 storage batches
         let batch_keys: Vec<u32> = batch_keys_set.into_iter().collect();
         let is_empty_projection = self.projection.as_ref().map_or(false, |p| p.is_empty());
@@ -770,6 +784,9 @@ impl SegmentStream {
 
             // 正常投影处理
             if let Some(source_batch) = source_batches.get(&batch_start_id) {
+                eprintln!("  [SegmentStream] Processing batch_start_id={}, source_batch has {} rows, {} doc_ids to process",
+                    batch_start_id, source_batch.num_rows(), doc_ids_in_batch.len());
+
                 let mut row_indices: Vec<usize> = doc_ids_in_batch
                     .iter()
                     .filter_map(|&doc_id| {
@@ -777,12 +794,20 @@ impl SegmentStream {
                         if row_idx < source_batch.num_rows() {
                             Some(row_idx)
                         } else {
+                            eprintln!("  [SegmentStream] WARNING: doc_id={}, batch_start_id={}, row_idx={} >= num_rows={}",
+                                doc_id, batch_start_id, row_idx, source_batch.num_rows());
                             None
                         }
                     })
                     .collect();
 
+                eprintln!(
+                    "  [SegmentStream] Extracted {} row indices",
+                    row_indices.len()
+                );
+
                 if row_indices.is_empty() {
+                    eprintln!("  [SegmentStream] No valid row indices, skipping batch");
                     continue;
                 }
 
@@ -797,11 +822,58 @@ impl SegmentStream {
                     .filter_map(|col| take(col.as_ref(), &indices_array, None).ok())
                     .collect();
 
-                if let Ok(batch) = RecordBatch::try_new(self.schema.clone(), final_columns) {
-                    result_batches.push(batch);
+                eprintln!(
+                    "  [SegmentStream] Created {} columns from take operation",
+                    final_columns.len()
+                );
+                eprintln!(
+                    "  [SegmentStream] Expected schema fields: {}",
+                    self.schema.fields().len()
+                );
+                eprintln!(
+                    "  [SegmentStream] Source batch columns: {}",
+                    source_batch.num_columns()
+                );
+
+                match RecordBatch::try_new(self.schema.clone(), final_columns.clone()) {
+                    Ok(batch) => {
+                        eprintln!(
+                            "  [SegmentStream] Created result batch with {} rows",
+                            batch.num_rows()
+                        );
+                        result_batches.push(batch);
+                    }
+                    Err(e) => {
+                        eprintln!("  [SegmentStream] Failed to create RecordBatch: {}", e);
+                        eprintln!(
+                            "  [SegmentStream] Schema: {:?}",
+                            self.schema
+                                .fields()
+                                .iter()
+                                .map(|f| (f.name(), f.data_type()))
+                                .collect::<Vec<_>>()
+                        );
+                        eprintln!(
+                            "  [SegmentStream] Column types: {:?}",
+                            final_columns
+                                .iter()
+                                .map(|c| c.data_type())
+                                .collect::<Vec<_>>()
+                        );
+                    }
                 }
+            } else {
+                eprintln!(
+                    "  [SegmentStream] No source_batch found for batch_start_id={}",
+                    batch_start_id
+                );
             }
         }
+
+        eprintln!(
+            "  [SegmentStream] Generated {} result batches",
+            result_batches.len()
+        );
 
         // 更新已返回的行数（用于 LIMIT 下推）
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();

@@ -7,7 +7,7 @@ use poem::{
 use serde_json::Value as JsonValue;
 
 use crate::{
-    catalog::PartitionStrategy,
+    catalog::{PartitionStrategy, PartitionValue, RangePartition},
     engine::Engine,
     schema::{field::FieldOption, PersistPolicy, Schema as CalmSchema},
     utils::arrow_utils,
@@ -85,10 +85,89 @@ pub struct Field {
     pub indexed: bool,
 }
 
+/// 分区策略类型枚举
+#[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq)]
+pub enum PartitionStrategyType {
+    /// 哈希分区
+    Hash,
+    /// 范围分区
+    Range,
+    /// 列表分区
+    List,
+    /// 自定义分区
+    Custom,
+    /// 无分区
+    None,
+}
+
+/// 分区值枚举（用于 Range 分区）
+#[derive(async_graphql::InputObject)]
+pub struct PartitionValueInput {
+    /// 整数值（可选）
+    pub int_value: Option<i64>,
+    /// 无符号整数值（可选）
+    pub uint_value: Option<u64>,
+    /// 字符串值（可选）
+    pub string_value: Option<String>,
+}
+
+impl From<PartitionValueInput> for PartitionValue {
+    fn from(val: PartitionValueInput) -> Self {
+        if let Some(i) = val.int_value {
+            PartitionValue::Int64(i)
+        } else if let Some(u) = val.uint_value {
+            PartitionValue::UInt64(u)
+        } else if let Some(s) = val.string_value {
+            PartitionValue::String(s)
+        } else {
+            PartitionValue::Int64(0) // 默认值
+        }
+    }
+}
+
+/// 范围分区定义
+#[derive(async_graphql::InputObject)]
+pub struct RangePartitionInput {
+    /// 起始值
+    pub start: PartitionValueInput,
+    /// 结束值
+    pub end: PartitionValueInput,
+    /// 分区 ID
+    pub partition_id: u64,
+}
+
+impl From<RangePartitionInput> for RangePartition {
+    fn from(val: RangePartitionInput) -> Self {
+        RangePartition {
+            start: val.start.into(),
+            end: val.end.into(),
+            partition_id: val.partition_id as usize,
+        }
+    }
+}
+
+/// 分区策略配置
+#[derive(async_graphql::InputObject)]
+pub struct PartitionStrategyInput {
+    /// 分区策略类型
+    pub strategy_type: PartitionStrategyType,
+    /// 分区字段名（Hash、Range、List 策略需要）
+    pub field: Option<String>,
+    /// 分区数量（Hash 策略需要）
+    pub num_partitions: Option<u64>,
+    /// 范围定义（Range 策略需要）
+    pub ranges: Option<Vec<RangePartitionInput>>,
+    /// 值映射（List 策略需要）格式："value1:0,value2:1,value3:2"
+    pub value_mapping: Option<String>,
+}
+
 #[derive(async_graphql::InputObject)]
 pub struct CreateTableInput {
     pub name: String,
     pub primary_key: Option<String>,
+    /// 分区策略（可选，默认使用 Hash 策略）
+    pub partition_strategy: Option<PartitionStrategyInput>,
+    /// 分区数量（仅在未指定 partition_strategy 时使用，默认为 1）
     pub partition_count: Option<u64>,
     pub fields: Vec<FieldInput>,
 }
@@ -134,6 +213,8 @@ pub struct SegmentInfo {
     pub deleted_count: u64,
     pub is_persisted: bool,
     pub base_path: Option<String>,
+    pub is_external_reference: bool,
+    pub external_data_path: Option<String>,
 }
 
 /// Table 详细信息（包含分区和段）
@@ -183,10 +264,10 @@ pub struct LoadSegmentInput {
     pub partition_id: Option<String>,
     /// 分区值（可选，用于生成 partition_id）
     pub partition_value: Option<String>,
-    /// 文件路径
+    /// 文件路径（支持 .parquet 和 .jsonl 格式）
     pub file_path: String,
-    /// 文件处理类型
-    pub handler_type: FileHandlerTypeEnum,
+    /// 文件处理类型（Parquet 必需：REFERENCE/MOVE/COPY，JSONL 不需要）
+    pub handler_type: Option<FileHandlerTypeEnum>,
 }
 
 #[derive(SimpleObject)]
@@ -273,6 +354,8 @@ impl QueryRoot {
                         deleted_count: segment.deleted_count(),
                         is_persisted: segment.is_persisted(),
                         base_path: segment.base_path(),
+                        is_external_reference: segment.is_external_reference(),
+                        external_data_path: segment.get_external_data_path(),
                     });
                 }
 
@@ -287,6 +370,8 @@ impl QueryRoot {
                     deleted_count: current_segment.deleted_count(),
                     is_persisted: current_segment.is_persisted(),
                     base_path: current_segment.base_path(),
+                    is_external_reference: current_segment.is_external_reference(),
+                    external_data_path: current_segment.get_external_data_path(),
                 });
 
                 partition_infos.push(PartitionInfo {
@@ -357,6 +442,8 @@ impl QueryRoot {
                         deleted_count,
                         is_persisted: segment.is_persisted(),
                         base_path: segment.base_path(),
+                        is_external_reference: segment.is_external_reference(),
+                        external_data_path: segment.get_external_data_path(),
                     });
                 }
 
@@ -375,6 +462,8 @@ impl QueryRoot {
                     deleted_count,
                     is_persisted: current_segment.is_persisted(),
                     base_path: current_segment.base_path(),
+                    is_external_reference: current_segment.is_external_reference(),
+                    external_data_path: current_segment.get_external_data_path(),
                 });
 
                 total_segments += segments.len();
@@ -528,28 +617,104 @@ impl MutationRoot {
             persist_policy: PersistPolicy::default(),
         };
 
-        // 确定主键字段用于分区策略
-        let partition_field = input.primary_key.clone().unwrap_or_else(|| {
-            fields
-                .first()
-                .map(|f| f.name().to_string())
-                .unwrap_or_default()
-        });
+        // 构建分区策略
+        let (partition_strategy, num_partitions) = if let Some(strategy_input) =
+            input.partition_strategy
+        {
+            match strategy_input.strategy_type {
+                PartitionStrategyType::Hash => {
+                    let field = strategy_input.field.ok_or_else(|| {
+                        async_graphql::Error::new("Hash strategy requires 'field' parameter")
+                    })?;
+                    let num_partitions = strategy_input.num_partitions.ok_or_else(|| {
+                        async_graphql::Error::new(
+                            "Hash strategy requires 'num_partitions' parameter",
+                        )
+                    })? as usize;
 
-        let partition_count = input.partition_count.unwrap_or(1);
-        let partition_count_usize: usize = partition_count.try_into().unwrap();
+                    (
+                        PartitionStrategy::Hash {
+                            field,
+                            num_partitions,
+                        },
+                        num_partitions,
+                    )
+                }
+                PartitionStrategyType::Range => {
+                    let field = strategy_input.field.ok_or_else(|| {
+                        async_graphql::Error::new("Range strategy requires 'field' parameter")
+                    })?;
+                    let ranges_input = strategy_input.ranges.ok_or_else(|| {
+                        async_graphql::Error::new("Range strategy requires 'ranges' parameter")
+                    })?;
+
+                    let ranges: Vec<RangePartition> =
+                        ranges_input.into_iter().map(|r| r.into()).collect();
+
+                    let num_partitions = ranges.len();
+
+                    (PartitionStrategy::Range { field, ranges }, num_partitions)
+                }
+                PartitionStrategyType::List => {
+                    let field = strategy_input.field.ok_or_else(|| {
+                        async_graphql::Error::new("List strategy requires 'field' parameter")
+                    })?;
+                    let value_mapping_str = strategy_input.value_mapping.ok_or_else(|| {
+                        async_graphql::Error::new("List strategy requires 'value_mapping' parameter (format: 'value1:0,value2:1')")
+                    })?;
+
+                    // 解析值映射 "value1:0,value2:1,value3:2"
+                    let mut values = std::collections::HashMap::new();
+                    for pair in value_mapping_str.split(',') {
+                        let parts: Vec<&str> = pair.split(':').collect();
+                        if parts.len() == 2 {
+                            let value = parts[0].trim().to_string();
+                            let partition_id: usize = parts[1].trim().parse().map_err(|_| {
+                                async_graphql::Error::new(format!(
+                                    "Invalid partition_id in value_mapping: {}",
+                                    parts[1]
+                                ))
+                            })?;
+                            values.insert(value, partition_id);
+                        }
+                    }
+
+                    let num_partitions = values.values().max().map(|v| v + 1).unwrap_or(1);
+
+                    (PartitionStrategy::List { field, values }, num_partitions)
+                }
+                PartitionStrategyType::Custom => {
+                    // Custom 分区不需要其他参数
+                    (PartitionStrategy::Custom, 0)
+                }
+                PartitionStrategyType::None => {
+                    // None 分区策略，所有数据在一个 partition
+                    (PartitionStrategy::None, 1)
+                }
+            }
+        } else {
+            // 如果未指定分区策略，使用默认的 Hash 策略
+            let partition_field = input.primary_key.clone().unwrap_or_else(|| {
+                fields
+                    .first()
+                    .map(|f| f.name().to_string())
+                    .unwrap_or_default()
+            });
+
+            let partition_count = input.partition_count.unwrap_or(1) as usize;
+
+            (
+                PartitionStrategy::Hash {
+                    field: partition_field,
+                    num_partitions: partition_count,
+                },
+                partition_count,
+            )
+        };
 
         // 创建表
         engine
-            .create_table(
-                &input.name,
-                schema,
-                PartitionStrategy::Hash {
-                    field: partition_field,
-                    num_partitions: partition_count_usize,
-                },
-                partition_count_usize,
-            )
+            .create_table(&input.name, schema, partition_strategy, num_partitions)
             .await
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
 
@@ -578,7 +743,7 @@ impl MutationRoot {
 
         Ok(Table {
             name: input.name,
-            partition_count,
+            partition_count: num_partitions as u64,
             fields: field_info,
             primary_key: input.primary_key,
         })
@@ -686,8 +851,8 @@ impl MutationRoot {
             )));
         }
 
-        // 转换 handler_type
-        let handler_type: crate::segment_loader::FileHandlerType = input.handler_type.into();
+        // 转换 handler_type（可选）
+        let handler_type = input.handler_type.map(|ht| ht.into());
 
         // 调用 engine 的 load_segment 方法
         let doc_count = engine

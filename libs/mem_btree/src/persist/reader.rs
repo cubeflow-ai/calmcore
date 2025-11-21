@@ -1119,7 +1119,7 @@ mod tests {
 
     impl WriteSerializer<i64, i64> for I64Serializer {
         fn serialize_keys<'a>(&self, keys: &'a Vec<i64>) -> Cow<'a, [u8]> {
-            let mut buf = Vec::with_capacity(keys.len() * 8);
+            let mut buf = Vec::with_capacity(keys.len().saturating_mul(8));
             i64_coder::write_delta(&mut buf, keys).unwrap();
             Cow::Owned(buf)
         }

@@ -303,7 +303,7 @@ impl Segment {
             start,
             doc_id_gen: AtomicU32::new(doc_id_gen),
             max_doc_id: AtomicU32::new(max_doc_id_relative),
-            persisted: AtomicBool::new(true), // 引用外部文件,视为已持久化
+            persisted: AtomicBool::new(false), // 索引还未持久化，需要持久化
             created_at: Instant::now(),
             pk_bloomfilter: RwLock::new(bloom),
             deleted: RwLock::default(),
@@ -1053,8 +1053,14 @@ impl Segment {
             );
         }
 
-        // 4. Persist row_data using BTree disk format (to temp directory)
-        {
+        // 4. Persist row_data (skip for external Parquet references)
+        let is_external_parquet = {
+            let row_data = self.row_data.read().unwrap();
+            matches!(*row_data, RowDataStore::Parquet(_))
+        };
+
+        if !is_external_parquet {
+            // Only persist row_data for Memory/Disk segments
             let rowdata_path = format!("{}/rowdata", segment_tmp_path);
             std::fs::create_dir_all(&rowdata_path)
                 .map_err(|e| CoreError::IOError(format!("Failed to create rowdata dir: {}", e)))?;
@@ -1065,15 +1071,27 @@ impl Segment {
 
             // Persist row data using TreeWriter
             self.persist_row_data(&rowdata_path, row_data_clone, &deleted)?;
-        };
+        } else {
+            // For external Parquet, save the reference path in metadata
+            println!("  Skipping row_data persist (external Parquet reference)");
+        }
 
         // 5. Save segment metadata (to temp directory)
         let meta_path = format!("{}/meta.json", segment_tmp_path);
-        let meta = serde_json::json!({
-            "start": self.start,
-            "doc_id_gen": self.doc_id_gen.load(Ordering::Relaxed),
-            "max_doc_id": self.max_doc_id.load(Ordering::Relaxed),
-        });
+        let meta = if is_external_parquet {
+            serde_json::json!({
+                "start": self.start,
+                "doc_id_gen": self.doc_id_gen.load(Ordering::Relaxed),
+                "max_doc_id": self.max_doc_id.load(Ordering::Relaxed),
+                "external_parquet": self.base_path.clone(),
+            })
+        } else {
+            serde_json::json!({
+                "start": self.start,
+                "doc_id_gen": self.doc_id_gen.load(Ordering::Relaxed),
+                "max_doc_id": self.max_doc_id.load(Ordering::Relaxed),
+            })
+        };
         std::fs::write(&meta_path, meta.to_string())
             .map_err(|e| CoreError::IOError(format!("Failed to write segment meta: {}", e)))?;
 
@@ -1113,8 +1131,8 @@ impl Segment {
             }
         }
 
-        // Phase 4: Replace in-memory row_data with disk-based reader (Parquet or BTree)
-        {
+        // Phase 4: Replace in-memory row_data with disk-based reader (skip for external Parquet)
+        if !is_external_parquet {
             let rowdata_path = format!("{}/rowdata", segment_path);
             let parquet_path = format!("{}/rowdata.parquet", rowdata_path);
             let disk_row_data = if std::path::Path::new(&parquet_path).exists() {
@@ -1125,6 +1143,8 @@ impl Segment {
                 RowDataStore::new_disk(&rowdata_path, U32RecordBatchSerializer::default())?
             };
             *self.row_data.write().unwrap() = disk_row_data;
+        } else {
+            println!("  Keeping external Parquet reference (no row_data replacement)");
         }
 
         // 标记为已持久化
@@ -1274,18 +1294,45 @@ impl Segment {
             .map(|(i, f)| (f.name().to_string(), i))
             .collect();
 
-        // 5. Load row_data from disk (check for Parquet format first, then BTree)
-        let row_data_path = format!("{}/rowdata", segment_path);
-        let parquet_path = format!("{}/rowdata.parquet", row_data_path);
-        let row_data = if std::path::Path::new(&parquet_path).exists() {
-            println!("  Loading row_data from Parquet: {}", parquet_path);
-            RowDataStore::new_parquet(&parquet_path)?
-        } else if std::path::Path::new(&row_data_path).exists() {
-            println!("  Loading row_data from BTree: {}", row_data_path);
-            RowDataStore::new_disk(&row_data_path, U32RecordBatchSerializer::default())?
+        // 5. Load row_data from disk (check meta.json for external reference first)
+        let meta_path = format!("{}/meta.json", segment_path);
+        let external_parquet_path = if std::path::Path::new(&meta_path).exists() {
+            let meta_content = std::fs::read_to_string(&meta_path).ok();
+            meta_content
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|meta| meta["external_parquet"].as_str().map(String::from))
         } else {
-            println!("  No row_data found, creating empty store");
-            RowDataStore::new_memory(32)
+            None
+        };
+
+        let (row_data, base_path) = if let Some(external_path) = external_parquet_path {
+            println!(
+                "  Loading row_data from external Parquet: {}",
+                external_path
+            );
+            (
+                RowDataStore::new_parquet(&external_path)?,
+                Some(external_path),
+            )
+        } else {
+            let row_data_path = format!("{}/rowdata", segment_path);
+            let parquet_path = format!("{}/rowdata.parquet", row_data_path);
+            if std::path::Path::new(&parquet_path).exists() {
+                println!("  Loading row_data from Parquet: {}", parquet_path);
+                (
+                    RowDataStore::new_parquet(&parquet_path)?,
+                    Some(segment_path.clone()),
+                )
+            } else if std::path::Path::new(&row_data_path).exists() {
+                println!("  Loading row_data from BTree: {}", row_data_path);
+                (
+                    RowDataStore::new_disk(&row_data_path, U32RecordBatchSerializer::default())?,
+                    Some(segment_path.clone()),
+                )
+            } else {
+                println!("  No row_data found, creating empty store");
+                (RowDataStore::new_memory(32), Some(segment_path.clone()))
+            }
         };
 
         let segment = Self {
@@ -1300,7 +1347,7 @@ impl Segment {
             field_index,
             schema,
             row_data: RwLock::new(row_data),
-            base_path: Some(segment_path),
+            base_path,
         };
 
         println!("Frozen segment loaded in {:?}", start.elapsed());
@@ -1315,6 +1362,19 @@ impl Segment {
 
     /// Get segment base path (if persisted)
     pub fn base_path(&self) -> Option<String> {
+        self.base_path.clone()
+    }
+
+    /// Check if this segment references an external data file (e.g., Parquet)
+    /// Returns true if the segment uses an external file instead of internal storage
+    pub fn is_external_reference(&self) -> bool {
+        let row_data = self.row_data.read().unwrap();
+        matches!(*row_data, RowDataStore::Parquet(_))
+    }
+
+    /// Get the path of the external data file if this segment references one
+    /// Returns None if the segment uses internal storage
+    pub fn get_external_data_path(&self) -> Option<String> {
         self.base_path.clone()
     }
 
