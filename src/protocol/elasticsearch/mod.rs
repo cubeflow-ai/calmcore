@@ -6,7 +6,7 @@ use poem::{
     http::StatusCode,
     middleware::{AddData, SetHeader},
     web::{Data, Json, Path},
-    Body, EndpointExt, Response, Route, Server,
+    EndpointExt, Response, Route, Server,
 };
 use poem_openapi::types::ToJSON;
 use serde::{Deserialize, Serialize};
@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 
 use crate::{
     catalog::PartitionStrategy,
-    engine::{self, Engine},
+    engine::Engine,
     schema::{field::FieldOption, Schema},
-    utils::error::{CoreError, CoreResult},
+    utils::error::CoreError,
 };
 mod query_converter;
 mod search_engine;
@@ -99,6 +99,7 @@ impl ElasticsearchServer {
 #[derive(Debug, Deserialize)]
 struct CreateIndexRequest {
     mappings: Option<Mappings>,
+    #[allow(dead_code)]
     settings: Option<Value>,
 }
 
@@ -115,6 +116,7 @@ struct PropertyMapping {
     index: Option<bool>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
 struct IndexDocumentRequest {
     #[serde(flatten)]
@@ -129,12 +131,14 @@ struct SearchRequest {
     sort: Option<Value>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: ErrorDetail,
     status: u16,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct ErrorDetail {
     #[serde(rename = "type")]
@@ -1379,6 +1383,7 @@ fn format_sql_value(value: &Value) -> Option<String> {
 }
 
 /// 应用查询过滤
+#[allow(dead_code)]
 fn apply_query_filter(docs: &[Value], query: &Value) -> Vec<Value> {
     // 简单的查询实现，支持 match_all 和 term 查询
     if let Some(query_obj) = query.as_object() {
@@ -1439,6 +1444,7 @@ fn apply_query_filter(docs: &[Value], query: &Value) -> Vec<Value> {
 }
 
 /// 检查字段是否匹配
+#[allow(dead_code)]
 fn check_field_match(doc: &Value, field: &str, expected_value: &Value) -> bool {
     if let Some(doc_obj) = doc.as_object() {
         if let Some(field_value) = doc_obj.get(field) {
@@ -1454,7 +1460,7 @@ fn check_field_match(doc: &Value, field: &str, expected_value: &Value) -> bool {
 async fn insert_document(
     server: &Arc<ElasticsearchServer>,
     index: &str,
-    id: &str,
+    _id: &str,
     doc: Value,
 ) -> Result<(), CoreError> {
     // 获取表的元数据以确定分区策略
@@ -1492,7 +1498,7 @@ async fn insert_document(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Value};
+    use serde_json::json;
 
     #[test]
     fn test() {

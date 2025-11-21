@@ -460,7 +460,7 @@ impl Engine {
     /// 已废弃：使用带 table_name 的版本
     #[allow(dead_code)]
     #[deprecated(note = "需要提供 table_name")]
-    pub async fn create_partition(&self, id: u64, _schema: Schema) -> Arc<Partition> {
+    pub async fn create_partition(&self, _id: u64, _schema: Schema) -> Arc<Partition> {
         panic!("create_partition is deprecated, use create_partition_with_table instead");
     }
 

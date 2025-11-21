@@ -734,7 +734,6 @@ fn build_record_batch(
     use datafusion::arrow::array::TimestampMillisecondArray;
     use datafusion::arrow::datatypes::TimeUnit;
 
-    let num_rows = rows.len();
     let mut arrays: Vec<ArrayRef> = Vec::new();
     let mut arrow_fields: Vec<Field> = Vec::new();
 
@@ -1092,7 +1091,7 @@ fn format_arrow_value(array: &ArrayRef, index: usize) -> String {
         }
         DataType::Timestamp(unit, _) => {
             // 处理时间戳类型，转换为本地时区显示
-            use chrono::{Local, TimeZone, Utc};
+            use chrono::{TimeZone, Utc};
             use datafusion::arrow::array::PrimitiveArray;
 
             match unit {
