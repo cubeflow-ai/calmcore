@@ -53,8 +53,93 @@ pub enum PartitionStrategy {
         values: HashMap<String, usize>,
     },
 
+    /// 自定义分区 - 用户通过load文件来加载分区信息
+    Custom,
+
     /// 无分区 - 所有数据在一个 partition
     None,
+}
+
+impl PartitionStrategy {
+    pub fn router_field(&self) -> Option<&String> {
+        match self {
+            PartitionStrategy::Hash { field, .. } => Some(field),
+            PartitionStrategy::Range { field, .. } => Some(field),
+            PartitionStrategy::List { field, .. } => Some(field),
+            PartitionStrategy::Custom => None,
+            PartitionStrategy::None => None,
+        }
+    }
+
+    /// 根据分区策略生成 partition_id
+    pub fn generate_partition_id(
+        &self,
+        table_name: &str,
+        partition_index: usize,
+        partition_value: Option<&str>,
+    ) -> String {
+        match self {
+            PartitionStrategy::Hash { .. } => {
+                // Hash 分区：使用19位数字，不足补0
+                format!("{:019}", partition_index)
+            }
+            PartitionStrategy::Range { ranges, .. } => {
+                // Range 分区：使用 start_end 格式
+                if let Some(range) = ranges.get(partition_index) {
+                    format!(
+                        "{}_{}",
+                        Self::format_partition_value(&range.start),
+                        Self::format_partition_value(&range.end)
+                    )
+                } else {
+                    format!("range_{}", partition_index)
+                }
+            }
+            PartitionStrategy::List { .. } => {
+                // List 分区：使用 value 值，处理特殊字符
+                if let Some(value) = partition_value {
+                    Self::sanitize_filename(value)
+                } else {
+                    format!("list_{}", partition_index)
+                }
+            }
+            PartitionStrategy::Custom => {
+                // Custom 分区：用户自定义，使用 value 或 index
+                if let Some(value) = partition_value {
+                    Self::sanitize_filename(value)
+                } else {
+                    format!("custom_{}", partition_index)
+                }
+            }
+            PartitionStrategy::None => {
+                // None 分区：使用表名
+                table_name.to_string()
+            }
+        }
+    }
+
+    /// 格式化 PartitionValue 为字符串
+    fn format_partition_value(value: &PartitionValue) -> String {
+        match value {
+            PartitionValue::Int64(v) => v.to_string(),
+            PartitionValue::UInt64(v) => v.to_string(),
+            PartitionValue::String(v) => Self::sanitize_filename(v),
+            PartitionValue::MinValue => "min".to_string(),
+            PartitionValue::MaxValue => "max".to_string(),
+        }
+    }
+
+    /// 清理文件名中的特殊字符
+    fn sanitize_filename(value: &str) -> String {
+        value
+            .chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                c if c.is_control() => '_',
+                c => c,
+            })
+            .collect()
+    }
 }
 
 /// 范围分区配置

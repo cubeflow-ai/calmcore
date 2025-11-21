@@ -300,21 +300,54 @@ impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
         end: &datafusion::scalar::ScalarValue,
         end_inclusive: bool,
     ) -> Option<RoaringBitmap> {
+        log::warn!(
+            "🔍 [GenericIndexedField::range] field={}, start={:?}, end={:?}",
+            self.field.name(),
+            start,
+            end
+        );
+
         if !K::supports_range() {
+            log::warn!(
+                "⚠️  [GenericIndexedField::range] field={} does not support range queries",
+                self.field.name()
+            );
             return None;
         }
 
         // 处理 NULL 作为无界的情况
         let start_key = if matches!(start, datafusion::scalar::ScalarValue::Null) {
+            log::warn!("🔍 [range] start is NULL -> unbounded");
             None
         } else {
-            Some(K::from_scalar(start)?)
+            log::warn!("🔍 [range] converting start: {:?}", start);
+            let converted = K::from_scalar(start);
+            if converted.is_none() {
+                log::error!(
+                    "❌ [range] FAILED to convert start={:?} for field={}",
+                    start,
+                    self.field.name()
+                );
+                return None;
+            }
+            converted
         };
 
         let end_key = if matches!(end, datafusion::scalar::ScalarValue::Null) {
+            log::warn!("🔍 [range] end is NULL -> unbounded");
             None
         } else {
-            Some(K::from_scalar(end)?)
+            log::warn!("🔍 [range] converting end: {:?}", end);
+            let converted = K::from_scalar(end);
+            if converted.is_none() {
+                log::error!(
+                    "❌ [range] FAILED to convert end={:?} for field={}",
+                    end,
+                    self.field.name()
+                );
+                return None;
+            }
+            converted
         };
 
         let indexs = self.indexs.read().unwrap();
@@ -334,21 +367,42 @@ impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
         end: &datafusion::scalar::ScalarValue,
         end_inclusive: bool,
     ) -> Option<RoaringBitmap> {
+        log::warn!(
+            "🔍 [GenericIndexedField::range_union] field={}, start={:?}, end={:?}",
+            self.field.name(),
+            start,
+            end
+        );
+
         if !K::supports_range() {
             return None;
         }
 
         // 处理 NULL 作为无界的情况
         let start_key = if matches!(start, datafusion::scalar::ScalarValue::Null) {
+            log::warn!("🔍 [range_union] start is NULL -> unbounded");
             None
         } else {
-            Some(K::from_scalar(start)?)
+            log::warn!("🔍 [range_union] converting start: {:?}", start);
+            let converted = K::from_scalar(start);
+            if converted.is_none() {
+                log::error!("❌ [range_union] FAILED to convert start={:?}", start);
+                return None;
+            }
+            converted
         };
 
         let end_key = if matches!(end, datafusion::scalar::ScalarValue::Null) {
+            log::warn!("🔍 [range_union] end is NULL -> unbounded");
             None
         } else {
-            Some(K::from_scalar(end)?)
+            log::warn!("🔍 [range_union] converting end: {:?}", end);
+            let converted = K::from_scalar(end);
+            if converted.is_none() {
+                log::error!("❌ [range_union] FAILED to convert end={:?}", end);
+                return None;
+            }
+            converted
         };
 
         let indexs = self.indexs.read().unwrap();

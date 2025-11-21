@@ -317,11 +317,12 @@ impl DistributedExecutor {
         // 并行查询所有 partition
         let mut all_batches = Vec::new();
 
-        for partition_id in 0..num_partitions {
+        for partition_index in 0..num_partitions {
+            let partition_id = meta.partition_strategy.generate_partition_id(&table_name, partition_index, None);
             match self
                 .execute_on_partition(
                     &table_name,
-                    partition_id as u64,
+                    &partition_id,
                     &partition_sql,
                     sort_fields.clone(),
                     limit_hint,
@@ -369,7 +370,7 @@ impl DistributedExecutor {
     async fn execute_on_partition(
         &self,
         table_name: &str,
-        partition_id: u64,
+        partition_id: &str,
         sql: &str,
         sort_hints: Option<Vec<(String, bool)>>,
         limit_hint: Option<usize>,
@@ -559,7 +560,7 @@ impl DistributedExecutor {
     async fn execute_sql_on_partition_old(
         &self,
         table_name: &str,
-        partition_id: u64,
+        partition_id: &str,
         sql: &str,
     ) -> CoreResult<Vec<RecordBatch>> {
         eprintln!(
@@ -661,9 +662,10 @@ impl DistributedExecutor {
         // 并行在所有分区上执行聚合
         let mut partition_results = Vec::new();
 
-        for partition_id in 0..num_partitions {
+        for partition_index in 0..num_partitions {
+            let partition_id = meta.partition_strategy.generate_partition_id(&table_name, partition_index, None);
             match self
-                .execute_sql_on_partition_old(&table_name, partition_id as u64, sql)
+                .execute_sql_on_partition_old(&table_name, &partition_id, sql)
                 .await
             {
                 Ok(batches) => {
@@ -706,13 +708,17 @@ impl DistributedExecutor {
         // 创建一个临时的SessionContext来执行查询并获取schema
         let ctx = SessionContext::new();
 
+        // 获取表的元数据以生成 partition_id
+        let meta = self.engine.get_table_meta(table_name)?;
+        let partition_id = meta.partition_strategy.generate_partition_id(table_name, 0, None);
+
         // 获取第一个partition来注册表（只是为了获取schema）
         let partition = self
             .engine
-            .get_partition(table_name, 0)
+            .get_partition(table_name, &partition_id)
             .await
             .ok_or_else(|| {
-                CoreError::NotExisted(format!("Partition 0 not found for table '{}'", table_name))
+                CoreError::NotExisted(format!("Partition {} not found for table '{}'", partition_id, table_name))
             })?;
 
         let provider = Arc::new(crate::compute::PartitionTableProvider::new(partition));

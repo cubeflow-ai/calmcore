@@ -26,3 +26,5 @@ Cargo.lock
 validate_data/
 big_data/
 .DS_Store
+test_suite/datasets
+test_suite/test_data

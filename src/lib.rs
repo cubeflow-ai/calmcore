@@ -5,6 +5,7 @@ pub mod partition;
 pub mod query_rewriter;
 pub mod schema;
 pub mod segment;
+pub mod segment_loader;
 #[macro_use]
 pub mod utils;
 pub mod protocol;

@@ -118,10 +118,83 @@ pub struct QueryResult {
     pub total_rows: usize,
 }
 
+/// Partition 信息
+#[derive(SimpleObject)]
+pub struct PartitionInfo {
+    pub partition_id: String,
+    pub segment_count: usize,
+    pub segments: Vec<SegmentInfo>,
+}
+
+/// Segment 信息
+#[derive(SimpleObject)]
+pub struct SegmentInfo {
+    pub segment_id: u64,
+    pub doc_count: u32,
+    pub deleted_count: u64,
+    pub is_persisted: bool,
+    pub base_path: Option<String>,
+}
+
+/// Table 详细信息（包含分区和段）
+#[derive(SimpleObject)]
+pub struct TableDetail {
+    pub name: String,
+    pub partition_count: usize,
+    pub total_segments: usize,
+    pub total_documents: u64,
+    pub fields: Vec<Field>,
+    pub primary_key: Option<String>,
+    pub partitions: Vec<PartitionInfo>,
+}
+
 #[derive(async_graphql::InputObject)]
 pub struct InsertDataInput {
     pub table: String,
     pub data: Vec<JsonValue>,
+}
+
+/// 文件处理类型枚举
+#[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq)]
+pub enum FileHandlerTypeEnum {
+    /// 引用文件路径（不移动原文件）
+    Reference,
+    /// 移动文件
+    Move,
+    /// 拷贝文件
+    Copy,
+}
+
+impl From<FileHandlerTypeEnum> for crate::segment_loader::FileHandlerType {
+    fn from(val: FileHandlerTypeEnum) -> Self {
+        match val {
+            FileHandlerTypeEnum::Reference => crate::segment_loader::FileHandlerType::Reference,
+            FileHandlerTypeEnum::Move => crate::segment_loader::FileHandlerType::Move,
+            FileHandlerTypeEnum::Copy => crate::segment_loader::FileHandlerType::Copy,
+        }
+    }
+}
+
+#[derive(async_graphql::InputObject)]
+pub struct LoadSegmentInput {
+    /// 表名
+    pub table: String,
+    /// 分区ID（可选，如果不提供则使用 partition_value 生成）
+    pub partition_id: Option<String>,
+    /// 分区值（可选，用于生成 partition_id）
+    pub partition_value: Option<String>,
+    /// 文件路径
+    pub file_path: String,
+    /// 文件处理类型
+    pub handler_type: FileHandlerTypeEnum,
+}
+
+#[derive(SimpleObject)]
+pub struct LoadSegmentResult {
+    pub success: bool,
+    pub documents_loaded: usize,
+    pub partition_id: String,
+    pub message: String,
 }
 
 // ===== Query Root =====
@@ -174,6 +247,154 @@ impl QueryRoot {
             partition_count: meta.parallel_workers as u64,
             fields,
             primary_key: meta.schema.primary_key.clone(),
+        }))
+    }
+
+    /// 获取表的所有分区信息
+    async fn partitions(&self, ctx: &Context<'_>, table: String) -> Result<Vec<PartitionInfo>> {
+        let engine = ctx.data::<Arc<Engine>>()?;
+
+        // 获取表的所有分区 ID
+        let partition_ids = engine.list_partitions(&table).await;
+
+        let mut partition_infos = Vec::new();
+
+        for partition_id in partition_ids {
+            if let Some(partition) = engine.get_partition(&table, &partition_id).await {
+                // 获取 frozen segments
+                let frozen_segments = partition.get_frozen_segments();
+                let mut segments = Vec::new();
+
+                // 收集 frozen segments 信息
+                for (seg_id, segment) in frozen_segments.iter() {
+                    segments.push(SegmentInfo {
+                        segment_id: *seg_id,
+                        doc_count: segment.doc_count(),
+                        deleted_count: segment.deleted_count(),
+                        is_persisted: segment.is_persisted(),
+                        base_path: segment.base_path(),
+                    });
+                }
+
+                // 释放读锁
+                drop(frozen_segments);
+
+                // 获取当前 segment（ID = 0 表示当前活跃 segment）
+                let current_segment = partition.get_current_segment();
+                segments.push(SegmentInfo {
+                    segment_id: 0,
+                    doc_count: current_segment.doc_count(),
+                    deleted_count: current_segment.deleted_count(),
+                    is_persisted: current_segment.is_persisted(),
+                    base_path: current_segment.base_path(),
+                });
+
+                partition_infos.push(PartitionInfo {
+                    partition_id,
+                    segment_count: segments.len(),
+                    segments,
+                });
+            }
+        }
+
+        Ok(partition_infos)
+    }
+
+    /// 获取表的完整详情（包括分区和段）
+    async fn table_detail(&self, ctx: &Context<'_>, name: String) -> Result<Option<TableDetail>> {
+        let engine = ctx.data::<Arc<Engine>>()?;
+
+        let meta = match engine.get_table_meta(&name) {
+            Ok(meta) => meta,
+            Err(_) => return Ok(None),
+        };
+
+        let fields = meta
+            .schema
+            .fields
+            .iter()
+            .map(|f| {
+                let field_type = match f {
+                    FieldOption::Keyword { .. } => "keyword",
+                    FieldOption::I64 { .. } => "i64",
+                    FieldOption::F64 { .. } => "f64",
+                    FieldOption::Boolean { .. } => "boolean",
+                    FieldOption::I32 { .. } => "i32",
+                    FieldOption::F32 { .. } => "f32",
+                    FieldOption::Timestamp { .. } => "timestamp",
+                    _ => "unknown",
+                };
+
+                Field {
+                    name: f.name().to_string(),
+                    field_type: field_type.to_string(),
+                    indexed: f.is_index(),
+                }
+            })
+            .collect();
+
+        // 获取所有分区信息
+        let partition_ids = engine.list_partitions(&name).await;
+        let mut partition_infos = Vec::new();
+        let mut total_segments = 0;
+        let mut total_documents = 0u64;
+
+        for partition_id in partition_ids {
+            if let Some(partition) = engine.get_partition(&name, &partition_id).await {
+                // 获取 frozen segments
+                let frozen_segments = partition.get_frozen_segments();
+                let mut segments = Vec::new();
+
+                // 收集 frozen segments 信息
+                for (seg_id, segment) in frozen_segments.iter() {
+                    let doc_count = segment.doc_count();
+                    let deleted_count = segment.deleted_count();
+                    total_documents += doc_count as u64 - deleted_count;
+
+                    segments.push(SegmentInfo {
+                        segment_id: *seg_id,
+                        doc_count,
+                        deleted_count,
+                        is_persisted: segment.is_persisted(),
+                        base_path: segment.base_path(),
+                    });
+                }
+
+                // 释放读锁
+                drop(frozen_segments);
+
+                // 获取当前 segment
+                let current_segment = partition.get_current_segment();
+                let doc_count = current_segment.doc_count();
+                let deleted_count = current_segment.deleted_count();
+                total_documents += doc_count as u64 - deleted_count;
+
+                segments.push(SegmentInfo {
+                    segment_id: 0,
+                    doc_count,
+                    deleted_count,
+                    is_persisted: current_segment.is_persisted(),
+                    base_path: current_segment.base_path(),
+                });
+
+                total_segments += segments.len();
+
+                partition_infos.push(PartitionInfo {
+                    partition_id,
+                    segment_count: segments.len(),
+                    segments,
+                });
+            }
+        }
+
+        Ok(Some(TableDetail {
+            name: meta.schema.name.clone(),
+            partition_count: partition_infos.len(),
+            total_segments,
+            total_documents,
+            fields,
+            primary_key: meta.schema.primary_key.clone(),
+            partitions: partition_infos,
         }))
     }
 
@@ -424,7 +645,7 @@ impl MutationRoot {
 
             // 3. 获取 partition
             let partition = engine
-                .get_partition(&input.table, partition_id)
+                .get_partition(&input.table, &partition_id)
                 .await
                 .ok_or_else(|| {
                     async_graphql::Error::new(format!(
@@ -445,6 +666,62 @@ impl MutationRoot {
             success: true,
             rows_inserted: total_inserted,
             message: format!("Successfully inserted {} rows", total_inserted),
+        })
+    }
+
+    /// 加载外部文件到 segment（用于 Custom 分区）
+    async fn load_segment(
+        &self,
+        ctx: &Context<'_>,
+        input: LoadSegmentInput,
+    ) -> Result<LoadSegmentResult> {
+        let engine = ctx.data::<Arc<Engine>>()?;
+
+        // 验证文件路径
+        let file_path = std::path::PathBuf::from(&input.file_path);
+        if !file_path.exists() {
+            return Err(async_graphql::Error::new(format!(
+                "File does not exist: {}",
+                input.file_path
+            )));
+        }
+
+        // 转换 handler_type
+        let handler_type: crate::segment_loader::FileHandlerType = input.handler_type.into();
+
+        // 调用 engine 的 load_segment 方法
+        let doc_count = engine
+            .load_segment(
+                &input.table,
+                input.partition_id.clone(),
+                input.partition_value.clone(),
+                file_path,
+                handler_type,
+            )
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Load segment failed: {}", e)))?;
+
+        // 确定使用的 partition_id
+        let partition_id = if let Some(id) = input.partition_id {
+            id
+        } else if let Some(value) = input.partition_value {
+            let meta = engine
+                .get_table_meta(&input.table)
+                .map_err(|e| async_graphql::Error::new(format!("Table not found: {}", e)))?;
+            meta.partition_strategy
+                .generate_partition_id(&input.table, 0, Some(&value))
+        } else {
+            "unknown".to_string()
+        };
+
+        Ok(LoadSegmentResult {
+            success: true,
+            documents_loaded: doc_count,
+            partition_id,
+            message: format!(
+                "Successfully loaded {} documents from {}",
+                doc_count, input.file_path
+            ),
         })
     }
 }

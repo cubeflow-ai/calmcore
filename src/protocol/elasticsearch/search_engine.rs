@@ -35,8 +35,9 @@ impl SearchEngine {
 
         // 从所有分区收集数据
         let mut all_docs = Vec::new();
-        for partition_id in 0..meta.parallel_workers {
-            if let Some(partition) = self.engine.get_partition(index, partition_id as u64).await {
+        for partition_index in 0..meta.parallel_workers {
+            let partition_id = meta.partition_strategy.generate_partition_id(index, partition_index, None);
+            if let Some(partition) = self.engine.get_partition(index, &partition_id).await {
                 // 从分区读取数据
                 let partition_docs = self.read_partition_data(&partition, index).await?;
                 all_docs.extend(partition_docs);

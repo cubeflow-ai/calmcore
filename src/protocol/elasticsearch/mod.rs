@@ -8,14 +8,15 @@ use poem::{
     web::{Data, Json, Path},
     Body, EndpointExt, Response, Route, Server,
 };
+use poem_openapi::types::ToJSON;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
     catalog::PartitionStrategy,
-    engine::Engine,
+    engine::{self, Engine},
     schema::{field::FieldOption, Schema},
-    utils::error::CoreError,
+    utils::error::{CoreError, CoreResult},
 };
 mod query_converter;
 mod search_engine;
@@ -381,7 +382,7 @@ async fn index_document_with_id(
 
     let partition = server
         .engine
-        .get_partition(&index, partition_id)
+        .get_partition(&index, &partition_id)
         .await
         .ok_or_else(|| internal_error("Partition not found".to_string()))?;
 
@@ -430,7 +431,7 @@ async fn index_document(
 
     let partition = server
         .engine
-        .get_partition(&index, partition_id)
+        .get_partition(&index, &partition_id)
         .await
         .ok_or_else(|| internal_error("Partition not found".to_string()))?;
 
@@ -469,7 +470,7 @@ async fn get_document(
 
     let partition = server
         .engine
-        .get_partition(&index, partition_id)
+        .get_partition(&index, &partition_id)
         .await
         .ok_or_else(|| internal_error("Partition not found".to_string()))?;
 
@@ -1463,27 +1464,12 @@ async fn insert_document(
         .map_err(|e| not_found(e.to_string()))?;
 
     // 根据分区策略提取分区字段的值
-    let partition_value = match &table_meta.partition_strategy {
-        crate::catalog::PartitionStrategy::Hash { field, .. }
-        | crate::catalog::PartitionStrategy::Range { field, .. }
-        | crate::catalog::PartitionStrategy::List { field, .. } => {
-            // 从文档中提取分区字段的值
-            doc.get(field)
-                .and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    Value::Number(n) => Some(n.to_string()),
-                    Value::Bool(b) => Some(b.to_string()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    internal_error(format!("Partition field '{}' not found in document", field))
-                })?
-        }
-        crate::catalog::PartitionStrategy::None => {
-            // 无分区策略，使用固定值
-            "0".to_string()
-        }
-    };
+
+    let partition_value = table_meta
+        .partition_strategy
+        .router_field()
+        .and_then(|f| Some(doc.get(f).to_json_string()))
+        .unwrap_or_default();
 
     // 使用分区字段的值来路由
     let partition_id = server
@@ -1493,7 +1479,7 @@ async fn insert_document(
 
     let partition = server
         .engine
-        .get_partition(&index, partition_id)
+        .get_partition(&index, &partition_id)
         .await
         .ok_or_else(|| internal_error("Partition not found".to_string()))?;
 
@@ -1502,4 +1488,61 @@ async fn insert_document(
         .map_err(|e| internal_error(e.to_string()))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    #[test]
+    fn test() {
+        // 创建包含不同类型的JSON文档
+        let doc = json!({
+            "integer": 42,
+            "float": 3.14,
+            "boolean_true": true,
+            "boolean_false": false,
+            "string": "hello",
+            "array": [1, 2, 3],
+            "object": {"key": "value"}
+        });
+
+        // 测试整数
+        let integer_field = "integer";
+        let integer_json = doc.get(integer_field).unwrap().to_string();
+        println!("整数 {} 转换结果: '{}'", doc[integer_field], integer_json);
+
+        // 测试浮点数
+        let float_field = "float";
+        let float_json = doc.get(float_field).unwrap().to_string();
+        println!("浮点数 {} 转换结果: '{}'", doc[float_field], float_json);
+
+        // 测试布尔值 true
+        let bool_true_field = "boolean_true";
+        let bool_true_json = doc.get(bool_true_field).unwrap().to_string();
+        println!(
+            "布尔值 {} 转换结果: '{}'",
+            doc[bool_true_field], bool_true_json
+        );
+
+        // 测试布尔值 false
+        let bool_false_field = "boolean_false";
+        let bool_false_json = doc.get(bool_false_field).unwrap().to_string();
+        println!(
+            "布尔值 {} 转换结果: '{}'",
+            doc[bool_false_field], bool_false_json
+        );
+
+        // 测试字符串
+        let string_field = "string";
+        let string_json = doc.get(string_field).unwrap().to_string();
+        println!("字符串 {} 转换结果: '{}'", doc[string_field], string_json);
+
+        // 测试Some包装
+        let some_integer = Some(doc.get(integer_field).unwrap().to_string());
+        println!("Some包装的整数结果: {:?}", some_integer);
+
+        let some_bool = Some(doc.get(bool_true_field).unwrap().to_string());
+        println!("Some包装的布尔值结果: {:?}", some_bool);
+    }
 }

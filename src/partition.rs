@@ -22,10 +22,10 @@ use crate::{
 pub struct WriteInfo(pub Vec<(Arc<Segment>, Vec<u32>)>);
 
 /// 持久化通知回调 (table_name, partition_id)
-pub type PersistNotifyCallback = mpsc::UnboundedSender<(String, u64)>;
+pub type PersistNotifyCallback = mpsc::UnboundedSender<(String, String)>;
 
 pub struct Partition {
-    pub id: u64,
+    pub id: String,
     table_name: String,
     current_segment: RwLock<Segment>,
     frozen_segments: RwLock<Vec<(u64, Arc<Segment>)>>, // (seg_id, segment)
@@ -41,11 +41,11 @@ pub struct Partition {
 
 impl Partition {
     pub fn new(
-        id: u64,
+        id: String,
         table_name: String,
         base_dir: PathBuf,
         schema: Schema,
-        persist_notify: mpsc::UnboundedSender<(String, u64)>,
+        persist_notify: mpsc::UnboundedSender<(String, String)>,
     ) -> Self {
         let schema = Arc::new(schema);
         let arrow_schema = schema.to_arrow_schema();
@@ -305,7 +305,9 @@ impl Partition {
         }
 
         // 4. flush notify Engine to check for persist
-        let _ = self.persist_notify.send((self.table_name.clone(), self.id));
+        let _ = self
+            .persist_notify
+            .send((self.table_name.clone(), self.id.clone()));
 
         Ok(seg_id)
     }
@@ -580,7 +582,7 @@ impl Partition {
 
     /// Load a partition from disk
     pub fn load(
-        id: u64,
+        id: String,
         table_name: String,
         base_dir: PathBuf,
         schema: Schema,
@@ -676,7 +678,7 @@ impl Partition {
 
         let arrow_schema = schema.to_arrow_schema();
         Ok(Partition {
-            id: id as u64,
+            id,
             table_name,
             base_dir,
             schema,
@@ -741,13 +743,18 @@ impl Partition {
     }
 
     /// 获取 Partition ID
-    pub fn id(&self) -> u64 {
-        self.id
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     /// Get schema reference
     pub fn schema(&self) -> &Arc<Schema> {
         &self.schema
+    }
+
+    /// Get base directory
+    pub fn base_dir(&self) -> &PathBuf {
+        &self.base_dir
     }
 
     /// Get read-only access to the current segment
