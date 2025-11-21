@@ -153,7 +153,7 @@ impl DistributedExecutor {
         }
 
         let statement = &mut statements[0];
-        if let Statement::Query(query) = statement {
+        if let Statement::Query(_query) = statement {
             // 简单方法：基于原始 SQL 文本替换
             // 由于 AST 构造比较复杂，我们直接做字符串替换
             let sql_lower = sql.to_lowercase();

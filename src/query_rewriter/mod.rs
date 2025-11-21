@@ -81,7 +81,7 @@ impl<'a> QueryRewriter<'a> {
                     value.clone()
                 }
             }
-            Value::Number(n) => {
+            Value::Number(_n) => {
                 // 如果已经是数字，直接返回
                 value.clone()
             }

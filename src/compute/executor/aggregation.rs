@@ -196,7 +196,7 @@ impl AggregationMerger {
             // 对每个聚合列进行合并
             for agg_idx in 0..(num_columns - 1) {
                 let col_idx = agg_idx + 1;
-                let field = schema.field(col_idx);
+                let _field = schema.field(col_idx);
 
                 // 收集该组在该聚合列的所有值
                 let values: Vec<f64> = rows.iter().filter_map(|row| row[agg_idx]).collect();

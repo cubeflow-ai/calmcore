@@ -224,9 +224,6 @@ impl<K: IndexKey> PkWriter for GenericIndexedField<K> {
         info: Option<WriteInfo>,
         lock: &RwLock<()>,
     ) -> CoreResult<HashSet<u32>> {
-        use crate::arrow_downcast;
-        use datafusion::arrow::array::UInt32Array;
-
         let mut cur_dels = HashSet::new();
 
         let pk = data.column_by_name(self.field.name()).ok_or_else(|| {

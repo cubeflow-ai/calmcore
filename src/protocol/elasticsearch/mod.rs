@@ -18,8 +18,6 @@ use crate::{
     schema::{field::FieldOption, Schema},
     utils::error::CoreError,
 };
-mod query_converter;
-mod search_engine;
 
 // 错误辅助函数
 fn not_found(msg: impl Into<String>) -> CoreError {

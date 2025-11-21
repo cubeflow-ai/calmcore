@@ -171,7 +171,7 @@ fn is_aggregate_expr(expr: &Expr) -> bool {
 }
 
 /// 从 Query AST 中分析 ORDER BY + LIMIT
-fn analyze_sort_limit_from_ast(query: &Box<Query>, table_name: &str) -> Option<SortLimitInfo> {
+fn analyze_sort_limit_from_ast(query: &Box<Query>, _table_name: &str) -> Option<SortLimitInfo> {
     // 提取 LIMIT 和 OFFSET
     let (limit, offset) = extract_limit_offset_from_ast(query)?;
 
@@ -271,7 +271,6 @@ fn extract_limit_offset_from_ast(query: &Box<Query>) -> Option<(usize, Option<us
 
             Some((limit_val, Some(offset_val)))
         }
-        _ => None,
     }
 }
 /// 从 ORDER BY AST 中提取排序字段

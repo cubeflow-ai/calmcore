@@ -47,7 +47,7 @@ impl SegmentLoader {
         partition_id: &str,
         file_path: &Path,
         handler_type: FileHandlerType,
-        schema: &Schema,
+        _schema: &Schema,
     ) -> CoreResult<usize> {
         // 检查文件是否存在
         if !file_path.exists() {
@@ -77,7 +77,7 @@ impl SegmentLoader {
             .map_err(|e| CoreError::IOError(format!("Failed to create temp directory: {}", e)))?;
 
         // 根据文件类型处理文件
-        let target_file =
+        let _target_file =
             match handler_type {
                 FileHandlerType::Reference => {
                     // 引用模式：创建符号链接或硬链接
