@@ -28,6 +28,7 @@ pub mod timestamp_key; // Timestamp 类型支持
 
 // 其他模块
 pub mod row_data;
+pub mod text;
 
 pub use row_data::RowDataStore;
 

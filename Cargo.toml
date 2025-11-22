@@ -41,12 +41,16 @@ msql-srv = "0.11"
 poem = { version = "3", features = ["embed"] }
 poem-openapi = "5"
 
+unicode-segmentation = "1.11.0"
+
+
 # GraphQL
 async-graphql = "7"
 async-graphql-poem = "7"
 regex = "1.10"
 chrono = "0.4"
 toml = "0.8"
+bincode = "2.0.1"
 
 [dev-dependencies]
 tempfile = "3.23.0"
