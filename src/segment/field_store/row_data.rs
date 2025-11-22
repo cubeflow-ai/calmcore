@@ -572,6 +572,9 @@ impl RowDataStore {
         }
     }
 
+    /// Get precomputed batch ranges for range-grouped queries
+    ///
+    /// Returns the complete list of (start_doc_id, end_doc_id, batch_key) tuples.
     /// Batch read multiple RecordBatches with column projection
     ///
     /// This is a critical performance optimization for Parquet format that can provide

@@ -150,6 +150,9 @@ impl SegmentScanner {
         }
     }
 
+    /// 尝试对范围查询使用预分组优化
+    ///
+
     /// 🚀 COUNT(*) 优化专用方法: 只计算匹配数,不读取数据
     ///
     /// 用于 `SELECT COUNT(*) FROM table WHERE ...` 查询的极速优化
@@ -346,9 +349,57 @@ impl SegmentScanner {
                 None
             }
 
+            // IN 表达式: col IN (value1, value2, ...)
+            Expr::InList(in_list) => {
+                if let Expr::Column(column) = &*in_list.expr {
+                    let field_name = &column.name;
+
+                    // 将 IN 转换为多个等值查询的 OR
+                    let mut combined_bitmap = RoaringBitmap::new();
+
+                    for value_expr in &in_list.list {
+                        if let Expr::Literal(scalar_value, _) = value_expr {
+                            if let Some(bitmap) = self.query_equal(field_name, scalar_value) {
+                                combined_bitmap |= bitmap;
+                            }
+                        }
+                    }
+
+                    // 如果是 NOT IN，返回补集
+                    return Some(if in_list.negated {
+                        &self.valid_docs - &combined_bitmap
+                    } else {
+                        combined_bitmap
+                    });
+                }
+                None
+            }
+
             // 二元表达式: col > value, col = value 等
             Expr::BinaryExpr(binary) => {
                 use datafusion::logical_expr::Operator;
+
+                // 处理常量表达式: Literal op Literal (如 1=1, 2=4)
+                if let (Expr::Literal(left_val, _), Expr::Literal(right_val, _)) =
+                    (&*binary.left, &*binary.right)
+                {
+                    let result = match binary.op {
+                        Operator::Eq => left_val == right_val,
+                        Operator::NotEq => left_val != right_val,
+                        Operator::Lt => left_val < right_val,
+                        Operator::LtEq => left_val <= right_val,
+                        Operator::Gt => left_val > right_val,
+                        Operator::GtEq => left_val >= right_val,
+                        _ => return None, // 其他操作符不支持
+                    };
+
+                    // true 返回全量, false 返回空集
+                    return Some(if result {
+                        self.valid_docs.clone()
+                    } else {
+                        RoaringBitmap::new()
+                    });
+                }
 
                 // 先处理 AND/OR 逻辑运算
                 match binary.op {
@@ -670,10 +721,13 @@ impl ExecutionPlan for SegmentExec {
 struct SegmentStream {
     schema: SchemaRef,
     raw_data: RowDataStore,
-    doc_ids_iter: roaring::bitmap::IntoIter, // 使用迭代器，避免一次性分配大 Vec
+    doc_ids_iter: roaring::bitmap::IntoIter,
     projection: Option<Vec<usize>>,
     chunk_size: usize,
     limit: Option<usize>, // LIMIT 下推：如果设置，只返回这么多行
+
+    // 性能优化参数
+    total_docs: usize, // 总命中文档数，用于决定批量处理策略
 
     // 迭代状态
     rows_returned: usize, // 已经返回的行数（用于 LIMIT）
@@ -689,7 +743,7 @@ impl SegmentStream {
         chunk_size: usize,
         limit: Option<usize>,
     ) -> Self {
-        let total_docs = matched_docs.len();
+        let total_docs = matched_docs.len() as usize;
 
         eprintln!(
             "🔍 [SegmentStream::new] Total doc_ids={}, will process in chunks of {} storage batches, limit={:?}",
@@ -701,10 +755,11 @@ impl SegmentStream {
         Self {
             schema,
             raw_data,
-            doc_ids_iter: matched_docs.into_iter(), // 使用迭代器，零额外内存
+            doc_ids_iter: matched_docs.into_iter(),
             projection,
             chunk_size,
             limit,
+            total_docs,
             rows_returned: 0,
             pending_batches: Vec::new().into_iter(),
         }
@@ -723,54 +778,104 @@ impl SegmentStream {
             }
         }
 
-        // 1. 收集下一个 chunk 的 doc_ids
-        // LIMIT 优化：只收集需要的 doc_ids
-        let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
+        // 🎯 根据命中数量自适应选择策略
+        // - 大数据量(>= 10000): 批量收集再查找，减少函数调用
+        // - 小数据量(< 10000): 逐个查找，避免额外内存分配
+        let batch_groups = if self.total_docs >= 10000 {
+            // 策略A: 批量处理（适合大数据量）
+            let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
+            let mut doc_ids_to_process: Vec<u32> = Vec::new();
 
-        // 先收集所有需要的 doc_ids
-        let mut doc_ids_chunk = Vec::new();
-        for doc_id in self.doc_ids_iter.by_ref() {
-            // LIMIT 优化：如果已经收集足够的行，停止
-            if let Some(remaining) = remaining_rows {
-                if doc_ids_chunk.len() >= remaining {
+            // 🚀 关键优化：target_chunk_size 必须考虑 LIMIT！
+            // 如果 LIMIT 10，就只收集 ~100 个 doc_ids，不要收集 10万个！
+            let base_chunk_size = self.chunk_size * 1000; // 每个 batch 约 1000 docs
+            let target_chunk_size = if let Some(remaining) = remaining_rows {
+                // 有 LIMIT：只收集 remaining * 10 (预留一些buffer，因为可能跨多个batch)
+                base_chunk_size.min(remaining * 10)
+            } else {
+                // 无 LIMIT：使用完整的 chunk size
+                base_chunk_size
+            };
+
+            eprintln!(
+                "  [SegmentStream] target_chunk_size={}, remaining_rows={:?}, total_docs={}",
+                target_chunk_size, remaining_rows, self.total_docs
+            );
+
+            // 先收集一批 doc_ids
+            for doc_id in self.doc_ids_iter.by_ref() {
+                doc_ids_to_process.push(doc_id);
+
+                // 达到目标 chunk size，停止收集
+                if doc_ids_to_process.len() >= target_chunk_size {
                     break;
                 }
             }
 
-            doc_ids_chunk.push(doc_id);
-
-            // 达到 chunk_size * 平均batch大小 的 doc_ids，停止收集
-            // 这样可以一次性查找，避免逐个查找
-            if doc_ids_chunk.len() >= self.chunk_size * 100 {
-                break;
+            // 没有更多数据
+            if doc_ids_to_process.is_empty() {
+                return Ok(Vec::new());
             }
-        }
 
-        // 批量查找所有 doc_ids 的 batch keys
-        // 这比逐个查找快得多，因为可以利用缓存局部性
-        let batch_groups = self.raw_data.batch_lookup_doc_ids(&doc_ids_chunk);
+            eprintln!(
+                "  [SegmentStream] Using batch lookup for {} doc_ids (total_docs={})",
+                doc_ids_to_process.len(),
+                self.total_docs
+            );
 
-        // 限制实际使用的 batch 数量
-        let mut batch_keys_set: std::collections::HashSet<u32> =
-            batch_groups.keys().copied().collect();
+            // 🚀 批量查找 batch_key 并分组
+            let batch_groups = self.raw_data.batch_lookup_doc_ids(&doc_ids_to_process);
 
-        // 如果 batch 数量超过 chunk_size，需要裁剪
-        let batch_groups = if batch_keys_set.len() > self.chunk_size {
-            let mut limited_keys: Vec<u32> =
-                batch_keys_set.into_iter().take(self.chunk_size).collect();
-            limited_keys.sort_unstable();
-            batch_keys_set = limited_keys.iter().copied().collect();
-
-            // 只保留前 chunk_size 个 batch 的 doc_ids
-            batch_groups
-                .into_iter()
-                .filter(|(k, _)| batch_keys_set.contains(k))
-                .collect()
+            // 限制 batch 数量到 chunk_size
+            batch_groups.into_iter().take(self.chunk_size).collect()
         } else {
+            // 策略B: 逐个处理（适合小数据量）
+            let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
+            let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
+            let mut current_batch_key: Option<u32> = None;
+            let mut collected_rows = 0;
+
+            for doc_id in self.doc_ids_iter.by_ref() {
+                // LIMIT 优化
+                if let Some(remaining) = remaining_rows {
+                    if collected_rows >= remaining {
+                        break;
+                    }
+                }
+
+                // 获取 batch_key
+                let batch_key = match self.raw_data.get_batch_key_for_doc(doc_id) {
+                    Some(key) => key,
+                    None => continue,
+                };
+
+                // 优化：如果 batch_key 相同，直接加入
+                if current_batch_key == Some(batch_key) {
+                    batch_groups.get_mut(&batch_key).unwrap().push(doc_id);
+                } else {
+                    // 新的 batch_key
+                    if batch_groups.len() >= self.chunk_size {
+                        break;
+                    }
+                    batch_groups.entry(batch_key).or_default().push(doc_id);
+                    current_batch_key = Some(batch_key);
+                }
+
+                collected_rows += 1;
+            }
+
+            if batch_groups.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            eprintln!(
+                "  [SegmentStream] Using incremental lookup for {} doc_ids (total_docs={})",
+                collected_rows, self.total_docs
+            );
+
             batch_groups
         };
 
-        // 没有更多数据
         if batch_groups.is_empty() {
             return Ok(Vec::new());
         }
@@ -792,7 +897,7 @@ impl SegmentStream {
         }
 
         // 2. 批量读取这一批的 storage batches
-        let batch_keys: Vec<u32> = batch_keys_set.into_iter().collect();
+        let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
         let is_empty_projection = self.projection.as_ref().is_some_and(|p| p.is_empty());
 
         let source_batches = if is_empty_projection {

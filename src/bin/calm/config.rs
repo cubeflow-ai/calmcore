@@ -322,6 +322,12 @@ impl Config {
     /// 打印帮助信息
     fn print_help() {
         println!("Calm Database - Multi-Protocol Database Server");
+        println!(
+            "Version: {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            version_macro::build_git_version!()
+        );
+        println!("Build time: {}", version_macro::build_time!());
         println!();
         println!("USAGE:");
         println!("    calm [OPTIONS]");

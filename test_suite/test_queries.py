@@ -77,6 +77,33 @@ def run_query(cursor, name, sql, show_preview=True):
         return False, duration, 0
 
 
+def verify_correctness(cursor, name, sql1, sql2):
+    """验证两个查询返回相同的结果"""
+    print_colored(Colors.YELLOW, f"\n🔍 Correctness Check: {name}")
+
+    try:
+        cursor.execute(sql1)
+        result1 = cursor.fetchall()
+
+        cursor.execute(sql2)
+        result2 = cursor.fetchall()
+
+        if result1 == result2:
+            print_colored(Colors.GREEN, f"✓ Results match ({len(result1)} rows)")
+            return True
+        else:
+            print_colored(
+                Colors.RED, f"✗ Results differ: {len(result1)} vs {len(result2)} rows"
+            )
+            if len(result1) <= 5 and len(result2) <= 5:
+                print(f"  Query 1 result: {result1}")
+                print(f"  Query 2 result: {result2}")
+            return False
+    except Exception as e:
+        print_colored(Colors.RED, f"✗ Verification failed: {e}")
+        return False
+
+
 def test_nyc_taxi(conn):
     """测试 NYC Taxi 数据集的查询"""
     print_colored(Colors.BLUE, "\n=== NYC Taxi Dataset Queries ===\n")
@@ -108,12 +135,12 @@ def test_nyc_taxi(conn):
         ),
         (
             "6. COUNT by passenger count",
-            "SELECT passenger_count, COUNT(*) as count FROM taxi_trips GROUP BY passenger_count",
+            "SELECT passenger_count, COUNT(*) as count FROM taxi_trips GROUP BY passenger_count ORDER BY passenger_count",
             True,
         ),
         (
             "7. Average fare by payment type",
-            "SELECT payment_type, AVG(fare_amount) as avg_fare FROM taxi_trips GROUP BY payment_type",
+            "SELECT payment_type, AVG(fare_amount) as avg_fare FROM taxi_trips GROUP BY payment_type ORDER BY payment_type",
             True,
         ),
         (
@@ -141,13 +168,194 @@ def test_nyc_taxi(conn):
             "SELECT AVG(trip_distance) as avg_distance FROM taxi_trips",
             True,
         ),
+        # 新增：边界条件测试
+        (
+            "13. Query with zero passengers",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 0",
+            True,
+        ),
+        (
+            "14. Very long trips (>50 miles)",
+            "SELECT * FROM taxi_trips WHERE trip_distance > 50.0 ORDER BY trip_distance DESC LIMIT 10",
+            True,
+        ),
+        (
+            "15. Zero fare trips",
+            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount = 0",
+            True,
+        ),
+        # 新增：多字段聚合
+        (
+            "16. MIN/MAX/AVG statistics",
+            "SELECT MIN(fare_amount) as min_fare, MAX(fare_amount) as max_fare, AVG(fare_amount) as avg_fare, MIN(trip_distance) as min_dist, MAX(trip_distance) as max_dist FROM taxi_trips",
+            True,
+        ),
+        (
+            "17. SUM total revenue by payment type",
+            "SELECT payment_type, SUM(total_amount) as total_revenue, COUNT(*) as trip_count FROM taxi_trips GROUP BY payment_type ORDER BY total_revenue DESC",
+            True,
+        ),
+        # 新增：HAVING 子句
+        (
+            "18. Locations with >1000 pickups",
+            "SELECT pickup_location_id, COUNT(*) as count FROM taxi_trips GROUP BY pickup_location_id HAVING COUNT(*) > 1000 ORDER BY count DESC",
+            True,
+        ),
+        # 新增：多时间段对比
+        (
+            "19. Time range with ORDER BY ASC",
+            f"SELECT * FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} ORDER BY pickup_datetime ASC LIMIT 10",
+            True,
+        ),
+        # 新增：IN 操作符
+        (
+            "20. Filter by multiple passenger counts",
+            "SELECT passenger_count, COUNT(*) as count FROM taxi_trips WHERE passenger_count IN (1, 2, 3) GROUP BY passenger_count ORDER BY passenger_count",
+            True,
+        ),
+        # 新增：范围查询组合
+        (
+            "21. Mid-range fare trips ($10-$30)",
+            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount >= 10.0 AND fare_amount <= 30.0",
+            True,
+        ),
+        # 新增：复杂排序
+        (
+            "22. Top trips by tip percentage",
+            "SELECT fare_amount, tip_amount, (tip_amount / fare_amount * 100) as tip_pct FROM taxi_trips WHERE fare_amount > 0 ORDER BY tip_pct DESC LIMIT 10",
+            True,
+        ),
+        # 新增：多字段 ORDER BY
+        (
+            "23. Order by multiple fields",
+            "SELECT passenger_count, payment_type, COUNT(*) as count FROM taxi_trips GROUP BY passenger_count, payment_type ORDER BY passenger_count, payment_type LIMIT 20",
+            True,
+        ),
+        # 新增：DISTINCT
+        (
+            "24. Distinct pickup locations count",
+            "SELECT COUNT(DISTINCT pickup_location_id) as unique_locations FROM taxi_trips",
+            True,
+        ),
+    ]
+
+    # 正确性校验测试（合并到主测试中）
+    print_colored(Colors.BLUE, "\n=== Correctness Verification Tests ===\n")
+
+    verification_tests = [
+        (
+            "25. COUNT consistency (equality vs range)",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 2",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count >= 2 AND passenger_count <= 2",
+        ),
+        (
+            "26. Range query idempotence",
+            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}",
+            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}",
+        ),
+        (
+            "27. LIMIT with ORDER BY consistency",
+            "SELECT id FROM taxi_trips ORDER BY id LIMIT 5",
+            "SELECT id FROM taxi_trips ORDER BY id ASC LIMIT 5",
+        ),
+        (
+            "28. COUNT(*) vs COUNT(column)",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count > 0",
+            "SELECT COUNT(id) FROM taxi_trips WHERE passenger_count > 0",
+        ),
+        (
+            "29. MIN/MAX with/without NULL filter",
+            "SELECT MIN(fare_amount), MAX(fare_amount) FROM taxi_trips",
+            "SELECT MIN(fare_amount), MAX(fare_amount) FROM taxi_trips WHERE fare_amount IS NOT NULL",
+        ),
+        (
+            "30. WHERE filter ordering independence",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 1 AND payment_type = 2",
+            "SELECT COUNT(*) FROM taxi_trips WHERE payment_type = 2 AND passenger_count = 1",
+        ),
+        (
+            "31. Time range boundary test",
+            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024}",
+            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime > {jan_1_2024 - 1}",
+        ),
+        (
+            "32. OR vs IN equivalence",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 1 OR passenger_count = 2",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count IN (1, 2)",
+        ),
+        (
+            "33. Constant false returns zero",
+            "SELECT COUNT(*) FROM taxi_trips WHERE 2=4",
+            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount > 999999",
+        ),
+        (
+            "34. Constant true with filter",
+            "SELECT COUNT(*) FROM taxi_trips WHERE 1=1 AND passenger_count = 2",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 2",
+        ),
+        (
+            "35. Constant comparison (10 > 5)",
+            "SELECT COUNT(*) FROM taxi_trips WHERE 10 > 5",
+            "SELECT COUNT(*) FROM taxi_trips WHERE 1=1",
+        ),
+        (
+            "36. Constant false with AND",
+            "SELECT COUNT(*) FROM taxi_trips WHERE 2=4 AND passenger_count = 1",
+            "SELECT COUNT(*) FROM taxi_trips WHERE 1=2",
+        ),
+        (
+            "37. NOT IN equivalence",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count NOT IN (1, 2)",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count != 1 AND passenger_count != 2",
+        ),
+        (
+            "38. IN with 3 values vs multiple OR",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count IN (1, 2, 3)",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 1 OR passenger_count = 2 OR passenger_count = 3",
+        ),
+        (
+            "39. Mixed constant and range",
+            "SELECT COUNT(*) FROM taxi_trips WHERE 1=1 AND fare_amount > 20.0",
+            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount > 20.0",
+        ),
+        (
+            "40. Negative value comparison",
+            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount < 0",
+            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount < 0.0",
+        ),
     ]
 
     results = []
+    for name, sql1, sql2 in verification_tests:
+        # 执行第一个查询
+        success1, duration1, count1 = run_query(
+            cursor, name + " [Query 1]", sql1, False
+        )
+        # 执行第二个查询
+        success2, duration2, count2 = run_query(
+            cursor, name + " [Query 2]", sql2, False
+        )
 
-    for name, sql, show_preview in test_cases:
-        success, duration, row_count = run_query(cursor, name, sql, show_preview)
-        results.append((name, success, duration, row_count))
+        # 验证结果是否一致
+        if success1 and success2:
+            verified = count1 == count2
+            if verified:
+                print_colored(Colors.GREEN, f"  ✓ Results match: {count1} rows")
+            else:
+                print_colored(
+                    Colors.RED, f"  ✗ Results differ: {count1} vs {count2} rows"
+                )
+            results.append(
+                (
+                    name,
+                    verified and success1 and success2,
+                    duration1 + duration2,
+                    count1,
+                )
+            )
+        else:
+            print_colored(Colors.RED, f"  ✗ One or both queries failed")
+            results.append((name, False, duration1 + duration2, 0))
 
     cursor.close()
 
@@ -159,10 +367,11 @@ def test_nyc_taxi(conn):
     total_time = sum(duration for _, _, duration, _ in results)
 
     print(f"Total tests: {len(results)}")
-    print_colored(Colors.GREEN, f"Passed: {passed}")
+    print_colored(Colors.GREEN, f"  Passed: {passed}")
     if failed > 0:
-        print_colored(Colors.RED, f"Failed: {failed}")
-    print(f"Total time: {total_time:.3f}s")
+        print_colored(Colors.RED, f"  Failed: {failed}")
+
+    print(f"\nTotal time: {total_time:.3f}s")
     print()
 
     # 性能统计

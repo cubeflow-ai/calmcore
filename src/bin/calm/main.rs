@@ -16,6 +16,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logger(&config)?;
 
     println!("=== Calm Database - Multi-Protocol Server ===");
+    println!(
+        "📦 Version: {} ({})",
+        version_macro::build_git_branch!(),
+        version_macro::build_git_version!()
+    );
+    println!("🔨 Build time: {}", version_macro::build_time!());
     println!();
     println!("📁 Data directory: {:?}", config.engine.data_dir);
     println!("🌐 Host: {}", config.host);
