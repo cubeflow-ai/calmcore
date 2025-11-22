@@ -152,6 +152,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_local_datetime() {
+        let ts = parse_date_to_timestamp_millis("2025-01-11 12:34:56").unwrap();
+        assert!(ts > 0);
+
+        // 2025-01-11 12:34:56 UTC
+        assert_eq!(ts, 1736598896000);
+    }
+
+    #[test]
     fn test_parse_iso_datetime_with_millis() {
         // 测试带毫秒的 ISO 8601
         let ts = parse_date_to_timestamp_millis("2025-01-11T12:34:56.123Z").unwrap();

@@ -1,6 +1,6 @@
 /// Wrapper for f32 that implements Ord by comparing bit patterns
 /// NaN values are treated as equal and greater than all other values
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
 pub struct OrderedF32(pub f32);
 
 impl Eq for OrderedF32 {}

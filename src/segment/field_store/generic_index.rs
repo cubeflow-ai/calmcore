@@ -320,7 +320,7 @@ impl<K: IndexKey> PkWriter for GenericIndexedField<K> {
     }
 }
 
-impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
+impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
     fn name(&self) -> &str {
         self.field.name()
     }
@@ -452,6 +452,9 @@ impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
         let indexs = self.indexs.read().unwrap();
         // 尝试使用底层 mem_btree 的 range_union() 优化
         // 如果不支持(内存索引)，返回 None 让调用方回退到 range()
+
+        log::info!("to run range_union(start_key:{:?}, start_inclusive:{:?}, end_key:{:?}, end_inclusive:{:?})", start_key, start_inclusive, end_key, end_inclusive);
+
         indexs.range_union(
             start_key.as_ref(),
             start_inclusive,

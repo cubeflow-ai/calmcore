@@ -479,7 +479,13 @@ impl SegmentScanner {
                         .unwrap_or_else(RoaringBitmap::new),
                 )
             }
-            None => Some(RoaringBitmap::new()),
+            None => {
+                log::info!(
+                    "query range for field:[{:?}] not found so return ALL",
+                    field_name
+                );
+                Some(RoaringBitmap::new())
+            }
         }
     }
 }
@@ -712,10 +718,7 @@ impl SegmentStream {
             }
 
             if let Some(batch_start_id) = self.raw_data.get_batch_key_for_doc(doc_id) {
-                batch_groups
-                    .entry(batch_start_id)
-                    .or_default()
-                    .push(doc_id);
+                batch_groups.entry(batch_start_id).or_default().push(doc_id);
                 batch_keys_set.insert(batch_start_id);
                 collected_rows += 1;
             }

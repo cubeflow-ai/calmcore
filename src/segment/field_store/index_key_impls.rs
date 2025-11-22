@@ -73,7 +73,7 @@ impl IndexKey for String {
     }
 
     fn supports_range() -> bool {
-        false // Keyword 字段通常不支持范围查询
+        true // 支持字符串范围查询（字典序）
     }
 }
 

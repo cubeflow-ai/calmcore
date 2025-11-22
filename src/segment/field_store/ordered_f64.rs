@@ -1,6 +1,6 @@
 /// Wrapper for f64 that implements Ord by comparing bit patterns
 /// NaN values are treated as equal and greater than all other values
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
 pub struct OrderedF64(pub f64);
 
 impl Eq for OrderedF64 {}

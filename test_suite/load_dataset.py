@@ -197,11 +197,11 @@ def load_nyc_taxi(conn, limit=None, graphql_port=8000):
             if 'pickup_datetime' in df.columns:
                 # 先转换为 datetime，再转为纳秒时间戳，最后转为毫秒
                 dt_series = pd.to_datetime(df['pickup_datetime'])
-                df['pickup_datetime'] = (dt_series.astype('int64') // 10**6).astype('int64')
+                df['pickup_datetime'] = (dt_series.astype('int64') // 10**3).astype('int64') 
                 
             if 'dropoff_datetime' in df.columns:
                 dt_series = pd.to_datetime(df['dropoff_datetime'])
-                df['dropoff_datetime'] = (dt_series.astype('int64') // 10**6).astype('int64')
+                df['dropoff_datetime'] = (dt_series.astype('int64') // 10**3).astype('int64')
             
             # 验证时间戳（应该是 13 位数字，表示 2001-2099 年之间）
             if 'pickup_datetime' in df.columns and len(df) > 0:

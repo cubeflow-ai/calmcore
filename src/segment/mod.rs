@@ -1439,6 +1439,29 @@ impl Segment {
                 readers.insert(name, Box::new(num_i64.clone()) as Box<dyn IndexReader>);
             } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<F64Field>() {
                 readers.insert(name, Box::new(num_f64.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_u32) = field_writer.as_any().downcast_ref::<U32Field>() {
+                readers.insert(name, Box::new(num_u32.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_u64) = field_writer.as_any().downcast_ref::<U64Field>() {
+                readers.insert(name, Box::new(num_u64.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_i32) = field_writer.as_any().downcast_ref::<I32Field>() {
+                readers.insert(name, Box::new(num_i32.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_i8) = field_writer.as_any().downcast_ref::<I8Field>() {
+                readers.insert(name, Box::new(num_i8.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_i16) = field_writer.as_any().downcast_ref::<I16Field>() {
+                readers.insert(name, Box::new(num_i16.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_u8) = field_writer.as_any().downcast_ref::<U8Field>() {
+                readers.insert(name, Box::new(num_u8.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_u16) = field_writer.as_any().downcast_ref::<U16Field>() {
+                readers.insert(name, Box::new(num_u16.clone()) as Box<dyn IndexReader>);
+            } else if let Some(num_f32) = field_writer.as_any().downcast_ref::<F32Field>() {
+                readers.insert(name, Box::new(num_f32.clone()) as Box<dyn IndexReader>);
+            } else if let Some(boolean) = field_writer.as_any().downcast_ref::<BooleanField>() {
+                readers.insert(name, Box::new(boolean.clone()) as Box<dyn IndexReader>);
+            } else if let Some(timestamp) = field_writer
+                .as_any()
+                .downcast_ref::<field_store::TimestampField>()
+            {
+                readers.insert(name, Box::new(timestamp.clone()) as Box<dyn IndexReader>);
             }
         }
 
@@ -1463,6 +1486,29 @@ impl Segment {
             <I64Field as IndexReader>::query(num_i64, value)
         } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<F64Field>() {
             <F64Field as IndexReader>::query(num_f64, value)
+        } else if let Some(num_u32) = field_writer.as_any().downcast_ref::<U32Field>() {
+            <U32Field as IndexReader>::query(num_u32, value)
+        } else if let Some(num_u64) = field_writer.as_any().downcast_ref::<U64Field>() {
+            <U64Field as IndexReader>::query(num_u64, value)
+        } else if let Some(num_i32) = field_writer.as_any().downcast_ref::<I32Field>() {
+            <I32Field as IndexReader>::query(num_i32, value)
+        } else if let Some(num_i8) = field_writer.as_any().downcast_ref::<I8Field>() {
+            <I8Field as IndexReader>::query(num_i8, value)
+        } else if let Some(num_i16) = field_writer.as_any().downcast_ref::<I16Field>() {
+            <I16Field as IndexReader>::query(num_i16, value)
+        } else if let Some(num_u8) = field_writer.as_any().downcast_ref::<U8Field>() {
+            <U8Field as IndexReader>::query(num_u8, value)
+        } else if let Some(num_u16) = field_writer.as_any().downcast_ref::<U16Field>() {
+            <U16Field as IndexReader>::query(num_u16, value)
+        } else if let Some(num_f32) = field_writer.as_any().downcast_ref::<F32Field>() {
+            <F32Field as IndexReader>::query(num_f32, value)
+        } else if let Some(boolean) = field_writer.as_any().downcast_ref::<BooleanField>() {
+            <BooleanField as IndexReader>::query(boolean, value)
+        } else if let Some(timestamp) = field_writer
+            .as_any()
+            .downcast_ref::<field_store::TimestampField>()
+        {
+            <field_store::TimestampField as IndexReader>::query(timestamp, value)
         } else {
             None
         }
@@ -1495,6 +1541,33 @@ impl Segment {
             <I64Field as IndexReader>::range(num_i64, start, start_inclusive, end, end_inclusive)
         } else if let Some(num_f64) = field_writer.as_any().downcast_ref::<F64Field>() {
             <F64Field as IndexReader>::range(num_f64, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_u32) = field_writer.as_any().downcast_ref::<U32Field>() {
+            <U32Field as IndexReader>::range(num_u32, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_u64) = field_writer.as_any().downcast_ref::<U64Field>() {
+            <U64Field as IndexReader>::range(num_u64, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_i32) = field_writer.as_any().downcast_ref::<I32Field>() {
+            <I32Field as IndexReader>::range(num_i32, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_i8) = field_writer.as_any().downcast_ref::<I8Field>() {
+            <I8Field as IndexReader>::range(num_i8, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_i16) = field_writer.as_any().downcast_ref::<I16Field>() {
+            <I16Field as IndexReader>::range(num_i16, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_u8) = field_writer.as_any().downcast_ref::<U8Field>() {
+            <U8Field as IndexReader>::range(num_u8, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_u16) = field_writer.as_any().downcast_ref::<U16Field>() {
+            <U16Field as IndexReader>::range(num_u16, start, start_inclusive, end, end_inclusive)
+        } else if let Some(num_f32) = field_writer.as_any().downcast_ref::<F32Field>() {
+            <F32Field as IndexReader>::range(num_f32, start, start_inclusive, end, end_inclusive)
+        } else if let Some(timestamp) = field_writer
+            .as_any()
+            .downcast_ref::<field_store::TimestampField>()
+        {
+            <field_store::TimestampField as IndexReader>::range(
+                timestamp,
+                start,
+                start_inclusive,
+                end,
+                end_inclusive,
+            )
         } else {
             None
         }
