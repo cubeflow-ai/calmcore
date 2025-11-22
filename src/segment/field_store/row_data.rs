@@ -25,8 +25,12 @@ impl ParquetRowDataReader {
     pub fn new(path: &str) -> CoreResult<Self> {
         use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 
-        let file =
-            File::open(path).map_err(|e| crate::utils::error::CoreError::IOError(e.to_string()))?;
+        let file = File::open(path).map_err(|e| {
+            crate::utils::error::CoreError::IOError(format!(
+                "Failed to open Parquet file '{}': {}",
+                path, e
+            ))
+        })?;
 
         let reader = SerializedFileReader::new(file)
             .map_err(|e| crate::utils::error::CoreError::IOError(e.to_string()))?;
@@ -278,14 +282,14 @@ impl ParquetRowDataReader {
             }
 
             // Read only this RowGroup
-            let mut reader = match builder.with_row_groups(vec![rg_idx]).build() {
+            let reader = match builder.with_row_groups(vec![rg_idx]).build() {
                 Ok(r) => r,
                 Err(_) => continue,
             };
 
             // Collect all batches from this RowGroup and concatenate them
             let mut batches = Vec::new();
-            while let Some(batch_result) = reader.next() {
+            for batch_result in reader {
                 if let Ok(batch) = batch_result {
                     eprintln!(
                         "  [get_batch_with_projection] Read batch with {} rows from RowGroup {}",
@@ -565,7 +569,7 @@ impl RowDataStore {
 
     pub fn len(&self) -> usize {
         match self {
-            RowDataStore::Disk(reader) => reader.len() as usize,
+            RowDataStore::Disk(reader) => reader.len(),
             RowDataStore::Parquet(reader) => reader.len(),
             RowDataStore::Memory(tree) => tree.len(),
         }

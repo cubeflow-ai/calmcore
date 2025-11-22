@@ -124,7 +124,7 @@ impl TableProvider for PartitionTableProvider {
             let doc_count = current_segment.doc_count();
 
             if doc_count > 0 {
-                let scanner = self.create_segment_scanner(&*current_segment)?;
+                let scanner = self.create_segment_scanner(&current_segment)?;
                 // 使用新的优化方法，传递完整的查询上下文
                 if let Some(plan) = scanner.create_plan(filters, projection, limit, None) {
                     segment_plans.push(plan);

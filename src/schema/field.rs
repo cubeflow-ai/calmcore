@@ -28,6 +28,7 @@ pub struct PersistOption {
 
 impl PersistOption {
     /// 创建默认配置
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self {
             zstd_level: 3,

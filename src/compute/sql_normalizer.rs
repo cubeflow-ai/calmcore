@@ -26,7 +26,7 @@ impl SqlNormalizer {
             )));
         } else {
             statements.pop_front().ok_or_else(|| {
-                CoreError::InvalidParam(format!("Failed to extract SQL statement"))
+                CoreError::InvalidParam("Failed to extract SQL statement".to_string())
             })?
         };
 

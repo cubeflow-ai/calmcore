@@ -44,7 +44,7 @@ impl mem_btree::persist::WriteSerializer<TimestampKey, RoaringBitmap>
 impl mem_btree::persist::ReadSerializer<TimestampKey, RoaringBitmap>
     for TimestampRoaringSerializer
 {
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<TimestampKey> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<TimestampKey> {
         // 反序列化 i64 -> TimestampKey
         self.inner
             .deserialize_keys(data)
@@ -53,9 +53,9 @@ impl mem_btree::persist::ReadSerializer<TimestampKey, RoaringBitmap>
             .collect()
     }
 
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         self.inner.deserialize_value(data)
     }

@@ -69,7 +69,7 @@ pub fn normalize_timestamp(ts: i64) -> i64 {
 pub fn format_timestamp(ts_millis: i64, format: Option<&str>) -> String {
     use chrono::{DateTime, Utc};
 
-    let datetime = DateTime::from_timestamp_millis(ts_millis).unwrap_or_else(|| Utc::now());
+    let datetime = DateTime::from_timestamp_millis(ts_millis).unwrap_or_else(Utc::now);
 
     match format {
         Some("iso8601") | Some("rfc3339") | None => datetime.to_rfc3339(),

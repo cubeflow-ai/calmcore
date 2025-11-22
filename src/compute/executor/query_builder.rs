@@ -21,7 +21,7 @@ impl QueryBuilder {
         // 按表名长度降序排列，优先匹配更长的表名
         // 这样 label_event_v1 会在 label_event_v 之前被检查
         let mut sorted_tables = table_names.clone();
-        sorted_tables.sort_by(|a, b| b.len().cmp(&a.len()));
+        sorted_tables.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
         for table_name in &sorted_tables {
             let table_lower = table_name.to_lowercase();

@@ -347,7 +347,7 @@ impl Segment {
             .and_then(|k| self.field_index.get(k))
         {
             let fields = self.fields.read().unwrap();
-            let pk_field = &fields[*index];
+            let pk_field: &dyn IndexWriter = &*fields[*index];
             self.write_pk(pk_field, &new_data, start_id, pk_hash, info, lock)?;
         }
 
@@ -375,7 +375,7 @@ impl Segment {
 
     fn write_pk(
         &self,
-        pk_field: &Box<dyn IndexWriter>,
+        pk_field: &dyn IndexWriter,
         data: &RecordBatch,
         start_id: u32,
         pk_hash: Option<Vec<u32>>,
@@ -581,7 +581,7 @@ impl Segment {
     pub(crate) fn total_count(&self) -> u64 {
         // Use doc_id_gen as the total count (works for both active and frozen segments)
         let total = self.doc_id_gen.load(Ordering::Relaxed) as u64;
-        total - self.deleted.read().unwrap().len() as u64
+        total - self.deleted.read().unwrap().len()
     }
 
     /// Get a single document by internal doc_id
@@ -971,6 +971,11 @@ impl Segment {
                 } else if let Some(boolean) = field.as_any().downcast_ref::<BooleanField>() {
                     let disk_field = boolean.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(timestamp) =
+                    field.as_any().downcast_ref::<field_store::TimestampField>()
+                {
+                    let disk_field = timestamp.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else {
                     eprintln!(
                         "⚠️ Warning: Field '{}' has unsupported type for persist, skipping",
@@ -1163,7 +1168,13 @@ impl Segment {
         end_id: u64,
         schema: Arc<Schema>,
     ) -> CoreResult<Self> {
+        eprintln!("🔍 [DEBUG load_frozen] base_dir: {}", base_dir);
+        eprintln!(
+            "🔍 [DEBUG load_frozen] start_id: {}, end_id: {}",
+            start_id, end_id
+        );
         let segment_path = format!("{}/segment-{}-{}", base_dir, start_id, end_id);
+        eprintln!("🔍 [DEBUG load_frozen] segment_path: {}", segment_path);
 
         if !std::path::Path::new(&segment_path).exists() {
             return Err(CoreError::NotExisted(format!(
@@ -1317,6 +1328,11 @@ impl Segment {
         } else {
             let row_data_path = format!("{}/rowdata", segment_path);
             let parquet_path = format!("{}/rowdata.parquet", row_data_path);
+            eprintln!("  🔍 [DEBUG] Checking Parquet path: {}", parquet_path);
+            eprintln!(
+                "  🔍 [DEBUG] Path exists: {}",
+                std::path::Path::new(&parquet_path).exists()
+            );
             if std::path::Path::new(&parquet_path).exists() {
                 println!("  Loading row_data from Parquet: {}", parquet_path);
                 (
@@ -1395,7 +1411,7 @@ impl Segment {
 
     /// Get the count of deleted documents
     pub fn deleted_count(&self) -> u64 {
-        self.deleted.read().unwrap().len() as u64
+        self.deleted.read().unwrap().len()
     }
 
     /// Get the fields (IndexWriter) vector
@@ -1536,7 +1552,7 @@ impl Segment {
         for item in memory_tree.iter() {
             let (key, batch, _ttl) = &*item;
             // Process batch to set deleted rows to NULL (use key as offset/internal_id)
-            let processed_batch = self.process_batch_for_deleted(&batch, deleted, *key);
+            let processed_batch = self.process_batch_for_deleted(batch, deleted, *key);
             total_rows += processed_batch.num_rows();
             all_batches.push((*key, processed_batch));
         }

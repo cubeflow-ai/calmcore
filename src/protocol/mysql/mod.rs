@@ -1,10 +1,9 @@
+mod insert_handler;
+
 use crate::engine::Engine;
 use crate::schema::field::FieldOption;
 use crate::schema::Schema;
-use datafusion::arrow::array::{
-    ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch,
-    StringArray, UInt64Array,
-};
+use datafusion::arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use msql_srv::*;
 use std::io;
@@ -108,7 +107,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                 )]));
                 let result = StringArray::from(vec!["calm-0.1.0"]);
                 let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(result)])
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                    .map_err(io::Error::other)?;
                 return write_query_result(results, &schema, &[batch]);
             }
             // 事务命令和其他初始化命令返回成功
@@ -118,7 +117,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         // INSERT 语句
         if query_lower.starts_with("insert") {
             return tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(handle_insert(
+                tokio::runtime::Handle::current().block_on(insert_handler::handle_insert(
                     self.engine.clone(),
                     query,
                     results,
@@ -177,7 +176,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
             let databases = StringArray::from(vec!["calm"]);
             let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(databases)])
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
 
             return write_query_result(results, &schema, &[batch]);
         }
@@ -200,7 +199,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
             let tables_array = StringArray::from(tables);
             let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(tables_array)])
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
 
             return write_query_result(results, &schema, &[batch]);
         }
@@ -449,461 +448,6 @@ async fn handle_drop_table(
     Ok((schema, vec![batch]))
 }
 
-/// INSERT 语句处理
-/// 支持单条和批量插入:
-/// - INSERT INTO table (col1, col2) VALUES (val1, val2);
-/// - INSERT INTO table (col1, col2) VALUES (val1, val2), (val3, val4), ...;
-async fn handle_insert<W: io::Read + io::Write>(
-    engine: Arc<Engine>,
-    query: &str,
-    results: QueryResultWriter<'_, W>,
-) -> io::Result<()> {
-    let start_time = std::time::Instant::now();
-    let query_clean = query.trim().trim_end_matches(';');
-
-    eprintln!("⏱️  [INSERT] Starting, SQL length: {} bytes", query.len());
-
-    // 提取表名
-    let table_name_start = query_clean
-        .to_lowercase()
-        .find("into ")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing 'INTO'"))?
-        + 5;
-
-    let table_name_end = query_clean[table_name_start..]
-        .find('(')
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing '('"))?;
-
-    let table_name = query_clean[table_name_start..table_name_start + table_name_end]
-        .trim()
-        .to_string();
-
-    // 获取表元数据
-    let meta = engine
-        .get_table_meta(&table_name)
-        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("Table not found: {}", e)))?;
-
-    // 提取列名
-    let columns_start = table_name_start + table_name_end + 1;
-    let columns_end = query_clean[columns_start..]
-        .find(')')
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing ')' after columns"))?
-        + columns_start;
-
-    let columns_str = &query_clean[columns_start..columns_end];
-    let columns: Vec<String> = columns_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-
-    let parse_start = std::time::Instant::now();
-
-    // 提取所有 VALUES 子句
-    let values_start = query_clean
-        .to_lowercase()
-        .find("values")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing 'VALUES'"))?
-        + 6;
-
-    let values_part = query_clean[values_start..].trim();
-
-    // 解析多个 VALUES 行: (val1, val2), (val3, val4), ...
-    let mut all_rows: Vec<Vec<String>> = Vec::new();
-    let mut current_pos = 0;
-
-    while current_pos < values_part.len() {
-        // 跳过空白和逗号
-        while current_pos < values_part.len()
-            && (values_part
-                .chars()
-                .nth(current_pos)
-                .unwrap()
-                .is_whitespace()
-                || values_part.chars().nth(current_pos).unwrap() == ',')
-        {
-            current_pos += 1;
-        }
-
-        if current_pos >= values_part.len() {
-            break;
-        }
-
-        // 找到 '('
-        if values_part.chars().nth(current_pos).unwrap() != '(' {
-            break;
-        }
-        current_pos += 1;
-
-        // 找到对应的 ')'
-        let mut depth = 1;
-        let mut end_pos = current_pos;
-        while end_pos < values_part.len() && depth > 0 {
-            match values_part.chars().nth(end_pos).unwrap() {
-                '(' => depth += 1,
-                ')' => depth -= 1,
-                _ => {}
-            }
-            if depth > 0 {
-                end_pos += 1;
-            }
-        }
-
-        if depth != 0 {
-            return results.error(
-                ErrorKind::ER_PARSE_ERROR,
-                b"Unmatched parentheses in VALUES",
-            );
-        }
-
-        // 提取这一行的值
-        let row_str = &values_part[current_pos..end_pos];
-        let row_values: Vec<String> = parse_value_list(row_str)?;
-
-        if row_values.len() != columns.len() {
-            return results.error(
-                ErrorKind::ER_WRONG_VALUE_COUNT_ON_ROW,
-                format!(
-                    "Column count ({}) doesn't match value count ({})",
-                    columns.len(),
-                    row_values.len()
-                )
-                .as_bytes(),
-            );
-        }
-
-        all_rows.push(row_values);
-        current_pos = end_pos + 1;
-    }
-
-    if all_rows.is_empty() {
-        return results.error(
-            ErrorKind::ER_PARSE_ERROR,
-            b"No values found in INSERT statement",
-        );
-    }
-
-    eprintln!(
-        "⏱️  [INSERT] Parsed {} rows in {:?}",
-        all_rows.len(),
-        parse_start.elapsed()
-    );
-
-    // 按 partition 分组数据
-    let route_start = std::time::Instant::now();
-    use std::collections::HashMap;
-    let mut partition_data: HashMap<String, Vec<Vec<String>>> = HashMap::new();
-
-    let pk_field =
-        meta.schema.primary_key.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Table has no primary key")
-        })?;
-
-    let pk_idx = columns
-        .iter()
-        .position(|c| c.eq_ignore_ascii_case(pk_field))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Primary key not in INSERT"))?;
-
-    // 路由每一行到对应的 partition
-    for row in all_rows {
-        let pk_value = &row[pk_idx];
-        let partition_id = engine.route_partition(&table_name, pk_value).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Partition routing failed: {}", e),
-            )
-        })?;
-
-        partition_data
-            .entry(partition_id)
-            .or_insert_with(Vec::new)
-            .push(row);
-    }
-
-    eprintln!(
-        "⏱️  [INSERT] Routed to {} partitions in {:?}",
-        partition_data.len(),
-        route_start.elapsed()
-    );
-
-    // 对每个 partition 批量插入
-    let insert_start = std::time::Instant::now();
-    let mut total_inserted = 0u64;
-
-    for (partition_id, rows) in partition_data {
-        let batch_build_start = std::time::Instant::now();
-        let batch = build_record_batch(&meta, &columns, &rows)?;
-        eprintln!(
-            "⏱️  [INSERT] Built RecordBatch for partition {} ({} rows) in {:?}",
-            partition_id,
-            rows.len(),
-            batch_build_start.elapsed()
-        );
-
-        let partition_get_start = std::time::Instant::now();
-        let partition = engine
-            .get_partition(&table_name, &partition_id)
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Partition not found"))?;
-        eprintln!(
-            "⏱️  [INSERT] Got partition {} in {:?}",
-            partition_id,
-            partition_get_start.elapsed()
-        );
-
-        let upsert_start = std::time::Instant::now();
-        partition
-            .upsert(batch)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Insert failed: {}", e)))?;
-        eprintln!(
-            "⏱️  [INSERT] Upserted {} rows to partition {} in {:?}",
-            rows.len(),
-            partition_id,
-            upsert_start.elapsed()
-        );
-
-        total_inserted += rows.len() as u64;
-    }
-
-    eprintln!(
-        "⏱️  [INSERT] Total insert time: {:?}, {} rows, {:.0} rows/sec",
-        insert_start.elapsed(),
-        total_inserted,
-        total_inserted as f64 / insert_start.elapsed().as_secs_f64()
-    );
-    eprintln!("⏱️  [INSERT] Overall time: {:?}\n", start_time.elapsed());
-
-    results.completed(total_inserted, 0)
-}
-
-/// 解析值列表，处理引号和逗号
-fn parse_value_list(values_str: &str) -> io::Result<Vec<String>> {
-    let mut values = Vec::new();
-    let mut current_value = String::new();
-    let mut in_quotes = false;
-    let mut quote_char = ' ';
-    let mut escaped = false;
-
-    for ch in values_str.chars() {
-        if escaped {
-            current_value.push(ch);
-            escaped = false;
-            continue;
-        }
-
-        match ch {
-            '\\' => {
-                escaped = true;
-            }
-            '\'' | '"' => {
-                if !in_quotes {
-                    in_quotes = true;
-                    quote_char = ch;
-                } else if ch == quote_char {
-                    in_quotes = false;
-                } else {
-                    current_value.push(ch);
-                }
-            }
-            ',' => {
-                if in_quotes {
-                    current_value.push(ch);
-                } else {
-                    values.push(current_value.trim().to_string());
-                    current_value.clear();
-                }
-            }
-            _ => {
-                current_value.push(ch);
-            }
-        }
-    }
-
-    if !current_value.trim().is_empty() {
-        values.push(current_value.trim().to_string());
-    }
-
-    Ok(values)
-}
-
-/// 构建 RecordBatch
-fn build_record_batch(
-    meta: &crate::catalog::TableMeta,
-    columns: &[String],
-    rows: &[Vec<String>],
-) -> io::Result<RecordBatch> {
-    use datafusion::arrow::array::TimestampMillisecondArray;
-    use datafusion::arrow::datatypes::TimeUnit;
-
-    let mut arrays: Vec<ArrayRef> = Vec::new();
-    let mut arrow_fields: Vec<Field> = Vec::new();
-
-    for col_name in columns {
-        let field_opt = meta
-            .schema
-            .fields
-            .iter()
-            .find(|f| f.name().eq_ignore_ascii_case(col_name))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Column '{}' not found in schema", col_name),
-                )
-            })?;
-
-        let col_idx = columns.iter().position(|c| c == col_name).unwrap();
-
-        let (array, arrow_field) = match field_opt {
-            FieldOption::I32 { name, .. } => {
-                let vals: Result<Vec<i32>, _> = rows
-                    .iter()
-                    .map(|row| {
-                        row[col_idx].parse().map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("Invalid I32: {}", e),
-                            )
-                        })
-                    })
-                    .collect();
-                (
-                    Arc::new(Int32Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Int32, false),
-                )
-            }
-            FieldOption::I64 { name, .. } => {
-                let vals: Result<Vec<i64>, _> = rows
-                    .iter()
-                    .map(|row| {
-                        row[col_idx].parse().map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("Invalid I64: {}", e),
-                            )
-                        })
-                    })
-                    .collect();
-                (
-                    Arc::new(Int64Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Int64, false),
-                )
-            }
-            FieldOption::U64 { name, .. } => {
-                let vals: Result<Vec<u64>, _> = rows
-                    .iter()
-                    .map(|row| {
-                        row[col_idx].parse().map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("Invalid U64: {}", e),
-                            )
-                        })
-                    })
-                    .collect();
-                (
-                    Arc::new(UInt64Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::UInt64, false),
-                )
-            }
-            FieldOption::F32 { name, .. } => {
-                let vals: Result<Vec<f32>, _> = rows
-                    .iter()
-                    .map(|row| {
-                        row[col_idx].parse().map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("Invalid F32: {}", e),
-                            )
-                        })
-                    })
-                    .collect();
-                (
-                    Arc::new(Float32Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Float32, false),
-                )
-            }
-            FieldOption::F64 { name, .. } => {
-                let vals: Result<Vec<f64>, _> = rows
-                    .iter()
-                    .map(|row| {
-                        row[col_idx].parse().map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("Invalid F64: {}", e),
-                            )
-                        })
-                    })
-                    .collect();
-                (
-                    Arc::new(Float64Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Float64, false),
-                )
-            }
-            FieldOption::Boolean { name, .. } => {
-                let vals: Result<Vec<bool>, _> = rows
-                    .iter()
-                    .map(|row| match row[col_idx].to_lowercase().as_str() {
-                        "true" | "1" => Ok(true),
-                        "false" | "0" => Ok(false),
-                        _ => Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid boolean value: {}", row[col_idx]),
-                        )),
-                    })
-                    .collect();
-                (
-                    Arc::new(BooleanArray::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Boolean, false),
-                )
-            }
-            FieldOption::Keyword { name, .. } => {
-                let vals: Vec<&str> = rows.iter().map(|row| row[col_idx].as_str()).collect();
-                (
-                    Arc::new(StringArray::from(vals)) as ArrayRef,
-                    Field::new(name, DataType::Utf8, false),
-                )
-            }
-            FieldOption::Timestamp { name, .. } => {
-                let vals: Result<Vec<i64>, _> = rows
-                    .iter()
-                    .map(|row| {
-                        row[col_idx].parse().map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("Invalid Timestamp: {}", e),
-                            )
-                        })
-                    })
-                    .collect();
-                (
-                    Arc::new(TimestampMillisecondArray::from(vals?)) as ArrayRef,
-                    Field::new(
-                        name,
-                        DataType::Timestamp(TimeUnit::Millisecond, None),
-                        false,
-                    ),
-                )
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Unsupported field type for INSERT: {:?}", field_opt),
-                ));
-            }
-        };
-
-        arrays.push(array);
-        arrow_fields.push(arrow_field);
-    }
-
-    let schema = Arc::new(ArrowSchema::new(arrow_fields));
-    RecordBatch::try_new(schema, arrays).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("Failed to create batch: {}", e),
-        )
-    })
-}
-
 /// DELETE 语句处理
 async fn handle_delete<W: io::Read + io::Write>(
     engine: Arc<Engine>,
@@ -973,7 +517,7 @@ async fn handle_delete<W: io::Read + io::Write>(
 
         let partition_id = engine
             .route_partition(&table_name, &pk_value)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Routing failed: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("Routing failed: {}", e)))?;
 
         let partition = engine
             .get_partition(&table_name, &partition_id)
@@ -1004,7 +548,7 @@ async fn handle_delete<W: io::Read + io::Write>(
 
         let deleted = partition
             .delete_by_pk(&pk_array_single)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Delete failed: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("Delete failed: {}", e)))?;
 
         total_deleted += deleted;
     }

@@ -99,7 +99,7 @@ pub fn analyze_query(statement: Statement) -> Option<QueryPlan> {
 }
 
 /// 从 Query AST 中提取表名
-fn extract_table_name_from_query(query: &Box<Query>) -> Option<String> {
+fn extract_table_name_from_query(query: &Query) -> Option<String> {
     let body = &query.body;
 
     let select = match body.as_ref() {
@@ -125,7 +125,7 @@ fn extract_table_name_from_query(query: &Box<Query>) -> Option<String> {
     }
 }
 /// 检查是否是聚合查询（通过 AST）
-fn is_aggregation_query_from_ast(query: &Box<Query>) -> bool {
+fn is_aggregation_query_from_ast(query: &Query) -> bool {
     let body = &query.body;
 
     let select = match body.as_ref() {
@@ -171,7 +171,7 @@ fn is_aggregate_expr(expr: &Expr) -> bool {
 }
 
 /// 从 Query AST 中分析 ORDER BY + LIMIT
-fn analyze_sort_limit_from_ast(query: &Box<Query>, _table_name: &str) -> Option<SortLimitInfo> {
+fn analyze_sort_limit_from_ast(query: &Query, _table_name: &str) -> Option<SortLimitInfo> {
     // 提取 LIMIT 和 OFFSET
     let (limit, offset) = extract_limit_offset_from_ast(query)?;
 
@@ -180,7 +180,7 @@ fn analyze_sort_limit_from_ast(query: &Box<Query>, _table_name: &str) -> Option<
         match &order_by.kind {
             datafusion::sql::sqlparser::ast::OrderByKind::Expressions(exprs) => {
                 if !exprs.is_empty() {
-                    extract_sort_fields_from_ast(&exprs)?
+                    extract_sort_fields_from_ast(exprs)?
                 } else {
                     vec![] // 纯 LIMIT 查询
                 }
@@ -209,7 +209,7 @@ fn analyze_sort_limit_from_ast(query: &Box<Query>, _table_name: &str) -> Option<
 }
 
 /// 从 Query AST 中提取 LIMIT 和 OFFSET
-fn extract_limit_offset_from_ast(query: &Box<Query>) -> Option<(usize, Option<usize>)> {
+fn extract_limit_offset_from_ast(query: &Query) -> Option<(usize, Option<usize>)> {
     // 新版 sqlparser 使用 limit_clause 字段
     let limit_clause = query.limit_clause.as_ref()?;
 
@@ -299,10 +299,7 @@ fn extract_sort_fields_from_ast(order_by: &[OrderByExpr]) -> Option<Vec<(String,
 }
 
 /// 从 WHERE 子句中提取 range 条件（针对特定字段）
-fn extract_range_condition_from_ast(
-    query: &Box<Query>,
-    field_name: &str,
-) -> Option<RangeCondition> {
+fn extract_range_condition_from_ast(query: &Query, field_name: &str) -> Option<RangeCondition> {
     let body = &query.body;
 
     let select = match body.as_ref() {

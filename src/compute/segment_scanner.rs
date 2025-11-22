@@ -243,7 +243,7 @@ impl SegmentScanner {
         );
 
         // 将有序的 doc_ids 转换为 bitmap
-        let ordered_bitmap = RoaringBitmap::from_sorted_iter(ordered_doc_ids.into_iter())
+        let ordered_bitmap = RoaringBitmap::from_sorted_iter(ordered_doc_ids)
             .unwrap_or_else(|_| RoaringBitmap::new());
 
         // 构建执行计划
@@ -364,56 +364,53 @@ impl SegmentScanner {
                 if let Expr::Column(column) = &*binary.left {
                     let field_name = &column.name;
 
-                    match &*binary.right {
-                        Expr::Literal(scalar_value, _) => {
-                            match binary.op {
-                                Operator::Eq => {
-                                    return self.query_equal(field_name, scalar_value);
-                                }
-                                // col > value -> range(value, false, +∞, true)
-                                Operator::Gt => {
-                                    return self.query_range(
-                                        field_name,
-                                        scalar_value,
-                                        false,
-                                        &ScalarValue::Null,
-                                        true,
-                                    );
-                                }
-                                // col >= value -> range(value, true, +∞, true)
-                                Operator::GtEq => {
-                                    return self.query_range(
-                                        field_name,
-                                        scalar_value,
-                                        true,
-                                        &ScalarValue::Null,
-                                        true,
-                                    );
-                                }
-                                // col < value -> range(-∞, true, value, false)
-                                Operator::Lt => {
-                                    return self.query_range(
-                                        field_name,
-                                        &ScalarValue::Null,
-                                        true,
-                                        scalar_value,
-                                        false,
-                                    );
-                                }
-                                // col <= value -> range(-∞, true, value, true)
-                                Operator::LtEq => {
-                                    return self.query_range(
-                                        field_name,
-                                        &ScalarValue::Null,
-                                        true,
-                                        scalar_value,
-                                        true,
-                                    );
-                                }
-                                _ => {}
+                    if let Expr::Literal(scalar_value, _) = &*binary.right {
+                        match binary.op {
+                            Operator::Eq => {
+                                return self.query_equal(field_name, scalar_value);
                             }
+                            // col > value -> range(value, false, +∞, true)
+                            Operator::Gt => {
+                                return self.query_range(
+                                    field_name,
+                                    scalar_value,
+                                    false,
+                                    &ScalarValue::Null,
+                                    true,
+                                );
+                            }
+                            // col >= value -> range(value, true, +∞, true)
+                            Operator::GtEq => {
+                                return self.query_range(
+                                    field_name,
+                                    scalar_value,
+                                    true,
+                                    &ScalarValue::Null,
+                                    true,
+                                );
+                            }
+                            // col < value -> range(-∞, true, value, false)
+                            Operator::Lt => {
+                                return self.query_range(
+                                    field_name,
+                                    &ScalarValue::Null,
+                                    true,
+                                    scalar_value,
+                                    false,
+                                );
+                            }
+                            // col <= value -> range(-∞, true, value, true)
+                            Operator::LtEq => {
+                                return self.query_range(
+                                    field_name,
+                                    &ScalarValue::Null,
+                                    true,
+                                    scalar_value,
+                                    true,
+                                );
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
                 None
@@ -717,7 +714,7 @@ impl SegmentStream {
             if let Some(batch_start_id) = self.raw_data.get_batch_key_for_doc(doc_id) {
                 batch_groups
                     .entry(batch_start_id)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(doc_id);
                 batch_keys_set.insert(batch_start_id);
                 collected_rows += 1;
@@ -752,12 +749,12 @@ impl SegmentStream {
 
         // 2. 批量读取这一批的 storage batches
         let batch_keys: Vec<u32> = batch_keys_set.into_iter().collect();
-        let is_empty_projection = self.projection.as_ref().map_or(false, |p| p.is_empty());
+        let is_empty_projection = self.projection.as_ref().is_some_and(|p| p.is_empty());
 
         let source_batches = if is_empty_projection {
             HashMap::new()
         } else {
-            let proj_to_use = self.projection.as_ref().map(|p| p.as_slice());
+            let proj_to_use = self.projection.as_deref();
             self.raw_data
                 .get_batch_with_projection(&batch_keys, proj_to_use)
         };

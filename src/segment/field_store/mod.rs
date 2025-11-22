@@ -65,21 +65,21 @@ impl I64RoaringSerializer {
         Self { zstd_level }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self { zstd_level: 3 }
     }
 }
 
 impl persist::ReadSerializer<i64, RoaringBitmap> for I64RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i64> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<i64> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -153,14 +153,14 @@ impl U64RoaringSerializer {
 }
 
 impl persist::ReadSerializer<u64, RoaringBitmap> for U64RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u64> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<u64> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -228,14 +228,14 @@ impl U32RoaringSerializer {
 }
 
 impl persist::ReadSerializer<u32, RoaringBitmap> for U32RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u32> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<u32> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -299,14 +299,14 @@ impl U8RoaringSerializer {
 }
 
 impl persist::ReadSerializer<u8, RoaringBitmap> for U8RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u8> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<u8> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -366,14 +366,14 @@ impl BooleanRoaringSerializer {
 }
 
 impl persist::ReadSerializer<bool, RoaringBitmap> for BooleanRoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<bool> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<bool> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -432,14 +432,14 @@ impl U16RoaringSerializer {
 }
 
 impl persist::ReadSerializer<u16, RoaringBitmap> for U16RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u16> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<u16> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -498,14 +498,14 @@ impl I32RoaringSerializer {
 }
 
 impl persist::ReadSerializer<i32, RoaringBitmap> for I32RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i32> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<i32> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -569,14 +569,14 @@ impl I8RoaringSerializer {
 }
 
 impl persist::ReadSerializer<i8, RoaringBitmap> for I8RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i8> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<i8> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -635,14 +635,14 @@ impl I16RoaringSerializer {
 }
 
 impl persist::ReadSerializer<i16, RoaringBitmap> for I16RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<i16> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<i16> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -701,14 +701,14 @@ impl F32RoaringSerializer {
 }
 
 impl persist::ReadSerializer<OrderedF32, RoaringBitmap> for F32RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<OrderedF32> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<OrderedF32> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -771,7 +771,7 @@ impl F64RoaringSerializer {
         Self { zstd_level }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self { zstd_level: 3 }
     }
@@ -781,14 +781,14 @@ impl F64RoaringSerializer {
 // (already imported at the top of this file)
 
 impl persist::ReadSerializer<OrderedF64, RoaringBitmap> for F64RoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<OrderedF64> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<OrderedF64> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -860,21 +860,21 @@ impl StringRoaringSerializer {
         Self { zstd_level }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self { zstd_level: 3 }
     }
 }
 
 impl persist::ReadSerializer<String, RoaringBitmap> for StringRoaringSerializer {
-    fn deserialize_value<'a>(
+    fn deserialize_value(
         &self,
-        data: &'a [u8],
+        data: &[u8],
     ) -> std::result::Result<RoaringBitmap, Box<dyn std::error::Error>> {
         decode_roaring_from_bytes(data)
     }
 
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<String> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<String> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -938,8 +938,14 @@ impl persist::WriteSerializer<String, RoaringBitmap> for StringRoaringSerializer
 #[derive(Clone)]
 pub struct U32RecordBatchSerializer;
 
+impl Default for U32RecordBatchSerializer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl U32RecordBatchSerializer {
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::should_implement_trait)]
     pub fn new() -> Self {
         Self
     }
@@ -983,7 +989,7 @@ impl persist::WriteSerializer<u32, RecordBatch> for U32RecordBatchSerializer {
 }
 
 impl persist::ReadSerializer<u32, RecordBatch> for U32RecordBatchSerializer {
-    fn deserialize_keys<'a>(&self, data: &'a [u8]) -> Vec<u32> {
+    fn deserialize_keys(&self, data: &[u8]) -> Vec<u32> {
         let mut pos = 0;
         if data.len() < 4 {
             return Vec::new();
@@ -1005,7 +1011,7 @@ impl persist::ReadSerializer<u32, RecordBatch> for U32RecordBatchSerializer {
         keys
     }
 
-    fn deserialize_value<'a>(&self, data: &'a [u8]) -> Result<RecordBatch, Box<dyn Error>> {
+    fn deserialize_value(&self, data: &[u8]) -> Result<RecordBatch, Box<dyn Error>> {
         use bytes::Bytes;
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -1157,7 +1163,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::should_implement_trait)]
     pub(crate) fn append_ids(&mut self, k: K, ids: Vec<u32>) {
         if let InvertedIndex::Memory(tree) = self {
             match tree.get(&k) {
@@ -1344,7 +1350,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::should_implement_trait)]
     pub(crate) fn memory_get_ref(&self, k: &K) -> Option<&Arc<RwLock<Vec<u32>>>> {
         match self {
             InvertedIndex::Disk(_) => unreachable!(),
@@ -1352,10 +1358,10 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::should_implement_trait)]
     pub fn len(&self) -> usize {
         match self {
-            InvertedIndex::Disk(r) => r.len() as usize,
+            InvertedIndex::Disk(r) => r.len(),
             InvertedIndex::Memory(btree) => btree.len(),
         }
     }
@@ -1365,13 +1371,13 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
 /// - 0: delta-encoded u32 sequence (big-endian, mem_btree::persist::num_ser::u32_coder)
 /// - 1: RoaringBitmap native serialization
 /// Returns Vec<u8> on success.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::should_implement_trait)]
 pub fn encode_roaring_from_u32s(ids: &[u32]) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     if ids.len() < 1000 {
         // marker 0 => delta encoding
         out.push(0u8);
-        num_ser::u32_coder::write_delta(&mut out, &ids.to_vec())?;
+        num_ser::u32_coder::write_delta(&mut out, ids)?;
     } else {
         // marker 1 => roaring native
         out.push(1u8);
@@ -1413,26 +1419,26 @@ pub fn encode_roaring_from_bitmap(bitmap: &RoaringBitmap) -> Vec<u8> {
     // Try delta encoding
     let mut delta_buf = Vec::new();
     delta_buf.push(0u8);
-    if let Ok(_) = num_ser::u32_coder::write_delta(&mut delta_buf, &ids) {
+    if num_ser::u32_coder::write_delta(&mut delta_buf, &ids).is_ok() {
         // Try roaring native
         let mut roaring_buf = Vec::new();
         roaring_buf.push(1u8);
-        if let Ok(_) = bitmap.serialize_into(&mut roaring_buf) {
+        if bitmap.serialize_into(&mut roaring_buf).is_ok() {
             // Choose the smaller one
             if delta_buf.len() <= roaring_buf.len() {
-                return delta_buf;
+                delta_buf
             } else {
-                return roaring_buf;
+                roaring_buf
             }
         } else {
             // Roaring serialization failed, use delta
-            return delta_buf;
+            delta_buf
         }
     } else {
         // Delta encoding failed (shouldn't happen), fallback to roaring
         let mut buf = Vec::new();
         buf.push(1u8);
         let _ = bitmap.serialize_into(&mut buf);
-        return buf;
+        buf
     }
 }

@@ -2,7 +2,6 @@
 use calm::engine::Engine;
 use chrono::{Duration, TimeZone, Utc};
 use datafusion::arrow::array::Int64Array;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -207,7 +207,7 @@ impl Partition {
                     .filter_map(|(_, segment)| {
                         segment
                             .mget_internal_id(pk_hash.as_ref(), column)
-                            .and_then(|ids| Some((segment.clone(), ids)))
+                            .map(|ids| (segment.clone(), ids))
                     })
                     .collect();
 
@@ -464,13 +464,13 @@ impl Partition {
         let projection_mask =
             ProjectionMask::roots(builder.parquet_schema(), projection_indices.iter().copied());
 
-        let mut reader = builder
+        let reader = builder
             .with_projection(projection_mask)
             .build()
             .map_err(|e| CoreError::IOError(format!("Failed to build parquet reader: {}", e)))?;
 
         let mut all_batches = Vec::new();
-        while let Some(result) = reader.next() {
+        for result in reader {
             let batch =
                 result.map_err(|e| CoreError::IOError(format!("Failed to read batch: {}", e)))?;
             all_batches.push(batch);
@@ -604,7 +604,7 @@ impl Partition {
             .collect();
 
         // Persist the segment with history deletes snapshot
-        segment.persist(&partition_path, seg_id, &history_segments)?;
+        segment.persist(partition_path, seg_id, &history_segments)?;
 
         log::debug!("Segment {} persisted successfully", seg_id);
 
@@ -711,11 +711,11 @@ impl Partition {
 
         // 1.5. Crash recovery: Clean up incomplete persists and complete file replacements
         log::info!("Checking for incomplete persists...");
-        Self::recover_incomplete_persists(&partition_path)?;
+        Self::recover_incomplete_persists(partition_path)?;
 
         // Scan for segment directories with new format: segment-{start}-{end}
         let mut segment_ranges: Vec<(u64, u64)> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&partition_path) {
+        if let Ok(entries) = std::fs::read_dir(partition_path) {
             for entry in entries {
                 if let Ok(entry) = entry {
                     let name = entry.file_name();
@@ -751,8 +751,7 @@ impl Partition {
         // 2. Load all frozen segments (all are already persisted)
         let mut frozen_segments = Vec::new();
         for (start_id, end_id) in &segment_ranges {
-            let segment =
-                Segment::load_frozen(&partition_path, *start_id, *end_id, schema.clone())?;
+            let segment = Segment::load_frozen(partition_path, *start_id, *end_id, schema.clone())?;
             // Use start_id as the key
             frozen_segments.push((*start_id, Arc::new(segment)));
         }

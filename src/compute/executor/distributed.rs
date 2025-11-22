@@ -116,7 +116,7 @@ impl DistributedExecutor {
             // 解析字段和方向
             let mut fields = Vec::new();
             for part in order_clause.split(',') {
-                let tokens: Vec<&str> = part.trim().split_whitespace().collect();
+                let tokens: Vec<&str> = part.split_whitespace().collect();
                 if !tokens.is_empty() {
                     let field_name = tokens[0].to_lowercase(); // 🔧 统一转小写
                     let ascending = tokens

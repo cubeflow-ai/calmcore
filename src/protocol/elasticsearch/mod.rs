@@ -403,7 +403,7 @@ async fn index_document_with_id(
             "successful": 1,
             "failed": 0
         },
-        "_seq_no": result_ids.get(0).unwrap_or(&0),
+        "_seq_no": result_ids.first().unwrap_or(&0),
         "_primary_term": 1
     })))
 }
@@ -452,7 +452,7 @@ async fn index_document(
             "successful": 1,
             "failed": 0
         },
-        "_seq_no": result_ids.get(0).unwrap_or(&0),
+        "_seq_no": result_ids.first().unwrap_or(&0),
         "_primary_term": 1
     })))
 }
@@ -1307,10 +1307,8 @@ fn convert_es_sort_to_sql(sort: &Value) -> Option<String> {
                             .get("order")
                             .and_then(|v| v.as_str())
                             .unwrap_or("asc")
-                    } else if let Some(order_str) = order_spec.as_str() {
-                        order_str
                     } else {
-                        "asc"
+                        order_spec.as_str().unwrap_or("asc")
                     };
 
                     let order_upper = order.to_uppercase();
@@ -1336,10 +1334,8 @@ fn convert_es_sort_to_sql(sort: &Value) -> Option<String> {
                     .get("order")
                     .and_then(|v| v.as_str())
                     .unwrap_or("asc")
-            } else if let Some(order_str) = order_spec.as_str() {
-                order_str
             } else {
-                "asc"
+                order_spec.as_str().unwrap_or("asc")
             };
 
             let order_upper = order.to_uppercase();
@@ -1472,7 +1468,7 @@ async fn insert_document(
     let partition_value = table_meta
         .partition_strategy
         .router_field()
-        .and_then(|f| Some(doc.get(f).to_json_string()))
+        .map(|f| doc.get(f).to_json_string())
         .unwrap_or_default();
 
     // 使用分区字段的值来路由
@@ -1483,7 +1479,7 @@ async fn insert_document(
 
     let partition = server
         .engine
-        .get_partition(&index, &partition_id)
+        .get_partition(index, &partition_id)
         .await
         .ok_or_else(|| internal_error("Partition not found".to_string()))?;
 

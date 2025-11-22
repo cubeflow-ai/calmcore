@@ -142,7 +142,7 @@ impl TableProvider for PartitionTableProviderWithHints {
             let doc_count = current_segment.doc_count();
 
             if doc_count > 0 {
-                let scanner = self.create_segment_scanner(&*current_segment)?;
+                let scanner = self.create_segment_scanner(&current_segment)?;
                 // 🚀 关键：传递 sort 和 effective_limit 给 SegmentScanner
                 if let Some(plan) =
                     scanner.create_plan(filters, projection, effective_limit, self.sort.clone())

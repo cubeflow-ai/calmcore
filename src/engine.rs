@@ -162,9 +162,9 @@ impl Engine {
                         let path = entry.path();
                         if path.is_dir() {
                             if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                                if dir_name.starts_with("partition-") {
-                                    let partition_id =
-                                        dir_name.strip_prefix("partition-").unwrap().to_string();
+                                if let Some(partition_id) = 
+                                    crate::catalog::PartitionStrategy::extract_partition_id_from_dir_name(dir_name) 
+                                {
                                     ids.push(partition_id);
                                 }
                             }
@@ -196,7 +196,24 @@ impl Engine {
 
             // 加载所有 partition
             for partition_id in partition_ids {
-                let partition_dir = table_dir.join(format!("partition-{}", partition_id));
+                let mut partition_dir = table_dir.join(
+                    crate::catalog::PartitionStrategy::generate_partition_dir_name(&partition_id),
+                );
+
+                // 兼容旧格式：如果新格式目录不存在，尝试旧格式
+                if !partition_dir.exists() {
+                    // 尝试解析为数字，检查是否有旧格式目录
+                    if let Ok(old_id) = partition_id.parse::<usize>() {
+                        let old_dir = table_dir.join(format!("partition-{}", old_id));
+                        if old_dir.exists() {
+                            log::warn!(
+                                "⚠️  [Engine] Found old format partition directory: partition-{}, please run migration script",
+                                old_id
+                            );
+                            partition_dir = old_dir;
+                        }
+                    }
+                }
 
                 // 检查目录是否存在
                 if !partition_dir.exists() {
@@ -304,12 +321,9 @@ impl Engine {
                 .partition_strategy
                 .generate_partition_id(table_name, i, None);
 
-            let partition_dir = self
-                .config
-                .data_dir
-                .join("tables")
-                .join(table_name)
-                .join(format!("partition-{}", partition_id));
+            let partition_dir = self.config.data_dir.join("tables").join(table_name).join(
+                crate::catalog::PartitionStrategy::generate_partition_dir_name(&partition_id),
+            );
 
             log::debug!(
                 "🔍 [DEBUG create_table] Creating partition {} at {:?}",
@@ -512,7 +526,7 @@ impl Engine {
             .data_dir
             .join("tables")
             .join(table_name)
-            .join(format!("partition-{}", id));
+            .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(&id));
         let partition = Partition::load(
             id,
             table_name.to_string(),
@@ -1112,12 +1126,10 @@ impl Engine {
             table_name
         );
 
-        let partition_dir = self
-            .config
-            .data_dir
-            .join("tables")
-            .join(table_name)
-            .join(format!("partition-{}", partition_id));
+        let partition_dir =
+            self.config.data_dir.join("tables").join(table_name).join(
+                crate::catalog::PartitionStrategy::generate_partition_dir_name(&partition_id),
+            );
 
         let partition = Partition::new(
             partition_id.clone(),

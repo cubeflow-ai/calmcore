@@ -15,8 +15,38 @@ use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
     marker::PhantomData,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
+
+use mem_btree::persist::UnionLeafSerializer;
+
+/// Union leaf for bitmap aggregation - stores combined bitmap of all values in chunk
+/// This enables significant performance improvements for range queries
+struct BitmapUnionLeaf {
+    union_bitmap: Mutex<roaring::RoaringBitmap>,
+}
+
+impl BitmapUnionLeaf {
+    fn new() -> Self {
+        Self {
+            union_bitmap: Mutex::new(roaring::RoaringBitmap::new()),
+        }
+    }
+}
+
+impl UnionLeafSerializer<roaring::RoaringBitmap> for BitmapUnionLeaf {
+    fn add_value<'a>(&self, value: &'a roaring::RoaringBitmap) {
+        let mut guard = self.union_bitmap.lock().unwrap();
+        *guard = &*guard | value;
+    }
+
+    fn release<'a>(&self) -> roaring::RoaringBitmap {
+        let mut guard = self.union_bitmap.lock().unwrap();
+        let result = guard.clone();
+        *guard = roaring::RoaringBitmap::new();
+        result
+    }
+}
 
 use datafusion::arrow::array::{ArrayRef, RecordBatch};
 use roaring::RoaringBitmap;
@@ -95,7 +125,19 @@ impl<K: IndexKey> GenericIndexedField<K> {
     /// 从磁盘加载索引
     pub fn from_disk(field: &FieldOption, field_path: &str) -> CoreResult<Self> {
         let zstd_level = field.zstd_level();
-        let inverted_index = InvertedIndex::new_disk(field_path, K::new_serializer(zstd_level))?;
+
+        // 检查字段目录是否存在
+        let inverted_index = if std::path::Path::new(field_path).exists() {
+            // 目录存在，从磁盘加载
+            InvertedIndex::new_disk(field_path, K::new_serializer(zstd_level))?
+        } else {
+            // 目录不存在，创建空索引（可能是新添加的字段）
+            eprintln!(
+                "⚠️  [GenericIndexedField] Field directory not found: {}, creating empty index",
+                field_path
+            );
+            InvertedIndex::new_memory(64) // 创建空的内存索引
+        };
 
         Ok(Self {
             field: field.clone(),
@@ -135,7 +177,12 @@ impl<K: IndexKey> GenericIndexedField<K> {
         let writer = TreeWriter::new(std::path::PathBuf::from(path), chunk_size);
 
         writer
-            .persist::<K, RoaringBitmap, RoaringBitmap>(len, Box::new(serializer), None, iter)
+            .persist::<K, RoaringBitmap, RoaringBitmap>(
+                len,
+                Box::new(serializer),
+                Some(Box::new(BitmapUnionLeaf::new())), // 启用 union_leaf 优化
+                iter,
+            )
             .map_err(|e| CoreError::IOError(e.to_string()))?;
 
         // 4. 创建磁盘索引
@@ -159,7 +206,7 @@ impl<K: IndexKey> GenericIndexedField<K> {
 
 impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
     fn write(&self, data: &RecordBatch, start_id: u32) -> CoreResult<()> {
-        let Some(arr) = data.column_by_name(&self.field.name()) else {
+        let Some(arr) = data.column_by_name(self.field.name()) else {
             return Ok(());
         };
 
@@ -168,7 +215,7 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
         // 提取键值对并构建临时索引
         for (row_idx, key) in K::extract_from_array(arr) {
             let id = start_id + row_idx as u32;
-            let normalized_key = (&key).normalize(self.field.case_sensitive());
+            let normalized_key = key.normalize(self.field.case_sensitive());
 
             if let Some(list) = mtp.get_mut(&normalized_key) {
                 if list.last() != Some(&id) {
@@ -190,7 +237,7 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
     }
 
     fn name(&self) -> &str {
-        &self.field.name()
+        self.field.name()
     }
 
     fn field_type(&self) -> FieldType {
@@ -202,7 +249,7 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
         let indexs = self.indexs.read().unwrap();
 
         for (_row_idx, key) in K::extract_from_array(column) {
-            let normalized_key = (&key).normalize(self.field.case_sensitive());
+            let normalized_key = key.normalize(self.field.case_sensitive());
             if let Some(bitmap) = indexs.get_bitmap(&normalized_key) {
                 result_ids.extend(bitmap.iter());
             }
@@ -239,7 +286,7 @@ impl<K: IndexKey> PkWriter for GenericIndexedField<K> {
         // 使用start_id + row_idx 生成文档ID
         for (row_idx, key) in K::extract_from_array(pk) {
             let id = start_id + row_idx as u32;
-            let normalized_key = (&key).normalize(self.field.case_sensitive());
+            let normalized_key = key.normalize(self.field.case_sensitive());
             if let Some(list) = mtp.get_mut(&normalized_key) {
                 if !list.is_empty() {
                     cur_dels.extend(list.clone());
@@ -284,7 +331,7 @@ impl<K: IndexKey> IndexReader for GenericIndexedField<K> {
 
     fn query(&self, value: &datafusion::scalar::ScalarValue) -> Option<RoaringBitmap> {
         K::from_scalar(value).and_then(|key| {
-            let normalized_key = (&key).normalize(self.field.case_sensitive());
+            let normalized_key = key.normalize(self.field.case_sensitive());
             let indexs = self.indexs.read().unwrap();
             indexs.get_bitmap(&normalized_key)
         })

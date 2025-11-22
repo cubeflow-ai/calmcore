@@ -45,7 +45,39 @@ def connect_db(host='127.0.0.1', port=3306, user='root', database='default'):
         print_colored(Colors.RED, f"❌ Failed to connect: {e}")
         sys.exit(1)
 
-def create_table_graphql(host='127.0.0.1', port=8000):
+def drop_table_graphql(table_name, host='127.0.0.1', port=9567):
+    """使用 GraphQL 删除表"""
+    import requests
+    
+    graphql_url = f"http://{host}:{port}/graphql"
+    
+    mutation = f"""
+    mutation {{
+        dropTable(name: "{table_name}")
+    }}
+    """
+    
+    try:
+        response = requests.post(graphql_url, json={'query': mutation})
+        if response.status_code == 200:
+            result = response.json()
+            if 'errors' in result:
+                # 如果表不存在，忽略错误
+                error_msg = result['errors'][0]['message']
+                if 'not found' in error_msg.lower() or 'does not exist' in error_msg.lower():
+                    return True
+                raise Exception(error_msg)
+            return True
+        else:
+            raise Exception(f"HTTP {response.status_code}: {response.text}")
+    except Exception as e:
+        # 如果是连接错误或表不存在，返回 True
+        error_str = str(e).lower()
+        if 'not found' in error_str or 'does not exist' in error_str:
+            return True
+        raise Exception(f"GraphQL request failed: {e}")
+
+def create_table_graphql(host='127.0.0.1', port=9567):
     """使用 GraphQL 创建表"""
     import requests
     
@@ -104,6 +136,14 @@ def load_nyc_taxi(conn, limit=None, graphql_port=8000):
     
     print(f"Found {len(parquet_files)} parquet file(s)")
     
+    # 删除已存在的表（如果存在）
+    print_colored(Colors.BLUE, "\n� ️  Dropping existing table 'taxi_trips' if exists...")
+    try:
+        drop_table_graphql('taxi_trips', port=graphql_port)
+        print_colored(Colors.GREEN, "✓ Table dropped (or didn't exist)")
+    except Exception as e:
+        print_colored(Colors.YELLOW, f"⚠️  Warning: {e}")
+    
     # 创建表（使用 GraphQL）
     print_colored(Colors.BLUE, "\n📋 Creating table 'taxi_trips' via GraphQL...")
     
@@ -153,10 +193,28 @@ def load_nyc_taxi(conn, limit=None, graphql_port=8000):
             df.rename(columns=available_cols, inplace=True)
             
             # 转换时间戳为毫秒
+            # Pandas datetime64[ns] 是纳秒级，需要除以 10^6 转换为毫秒
             if 'pickup_datetime' in df.columns:
-                df['pickup_datetime'] = pd.to_datetime(df['pickup_datetime']).astype('int64') // 10**6
+                # 先转换为 datetime，再转为纳秒时间戳，最后转为毫秒
+                dt_series = pd.to_datetime(df['pickup_datetime'])
+                df['pickup_datetime'] = (dt_series.astype('int64') // 10**6).astype('int64')
+                
             if 'dropoff_datetime' in df.columns:
-                df['dropoff_datetime'] = pd.to_datetime(df['dropoff_datetime']).astype('int64') // 10**6
+                dt_series = pd.to_datetime(df['dropoff_datetime'])
+                df['dropoff_datetime'] = (dt_series.astype('int64') // 10**6).astype('int64')
+            
+            # 验证时间戳（应该是 13 位数字，表示 2001-2099 年之间）
+            if 'pickup_datetime' in df.columns and len(df) > 0:
+                sample_ts = int(df['pickup_datetime'].iloc[0])
+                sample_date = pd.to_datetime(df.iloc[0]['tpep_pickup_datetime']) if 'tpep_pickup_datetime' in df.columns else None
+                print(f"  📅 Sample: {sample_date} → {sample_ts} ms ({len(str(sample_ts))} digits)")
+                
+                # 检查时间戳是否合理（2001-2099年之间）
+                if sample_ts < 10**12:  # 小于 2001-09-09
+                    print(f"  ⚠️  ERROR: Timestamp too small! Expected 13 digits, got {len(str(sample_ts))}")
+                    print(f"  ⚠️  This will result in dates around 1970!")
+                elif sample_ts > 4 * 10**12:  # 大于 2096年
+                    print(f"  ⚠️  Warning: Timestamp seems too large")
             
             # 填充缺失值
             df = df.fillna(0)
@@ -180,7 +238,13 @@ def load_nyc_taxi(conn, limit=None, graphql_port=8000):
                 
                 # 构建 INSERT 语句（使用 itertuples 代替 iterrows，快 10-100 倍）
                 values = []
-                for row in batch_df.itertuples(index=False):
+                for idx, row in enumerate(batch_df.itertuples(index=False)):
+                    # 调试：打印第一行的时间戳
+                    if batch_idx == 0 and idx == 0:
+                        print(f"  🔍 First row timestamp debug:")
+                        print(f"     pickup_datetime = {int(row.pickup_datetime)} ({len(str(int(row.pickup_datetime)))} digits)")
+                        print(f"     Expected: 13 digits for milliseconds (e.g., 1705307400000)")
+                    
                     value_str = f"('{row.id}', {int(row.pickup_datetime)}, {int(row.dropoff_datetime)}, " \
                                 f"{int(getattr(row, 'passenger_count', 0))}, {float(getattr(row, 'trip_distance', 0))}, " \
                                 f"{float(getattr(row, 'fare_amount', 0))}, {float(getattr(row, 'tip_amount', 0))}, " \
@@ -235,8 +299,8 @@ def main():
     parser.add_argument('dataset', choices=['nyc-taxi'], help='Dataset to load')
     parser.add_argument('--limit', type=int, help='Limit number of rows to load')
     parser.add_argument('--host', default='127.0.0.1', help='Database host')
-    parser.add_argument('--port', type=int, default=3306, help='MySQL port')
-    parser.add_argument('--graphql-port', type=int, default=8000, help='GraphQL port for table creation')
+    parser.add_argument('--port', type=int, default=3307, help='MySQL port')
+    parser.add_argument('--graphql-port', type=int, default=9567, help='GraphQL port for table creation')
     
     args = parser.parse_args()
     

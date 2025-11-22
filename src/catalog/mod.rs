@@ -120,8 +120,12 @@ impl Catalog {
         partition_id: usize,
     ) -> CoreResult<PartitionMeta> {
         let table = self.get_table(table_name)?;
+        let partition_id_str =
+            table
+                .partition_strategy
+                .generate_partition_id(table_name, partition_id, None);
         let partition_meta_path = table
-            .partition_dir(&self.work_dir, partition_id)
+            .partition_dir_by_id(&self.work_dir, &partition_id_str)
             .join("meta.json");
 
         if !partition_meta_path.exists() {
@@ -143,8 +147,12 @@ impl Catalog {
     /// 保存 partition 元数据
     pub fn save_partition_meta(&self, table_name: &str, meta: &PartitionMeta) -> CoreResult<()> {
         let table = self.get_table(table_name)?;
+        let partition_id_str =
+            table
+                .partition_strategy
+                .generate_partition_id(table_name, meta.partition_id, None);
         let partition_meta_path = table
-            .partition_dir(&self.work_dir, meta.partition_id)
+            .partition_dir_by_id(&self.work_dir, &partition_id_str)
             .join("meta.json");
 
         let content = serde_json::to_string_pretty(meta).map_err(|e| {
@@ -185,7 +193,12 @@ impl Catalog {
 
     /// 创建 partition 目录和元数据
     fn create_partition(&self, partition_id: usize, table_meta: &TableMeta) -> CoreResult<()> {
-        let partition_dir = table_meta.partition_dir(&self.work_dir, partition_id);
+        let partition_id_str = table_meta.partition_strategy.generate_partition_id(
+            &table_meta.table_name,
+            partition_id,
+            None,
+        );
+        let partition_dir = table_meta.partition_dir_by_id(&self.work_dir, &partition_id_str);
         let segments_dir = partition_dir.join("segments");
 
         // 创建目录

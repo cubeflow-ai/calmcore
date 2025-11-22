@@ -173,10 +173,7 @@ impl AggregationMerger {
                         agg_values.push(value);
                     }
 
-                    grouped_data
-                        .entry(group_key)
-                        .or_insert_with(Vec::new)
-                        .push(agg_values);
+                    grouped_data.entry(group_key).or_default().push(agg_values);
                 }
             }
         }
@@ -248,11 +245,9 @@ impl AggregationMerger {
         }
 
         // Aggregation columns
-        for agg_idx in 0..(num_columns - 1) {
+        for (agg_idx, values) in final_agg_columns.iter().enumerate() {
             let col_idx = agg_idx + 1;
             let field = schema.field(col_idx);
-
-            let values = &final_agg_columns[agg_idx];
 
             match field.data_type() {
                 DataType::Int64 => {
@@ -351,11 +346,11 @@ impl AggregationMerger {
                 let column = batch.column(col_idx);
 
                 if let Some(int64_array) = column.as_any().downcast_ref::<Int64Array>() {
-                    if int64_array.len() > 0 && !int64_array.is_null(0) {
+                    if !int64_array.is_empty() && !int64_array.is_null(0) {
                         total_count += int64_array.value(0);
                     }
                 } else if let Some(uint64_array) = column.as_any().downcast_ref::<UInt64Array>() {
-                    if uint64_array.len() > 0 && !uint64_array.is_null(0) {
+                    if !uint64_array.is_empty() && !uint64_array.is_null(0) {
                         total_count += uint64_array.value(0) as i64;
                     }
                 }
@@ -380,7 +375,7 @@ impl AggregationMerger {
                         if let Some(array) =
                             batch.column(col_idx).as_any().downcast_ref::<Int64Array>()
                         {
-                            if array.len() > 0 && !array.is_null(0) {
+                            if !array.is_empty() && !array.is_null(0) {
                                 total += array.value(0);
                             }
                         }
@@ -397,7 +392,7 @@ impl AggregationMerger {
                             .as_any()
                             .downcast_ref::<Float64Array>()
                         {
-                            if array.len() > 0 && !array.is_null(0) {
+                            if !array.is_empty() && !array.is_null(0) {
                                 total += array.value(0);
                             }
                         }
@@ -427,7 +422,7 @@ impl AggregationMerger {
                             .as_any()
                             .downcast_ref::<Float64Array>()
                         {
-                            if array.len() > 0 && !array.is_null(0) {
+                            if !array.is_empty() && !array.is_null(0) {
                                 sum += array.value(0);
                                 count += 1;
                             }
@@ -456,7 +451,7 @@ impl AggregationMerger {
                         if let Some(array) =
                             batch.column(col_idx).as_any().downcast_ref::<Int64Array>()
                         {
-                            if array.len() > 0 && !array.is_null(0) {
+                            if !array.is_empty() && !array.is_null(0) {
                                 let val = array.value(0);
                                 max_val = Some(max_val.map_or(val, |m| m.max(val)));
                             }
@@ -474,7 +469,7 @@ impl AggregationMerger {
                             .as_any()
                             .downcast_ref::<Float64Array>()
                         {
-                            if array.len() > 0 && !array.is_null(0) {
+                            if !array.is_empty() && !array.is_null(0) {
                                 let val = array.value(0);
                                 max_val = Some(max_val.map_or(val, |m| m.max(val)));
                             }
@@ -502,7 +497,7 @@ impl AggregationMerger {
                         if let Some(array) =
                             batch.column(col_idx).as_any().downcast_ref::<Int64Array>()
                         {
-                            if array.len() > 0 && !array.is_null(0) {
+                            if !array.is_empty() && !array.is_null(0) {
                                 let val = array.value(0);
                                 min_val = Some(min_val.map_or(val, |m| m.min(val)));
                             }
@@ -520,7 +515,7 @@ impl AggregationMerger {
                             .as_any()
                             .downcast_ref::<Float64Array>()
                         {
-                            if array.len() > 0 && !array.is_null(0) {
+                            if !array.is_empty() && !array.is_null(0) {
                                 let val = array.value(0);
                                 min_val = Some(min_val.map_or(val, |m| m.min(val)));
                             }

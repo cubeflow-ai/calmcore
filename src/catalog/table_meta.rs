@@ -2,7 +2,7 @@
 use crate::schema::Schema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 表的元数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +116,20 @@ impl PartitionStrategy {
                 table_name.to_string()
             }
         }
+    }
+
+    /// 生成 partition 目录名（统一格式：partition-{id}）
+    ///
+    /// 这个方法确保所有地方使用统一的目录命名格式
+    pub fn generate_partition_dir_name(partition_id: &str) -> String {
+        format!("partition-{}", partition_id)
+    }
+
+    /// 从 partition 目录名中提取 partition_id
+    ///
+    /// 例如：从 "partition-0000000000000000001" 提取 "0000000000000000001"
+    pub fn extract_partition_id_from_dir_name(dir_name: &str) -> Option<String> {
+        dir_name.strip_prefix("partition-").map(|s| s.to_string())
     }
 
     /// 格式化 PartitionValue 为字符串
@@ -244,17 +258,43 @@ impl TableMeta {
     }
 
     /// 获取表的目录路径
-    pub fn table_dir(&self, work_dir: &PathBuf) -> PathBuf {
+    pub fn table_dir(&self, work_dir: &Path) -> PathBuf {
         work_dir.join("tables").join(&self.table_name)
     }
 
-    /// 获取 partition 目录路径
-    pub fn partition_dir(&self, work_dir: &PathBuf, partition_id: usize) -> PathBuf {
+    /// 获取 partition 目录路径（使用 partition_id 字符串）
+    pub fn partition_dir_by_id(&self, work_dir: &Path, partition_id: &str) -> PathBuf {
         self.table_dir(work_dir)
-            .join(format!("partition-{}", partition_id))
+            .join(PartitionStrategy::generate_partition_dir_name(partition_id))
     }
 
-    /// 获取 segment 目录路径
+    /// 获取 partition 目录路径（使用 partition_index）
+    ///
+    /// 已废弃：建议使用 partition_dir_by_id
+    #[deprecated(note = "Use partition_dir_by_id instead")]
+    pub fn partition_dir(&self, work_dir: &Path, partition_id: usize) -> PathBuf {
+        let id =
+            self.partition_strategy
+                .generate_partition_id(&self.table_name, partition_id, None);
+        self.partition_dir_by_id(work_dir, &id)
+    }
+
+    /// 获取 segment 目录路径（使用字符串 partition_id）
+    pub fn segment_dir_by_id(
+        &self,
+        work_dir: &PathBuf,
+        partition_id: &str,
+        start: u64,
+        end: u64,
+    ) -> PathBuf {
+        self.partition_dir_by_id(work_dir, partition_id)
+            .join(format!("segment-{}-{}", start, end))
+    }
+
+    /// 获取 segment 目录路径（使用 usize partition_id）
+    ///
+    /// 已废弃：建议使用 segment_dir_by_id
+    #[deprecated(note = "Use segment_dir_by_id instead")]
     pub fn segment_dir(
         &self,
         work_dir: &PathBuf,
@@ -262,8 +302,10 @@ impl TableMeta {
         start: u64,
         end: u64,
     ) -> PathBuf {
-        self.partition_dir(work_dir, partition_id)
-            .join(format!("segment-{}-{}", start, end))
+        let id =
+            self.partition_strategy
+                .generate_partition_id(&self.table_name, partition_id, None);
+        self.segment_dir_by_id(work_dir, &id, start, end)
     }
 }
 
