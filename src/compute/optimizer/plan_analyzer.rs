@@ -12,15 +12,60 @@ use datafusion::sql::sqlparser::ast::{
     Expr, Offset, OrderByExpr, Query, SelectItem, SetExpr, TableFactor, Value,
 };
 
-/// 查询类型
+/// 查询类型 - 扁平化的执行计划
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryType {
-    /// 聚合查询（需要在 DistributedExecutor 层合并）
-    Aggregation,
+    // ===== 聚合查询 =====
+    /// COUNT(*) 且无 GROUP BY - 最快路径：直接返回总行数或 bitmap cardinality
+    CountOnly(CountOnlyInfo),
 
-    /// ORDER BY + LIMIT 查询（需要在协调节点做最终排序）
-    SortLimit(SortLimitInfo),
+    /// COUNT(*) 且 GROUP BY 单字段 - 快速路径：使用倒排索引 bitmap 计数
+    CountWithSingleGroupBy(CountGroupByInfo),
+
+    /// 通用聚合查询 - 正常 DataFusion 聚合流程
+    GeneralAggregation(AggregationInfo),
+
+    // ===== 非聚合查询 =====
+    /// 有 ORDER BY + LIMIT - 并行查询 + TopK 合并
+    ParallelSortLimit(SortLimitInfo),
+
+    /// 只有 LIMIT 无 ORDER BY - 串行扫描 + 早停
+    SerialLimit(PureLimitInfo),
+
+    /// 有 ORDER BY 无 LIMIT - 并行查询 + 流式输出
+    ParallelSortStreaming(SortStreamingInfo),
+
+    /// 无 ORDER BY 无 LIMIT - 串行自然顺序扫描
+    SerialFullScan,
 }
+
+// ===== 聚合查询相关结构 =====
+
+/// COUNT(*) 无 GROUP BY 信息
+#[derive(Debug, Clone, PartialEq)]
+pub struct CountOnlyInfo {
+    /// 是否有 WHERE 条件（用于决定是直接返回总数还是计算 bitmap）
+    pub has_where: bool,
+}
+
+/// COUNT + 单字段 GROUP BY 信息
+#[derive(Debug, Clone, PartialEq)]
+pub struct CountGroupByInfo {
+    pub group_by_field: String,
+}
+
+/// 通用聚合查询信息
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregationInfo {
+    pub group_by_count: usize,
+    pub has_count: bool,
+    pub has_sum: bool,
+    pub has_avg: bool,
+    pub has_max: bool,
+    pub has_min: bool,
+}
+
+// ===== 非聚合查询相关结构 =====
 
 /// ORDER BY + LIMIT 查询信息
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +84,24 @@ pub struct SortLimitInfo {
 
     /// 如果可以使用索引，这是相关的 range 条件
     pub range_condition: Option<RangeCondition>,
+
+    /// 是否有 WHERE 条件（用于传递到 segment scanner）
+    pub has_where_filter: bool,
+}
+
+/// 纯 LIMIT 查询信息（无 ORDER BY）
+#[derive(Debug, Clone, PartialEq)]
+pub struct PureLimitInfo {
+    pub limit: usize,
+    pub offset: Option<usize>,
+    pub has_where_filter: bool,
+}
+
+/// 流式排序查询信息（有 ORDER BY 无 LIMIT）
+#[derive(Debug, Clone, PartialEq)]
+pub struct SortStreamingInfo {
+    pub sort_fields: Vec<(String, bool)>,
+    pub has_where_filter: bool,
 }
 
 /// Range 条件
@@ -51,15 +114,52 @@ pub struct RangeCondition {
     pub end_inclusive: bool,
 }
 
+/// 执行提示 - 用于指导查询执行策略
+#[derive(Debug, Clone)]
+pub struct ExecutionHints {
+    /// 是否有 WHERE 条件
+    pub has_where: bool,
+
+    /// WHERE 条件表达式（用于后续 bitmap 计算）
+    pub where_conditions: Vec<WhereCondition>,
+
+    /// 查询的字段列表（用于判断索引覆盖）
+    pub projection_fields: Vec<String>,
+
+    /// 是否是 SELECT *
+    pub is_select_star: bool,
+}
+
+/// WHERE 条件信息
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhereCondition {
+    pub field_name: String,
+    pub condition_type: ConditionType,
+}
+
+/// 条件类型
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConditionType {
+    Equality, // =
+    Range,    // >, >=, <, <=, BETWEEN
+    In,       // IN
+    Like,     // LIKE
+    Other,    // 其他
+}
+
 /// 查询计划
 #[derive(Debug, Clone)]
 pub struct QueryPlan {
     pub table_name: String,
     pub query_type: QueryType,
+    pub execution_hints: ExecutionHints,
     pub original_sql: String,
 }
 
 /// 分析 SQL 查询，返回查询计划
+///
+/// 这里做所有的查询分类判断，返回明确的执行计划类型
+/// 执行器只需要根据 QueryType 直接路由到对应的执行函数
 pub fn analyze_query(statement: Statement) -> Option<QueryPlan> {
     // DataFusion Statement 包装了 sqlparser Statement
     let inner_statement = match statement {
@@ -76,26 +176,197 @@ pub fn analyze_query(statement: Statement) -> Option<QueryPlan> {
     // 提取表名
     let table_name = extract_table_name_from_query(&query)?;
 
-    // 检查是否是聚合查询
-    if is_aggregation_query_from_ast(&query) {
-        return Some(QueryPlan {
-            table_name,
-            query_type: QueryType::Aggregation,
-            original_sql: String::new(), // AST 模式不需要保存原始 SQL
-        });
-    }
+    // ===== 分析 WHERE 条件和 SELECT 字段 =====
+    let execution_hints = analyze_execution_hints(&query);
 
-    // 检查是否有 ORDER BY + LIMIT
-    if let Some(sort_limit_info) = analyze_sort_limit_from_ast(&query, &table_name) {
+    // ===== 第一步：检查是否是聚合查询 =====
+    if is_aggregation_query_from_ast(&query) {
+        let query_type = classify_aggregation_query(&query)?;
         return Some(QueryPlan {
             table_name,
-            query_type: QueryType::SortLimit(sort_limit_info),
+            query_type,
+            execution_hints,
             original_sql: String::new(),
         });
     }
 
-    // 其他查询不需要特殊处理，返回 None
-    None
+    // ===== 第二步：检查非聚合查询类型 =====
+    let has_limit = extract_limit_offset_from_ast(&query).is_some();
+    let has_order_by = query.order_by.as_ref().map_or(false, |ob| {
+        matches!(&ob.kind, datafusion::sql::sqlparser::ast::OrderByKind::Expressions(exprs) if !exprs.is_empty())
+    });
+    let has_where = execution_hints.has_where;
+
+    let query_type = match (has_order_by, has_limit) {
+        // ORDER BY + LIMIT -> 并行 TopK
+        (true, true) => {
+            let mut sort_limit_info = analyze_sort_limit_from_ast(&query, &table_name)?;
+            sort_limit_info.has_where_filter = has_where;
+            QueryType::ParallelSortLimit(sort_limit_info)
+        }
+        // 只有 LIMIT -> 串行早停
+        (false, true) => {
+            let (limit, offset) = extract_limit_offset_from_ast(&query)?;
+            QueryType::SerialLimit(PureLimitInfo {
+                limit,
+                offset,
+                has_where_filter: has_where,
+            })
+        }
+        // 只有 ORDER BY -> 并行流式
+        (true, false) => {
+            let sort_fields = query.order_by.as_ref().and_then(|ob| match &ob.kind {
+                datafusion::sql::sqlparser::ast::OrderByKind::Expressions(exprs) => {
+                    extract_sort_fields_from_ast(exprs)
+                }
+                _ => None,
+            })?;
+            QueryType::ParallelSortStreaming(SortStreamingInfo {
+                sort_fields,
+                has_where_filter: has_where,
+            })
+        }
+        // 都没有 -> 串行全表扫描
+        (false, false) => QueryType::SerialFullScan,
+    };
+
+    Some(QueryPlan {
+        table_name,
+        query_type,
+        execution_hints,
+        original_sql: String::new(),
+    })
+}
+
+/// 分析执行提示信息
+fn analyze_execution_hints(query: &Query) -> ExecutionHints {
+    let body = &query.body;
+    let select = match body.as_ref() {
+        SetExpr::Select(select) => select,
+        _ => {
+            return ExecutionHints {
+                has_where: false,
+                where_conditions: vec![],
+                projection_fields: vec![],
+                is_select_star: false,
+            }
+        }
+    };
+
+    // 分析 WHERE 条件
+    let (has_where, where_conditions) = if let Some(selection) = &select.selection {
+        (true, extract_where_conditions(selection))
+    } else {
+        (false, vec![])
+    };
+
+    // 分析 SELECT 字段
+    let mut projection_fields = Vec::new();
+    let mut is_select_star = false;
+
+    for item in &select.projection {
+        match item {
+            SelectItem::Wildcard(_) => {
+                is_select_star = true;
+            }
+            SelectItem::UnnamedExpr(expr) => {
+                if let Some(field_name) = extract_field_name_from_expr(expr) {
+                    projection_fields.push(field_name);
+                }
+            }
+            SelectItem::ExprWithAlias { expr, .. } => {
+                if let Some(field_name) = extract_field_name_from_expr(expr) {
+                    projection_fields.push(field_name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ExecutionHints {
+        has_where,
+        where_conditions,
+        projection_fields,
+        is_select_star,
+    }
+}
+
+/// 从 WHERE 表达式中提取条件信息
+fn extract_where_conditions(expr: &Expr) -> Vec<WhereCondition> {
+    let mut conditions = Vec::new();
+
+    match expr {
+        // 等值条件: field = value
+        Expr::BinaryOp { left, op, right } => {
+            use datafusion::sql::sqlparser::ast::BinaryOperator;
+
+            if let Some(field_name) = extract_field_name_from_expr(left) {
+                let condition_type = match op {
+                    BinaryOperator::Eq => ConditionType::Equality,
+                    BinaryOperator::Gt
+                    | BinaryOperator::GtEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq => ConditionType::Range,
+                    _ => ConditionType::Other,
+                };
+                conditions.push(WhereCondition {
+                    field_name,
+                    condition_type,
+                });
+            }
+
+            // 递归处理 AND 条件
+            if matches!(op, BinaryOperator::And) {
+                conditions.extend(extract_where_conditions(left));
+                conditions.extend(extract_where_conditions(right));
+            }
+        }
+        // BETWEEN: field BETWEEN x AND y
+        Expr::Between {
+            expr: field_expr, ..
+        } => {
+            if let Some(field_name) = extract_field_name_from_expr(field_expr) {
+                conditions.push(WhereCondition {
+                    field_name,
+                    condition_type: ConditionType::Range,
+                });
+            }
+        }
+        // IN: field IN (...)
+        Expr::InList {
+            expr: field_expr, ..
+        } => {
+            if let Some(field_name) = extract_field_name_from_expr(field_expr) {
+                conditions.push(WhereCondition {
+                    field_name,
+                    condition_type: ConditionType::In,
+                });
+            }
+        }
+        // LIKE: field LIKE pattern
+        Expr::Like {
+            expr: field_expr, ..
+        } => {
+            if let Some(field_name) = extract_field_name_from_expr(field_expr) {
+                conditions.push(WhereCondition {
+                    field_name,
+                    condition_type: ConditionType::Like,
+                });
+            }
+        }
+        _ => {}
+    }
+
+    conditions
+}
+
+/// 从表达式中提取字段名
+fn extract_field_name_from_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.to_string().to_lowercase()),
+        Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.to_string().to_lowercase()),
+        _ => None,
+    }
 }
 
 /// 从 Query AST 中提取表名
@@ -124,6 +395,93 @@ fn extract_table_name_from_query(query: &Query) -> Option<String> {
         _ => None,
     }
 }
+/// 对聚合查询进行分类，返回具体的执行计划类型
+fn classify_aggregation_query(query: &Query) -> Option<QueryType> {
+    let body = &query.body;
+    let select = match body.as_ref() {
+        SetExpr::Select(select) => select,
+        _ => return None,
+    };
+
+    // 提取 GROUP BY 信息
+    let group_by_fields = match &select.group_by {
+        datafusion::sql::sqlparser::ast::GroupByExpr::Expressions(exprs, _) => exprs
+            .iter()
+            .filter_map(|expr| match expr {
+                Expr::Identifier(ident) => Some(ident.to_string().to_lowercase()),
+                Expr::CompoundIdentifier(idents) => {
+                    idents.last().map(|i| i.to_string().to_lowercase())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        _ => vec![],
+    };
+
+    // 分析 SELECT 列表中的聚合函数
+    let mut has_count = false;
+    let mut has_sum = false;
+    let mut has_avg = false;
+    let mut has_max = false;
+    let mut has_min = false;
+    let mut total_agg_functions = 0;
+
+    for item in &select.projection {
+        if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } = item {
+            if let Expr::Function(func) = expr {
+                let fn_name = func.name.0.last().map(|i| i.to_string().to_lowercase());
+                match fn_name.as_deref() {
+                    Some("count") => {
+                        has_count = true;
+                        total_agg_functions += 1;
+                    }
+                    Some("sum") => {
+                        has_sum = true;
+                        total_agg_functions += 1;
+                    }
+                    Some("avg") => {
+                        has_avg = true;
+                        total_agg_functions += 1;
+                    }
+                    Some("max") => {
+                        has_max = true;
+                        total_agg_functions += 1;
+                    }
+                    Some("min") => {
+                        has_min = true;
+                        total_agg_functions += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // ===== 快速路径 1: COUNT(*) 且无 GROUP BY =====
+    if group_by_fields.is_empty() && has_count && total_agg_functions == 1 {
+        // 检查是否有 WHERE 条件
+        let has_where = select.selection.is_some();
+        return Some(QueryType::CountOnly(CountOnlyInfo { has_where }));
+    }
+
+    // ===== 快速路径 2: COUNT(*) 且 GROUP BY 单字段 =====
+    if group_by_fields.len() == 1 && has_count && total_agg_functions == 1 {
+        return Some(QueryType::CountWithSingleGroupBy(CountGroupByInfo {
+            group_by_field: group_by_fields[0].clone(),
+        }));
+    }
+
+    // ===== 通用聚合路径 =====
+    Some(QueryType::GeneralAggregation(AggregationInfo {
+        group_by_count: group_by_fields.len(),
+        has_count,
+        has_sum,
+        has_avg,
+        has_max,
+        has_min,
+    }))
+}
+
 /// 检查是否是聚合查询（通过 AST）
 fn is_aggregation_query_from_ast(query: &Query) -> bool {
     let body = &query.body;
@@ -205,6 +563,7 @@ fn analyze_sort_limit_from_ast(query: &Query, _table_name: &str) -> Option<SortL
         offset,
         can_use_index: can_use_index && range_condition.is_some(),
         range_condition,
+        has_where_filter: false, // 将在 analyze_query 中设置
     })
 }
 
@@ -432,10 +791,10 @@ mod tests {
     fn test_simple_query() {
         let sql = "SELECT * FROM users WHERE age > 20";
         let statement = parse_sql(sql);
-        let plan = analyze_query(statement);
+        let plan = analyze_query(statement).unwrap();
 
-        // 简单查询不需要特殊处理，返回 None
-        assert!(plan.is_none());
+        // 简单查询应该返回 SerialFullScan
+        assert!(matches!(plan.query_type, QueryType::SerialFullScan));
     }
 
     #[test]
@@ -446,14 +805,14 @@ mod tests {
 
         assert_eq!(plan.table_name, "users");
 
-        if let QueryType::SortLimit(info) = plan.query_type {
+        if let QueryType::ParallelSortLimit(info) = plan.query_type {
             assert_eq!(info.sort_fields.len(), 1);
             assert_eq!(info.sort_fields[0].0, "age");
             assert_eq!(info.sort_fields[0].1, true); // ASC
             assert_eq!(info.limit, 10);
             assert_eq!(info.can_use_index, true);
         } else {
-            panic!("Expected SortLimit query type");
+            panic!("Expected ParallelSortLimit query type");
         }
     }
 
@@ -463,13 +822,13 @@ mod tests {
         let statement = parse_sql(sql);
         let plan = analyze_query(statement).unwrap();
 
-        if let QueryType::SortLimit(info) = plan.query_type {
+        if let QueryType::ParallelSortLimit(info) = plan.query_type {
             assert_eq!(info.sort_fields.len(), 2);
             assert_eq!(info.sort_fields[0].0, "age");
             assert_eq!(info.sort_fields[0].1, false); // DESC
             assert_eq!(info.can_use_index, false); // 多字段排序不能用索引
         } else {
-            panic!("Expected SortLimit query type");
+            panic!("Expected ParallelSortLimit query type");
         }
     }
 
@@ -479,7 +838,12 @@ mod tests {
         let statement = parse_sql(sql);
         let plan = analyze_query(statement).unwrap();
 
-        assert_eq!(plan.query_type, QueryType::Aggregation);
+        // COUNT(*) 无 GROUP BY 应该是 CountOnly
+        if let QueryType::CountOnly(info) = plan.query_type {
+            assert!(info.has_where); // 有 WHERE 条件
+        } else {
+            panic!("Expected CountOnly query type");
+        }
     }
 
     #[test]
@@ -500,11 +864,11 @@ mod tests {
 
         let plan = plan_result.unwrap();
 
-        if let QueryType::SortLimit(info) = plan.query_type {
+        if let QueryType::ParallelSortLimit(info) = plan.query_type {
             assert_eq!(info.limit, 10);
             assert_eq!(info.offset, Some(5));
         } else {
-            panic!("Expected SortLimit query type");
+            panic!("Expected ParallelSortLimit query type");
         }
     }
 
@@ -515,11 +879,11 @@ mod tests {
         let statement = parse_sql(sql);
         let plan = analyze_query(statement).unwrap();
 
-        if let QueryType::SortLimit(info) = plan.query_type {
+        if let QueryType::ParallelSortLimit(info) = plan.query_type {
             assert_eq!(info.limit, 10);
             assert_eq!(info.offset, Some(0));
         } else {
-            panic!("Expected SortLimit query type");
+            panic!("Expected ParallelSortLimit query type");
         }
     }
 
@@ -530,11 +894,11 @@ mod tests {
         let statement = parse_sql(sql);
         let plan = analyze_query(statement).unwrap();
 
-        if let QueryType::SortLimit(info) = plan.query_type {
+        if let QueryType::ParallelSortLimit(info) = plan.query_type {
             assert_eq!(info.limit, 10);
             assert_eq!(info.offset, Some(0));
         } else {
-            panic!("Expected SortLimit query type");
+            panic!("Expected ParallelSortLimit query type");
         }
     }
 
@@ -545,11 +909,11 @@ mod tests {
         let statement = parse_sql(sql);
         let plan = analyze_query(statement).unwrap();
 
-        if let QueryType::SortLimit(info) = plan.query_type {
+        if let QueryType::ParallelSortLimit(info) = plan.query_type {
             assert_eq!(info.limit, 20);
             assert_eq!(info.offset, Some(5));
         } else {
-            panic!("Expected SortLimit query type");
+            panic!("Expected ParallelSortLimit query type");
         }
     }
 
@@ -560,11 +924,11 @@ mod tests {
         let statement = parse_sql(sql);
         let plan = analyze_query(statement).unwrap();
 
-        if let QueryType::SortLimit(info) = plan.query_type {
+        if let QueryType::ParallelSortLimit(info) = plan.query_type {
             assert_eq!(info.limit, 10);
             assert_eq!(info.offset, Some(5));
         } else {
-            panic!("Expected SortLimit query type");
+            panic!("Expected ParallelSortLimit query type");
         }
     }
 
@@ -575,11 +939,11 @@ mod tests {
         let statement = parse_sql(sql);
         let plan = analyze_query(statement).unwrap();
 
-        if let QueryType::SortLimit(info) = plan.query_type {
+        if let QueryType::ParallelSortLimit(info) = plan.query_type {
             assert_eq!(info.limit, 10);
             assert_eq!(info.offset, None);
         } else {
-            panic!("Expected SortLimit query type");
+            panic!("Expected ParallelSortLimit query type");
         }
     }
 }

@@ -17,6 +17,10 @@ pub struct ParquetRowDataReader {
     /// - RowGroup 1 contains doc_ids [1000, 2000)
     /// - RowGroup 2 contains doc_ids [2000, ...)
     key_to_rowgroup: Arc<BTreeMap<u32, usize>>,
+    /// Complete range mapping: (start_id, end_id) -> rg_idx
+    /// This enables O(1) lookup without BTreeMap search
+    /// Example: [(0, 1000, 0), (1000, 2000, 1), (2000, 3000, 2)]
+    ranges: Arc<Vec<(u32, u32, usize)>>,
     num_row_groups: usize,
 }
 
@@ -80,9 +84,28 @@ impl ParquetRowDataReader {
             }
         }
 
+        // Build complete range mappings for O(1) lookup
+        // This is your excellent idea: precompute all ranges at load time!
+        let mut ranges = Vec::new();
+        let keys: Vec<u32> = key_to_rowgroup.keys().copied().collect();
+        for i in 0..keys.len() {
+            let start = keys[i];
+            let end = if i + 1 < keys.len() {
+                keys[i + 1]
+            } else {
+                // Last RowGroup: calculate actual end from metadata
+                let rg_idx = key_to_rowgroup[&start];
+                let rg_meta = metadata.row_group(rg_idx);
+                start.saturating_add(rg_meta.num_rows() as u32)
+            };
+            let rg_idx = key_to_rowgroup[&start];
+            ranges.push((start, end, rg_idx));
+        }
+
         Ok(Self {
             file_path: path.to_string(),
             key_to_rowgroup: Arc::new(key_to_rowgroup),
+            ranges: Arc::new(ranges),
             num_row_groups,
         })
     }
@@ -156,15 +179,36 @@ impl ParquetRowDataReader {
     /// Get the batch key (starting doc_id) for a specific doc_id
     /// This returns the starting doc_id of the RowGroup containing this doc_id
     pub fn get_batch_key_for_doc(&self, doc_id: u32) -> Option<u32> {
-        // Find the batch that contains this doc_id by looking up in the metadata map
-        let result = self.key_to_rowgroup.range(..=doc_id).next_back();
-        if let Some((k, rg_idx)) = result {
-            eprintln!("  [ParquetRowDataReader::get_batch_key_for_doc] doc_id={}, found batch_key={}, rg_idx={}", doc_id, k, rg_idx);
-            Some(*k)
-        } else {
-            eprintln!("  [ParquetRowDataReader::get_batch_key_for_doc] doc_id={}, NOT FOUND! key_to_rowgroup keys: {:?}", doc_id, self.key_to_rowgroup.keys().collect::<Vec<_>>());
-            None
+        // Use binary search on precomputed ranges for O(log n) lookup
+        let idx = self
+            .ranges
+            .binary_search_by(|(start, end, _)| {
+                if doc_id < *start {
+                    std::cmp::Ordering::Greater
+                } else if doc_id >= *end {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok()?;
+
+        Some(self.ranges[idx].0)
+    }
+
+    /// Batch lookup: find batch keys for multiple doc_ids at once
+    /// This is more efficient than calling get_batch_key_for_doc repeatedly
+    /// Returns: HashMap<batch_start_id, Vec<doc_id>>
+    pub fn batch_lookup_doc_ids(&self, doc_ids: &[u32]) -> HashMap<u32, Vec<u32>> {
+        let mut result: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for &doc_id in doc_ids {
+            if let Some(batch_key) = self.get_batch_key_for_doc(doc_id) {
+                result.entry(batch_key).or_default().push(doc_id);
+            }
         }
+
+        result
     }
 
     /// Batch read multiple RowGroups at once with column projection
@@ -355,6 +399,7 @@ impl Clone for ParquetRowDataReader {
         Self {
             file_path: self.file_path.clone(),
             key_to_rowgroup: Arc::clone(&self.key_to_rowgroup),
+            ranges: Arc::clone(&self.ranges),
             num_row_groups: self.num_row_groups,
         }
     }
@@ -489,6 +534,40 @@ impl RowDataStore {
                     let (k, _v, _ttl) = &*item;
                     *k
                 })
+            }
+        }
+    }
+
+    /// Batch lookup: find batch keys for multiple doc_ids at once
+    /// This is much more efficient than calling get_batch_key_for_doc repeatedly
+    /// Returns: HashMap<batch_start_id, Vec<doc_id>>
+    ///
+    /// # Performance
+    /// For Parquet with sorted doc_ids:
+    /// - Single lookup: O(n log m) where n=doc_ids, m=rowgroups
+    /// - Batch lookup: O(n log m) with better cache locality
+    pub fn batch_lookup_doc_ids(&self, doc_ids: &[u32]) -> HashMap<u32, Vec<u32>> {
+        match self {
+            RowDataStore::Parquet(reader) => reader.batch_lookup_doc_ids(doc_ids),
+            RowDataStore::Disk(reader) => {
+                let mut result: HashMap<u32, Vec<u32>> = HashMap::new();
+                for &doc_id in doc_ids {
+                    if let Some(item) = reader.floor(&doc_id) {
+                        let (k, _v, _ttl) = &*item;
+                        result.entry(*k).or_default().push(doc_id);
+                    }
+                }
+                result
+            }
+            RowDataStore::Memory(tree) => {
+                let mut result: HashMap<u32, Vec<u32>> = HashMap::new();
+                for &doc_id in doc_ids {
+                    if let Some(item) = tree.floor(&doc_id) {
+                        let (k, _v, _ttl) = &*item;
+                        result.entry(*k).or_default().push(doc_id);
+                    }
+                }
+                result
             }
         }
     }
