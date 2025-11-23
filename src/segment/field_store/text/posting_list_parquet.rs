@@ -18,6 +18,7 @@ use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
+use rayon::prelude::*;
 
 use crate::utils::error::{CoreError, CoreResult};
 
@@ -640,6 +641,34 @@ pub fn search_terms_batch(path: &str, terms: &[&str]) -> CoreResult<Vec<Option<P
     Ok(results)
 }
 
+/// Batch read multiple terms efficiently with parallel search
+/// Each term is searched independently in parallel using rayon
+/// More efficient than sequential search for large term lists
+pub fn search_terms_batch_parallel(
+    path: &str,
+    terms: &[&str],
+) -> CoreResult<Vec<Option<PostingListRow>>> {
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Sort and deduplicate terms
+    let mut sorted_terms: Vec<&str> = terms.to_vec();
+    sorted_terms.sort_unstable();
+    sorted_terms.dedup();
+
+    let path_str = path.to_string();
+
+    // Parallel search for each term
+    let results: Vec<CoreResult<Option<PostingListRow>>> = sorted_terms
+        .par_iter()
+        .map(|term| search_term(&path_str, term))
+        .collect();
+
+    // Collect results or return first error
+    results.into_iter().collect()
+}
+
 /// Term index entry for O(1) lookup
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TermIndexEntry {
@@ -665,40 +694,54 @@ pub fn build_term_index(path: &str) -> CoreResult<Vec<TermIndexEntry>> {
     let metadata = builder.metadata();
     let num_row_groups = metadata.num_row_groups();
 
-    let mut index = Vec::new();
+    // Parallel load Row Groups using rayon
+    let path_str = path.to_string();
+    let row_group_results: Vec<CoreResult<Vec<TermIndexEntry>>> = (0..num_row_groups)
+        .into_par_iter()
+        .map(|rg_idx| {
+            // Each thread opens its own file handle
+            let reader = ParquetRecordBatchReaderBuilder::try_new(
+                std::fs::File::open(&path_str)
+                    .map_err(|e| CoreError::Internal(format!("Failed to open file: {}", e)))?,
+            )
+            .map_err(|e| CoreError::Internal(format!("Failed to create reader: {}", e)))?
+            .with_row_groups(vec![rg_idx])
+            .build()
+            .map_err(|e| CoreError::Internal(format!("Failed to build reader: {}", e)))?;
 
-    // Read each Row Group and record term positions
-    for rg_idx in 0..num_row_groups {
-        let reader = ParquetRecordBatchReaderBuilder::try_new(
-            std::fs::File::open(path)
-                .map_err(|e| CoreError::Internal(format!("Failed to open file: {}", e)))?,
-        )
-        .map_err(|e| CoreError::Internal(format!("Failed to create reader: {}", e)))?
-        .with_row_groups(vec![rg_idx])
-        .build()
-        .map_err(|e| CoreError::Internal(format!("Failed to build reader: {}", e)))?;
+            let mut rg_index = Vec::new();
+            let mut row_offset = 0;
 
-        let mut row_offset = 0;
-        for batch_result in reader {
-            let batch = batch_result
-                .map_err(|e| CoreError::Internal(format!("Failed to read batch: {}", e)))?;
+            for batch_result in reader {
+                let batch = batch_result
+                    .map_err(|e| CoreError::Internal(format!("Failed to read batch: {}", e)))?;
 
-            let term_array = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| CoreError::Internal("Invalid term column".to_string()))?;
+                let term_array = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| CoreError::Internal("Invalid term column".to_string()))?;
 
-            for idx in 0..batch.num_rows() {
-                let term = term_array.value(idx).to_string();
-                index.push(TermIndexEntry {
-                    term,
-                    row_group_id: rg_idx,
-                    row_offset,
-                });
-                row_offset += 1;
+                for idx in 0..batch.num_rows() {
+                    let term = term_array.value(idx).to_string();
+                    rg_index.push(TermIndexEntry {
+                        term,
+                        row_group_id: rg_idx,
+                        row_offset,
+                    });
+                    row_offset += 1;
+                }
             }
-        }
+
+            Ok(rg_index)
+        })
+        .collect();
+
+    // Collect results and flatten into single index
+    let mut index = Vec::new();
+    for result in row_group_results {
+        let rg_index = result?;
+        index.extend(rg_index);
     }
 
     Ok(index)
