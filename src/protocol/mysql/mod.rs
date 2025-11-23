@@ -80,9 +80,17 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
     fn on_query(&mut self, query: &str, results: QueryResultWriter<W>) -> io::Result<()> {
         let query_trimmed = query.trim();
 
-        // 只转换前 50 个字符用于判断语句类型（性能优化：避免转换大型批量 INSERT）
-        let prefix_len = query_trimmed.len().min(50);
-        let query_lower = query_trimmed[..prefix_len].to_lowercase();
+        // 规范化前缀用于判断语句类型（将多个空格合并为一个）
+        // 只处理前 100 个字符，避免大型 INSERT 语句的性能问题
+        let prefix_len = query_trimmed.len().min(100);
+        let prefix = &query_trimmed[..prefix_len];
+
+        // 将连续空格替换为单个空格，然后转小写
+        let query_lower = prefix
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
 
         // 忽略客户端初始化命令和事务命令
         if query_lower.starts_with("set ")
@@ -112,6 +120,91 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             }
             // 事务命令和其他初始化命令返回成功
             return results.completed(0, 0);
+        }
+
+        // flush tables 命令
+        if query_lower.starts_with("flush tables") {
+            return tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    // 解析表名 (如果有指定)
+                    let parts: Vec<&str> = query_trimmed.split_whitespace().collect();
+
+                    if parts.len() == 2 {
+                        // FLUSH TABLES (刷新所有表)
+                        let tables = self.engine.list_tables();
+                        log::info!("💾 Flushing all {} tables", tables.len());
+
+                        let mut success_count = 0;
+                        let mut failed_tables = Vec::new();
+
+                        for table_name in tables {
+                            match self.engine.flush_table(&table_name).await {
+                                Ok(_) => {
+                                    success_count += 1;
+                                    log::info!("✅ Flushed table '{}'", table_name);
+                                }
+                                Err(e) => {
+                                    log::error!("❌ Failed to flush table '{}': {}", table_name, e);
+                                    failed_tables.push(table_name);
+                                }
+                            }
+                        }
+
+                        if !failed_tables.is_empty() {
+                            let error_msg =
+                                format!("Failed to flush tables: {}", failed_tables.join(", "));
+                            return results
+                                .error(ErrorKind::ER_UNKNOWN_ERROR, error_msg.as_bytes());
+                        }
+
+                        log::info!("✅ Successfully flushed {} tables", success_count);
+                        return results.completed(0, 0);
+                    } else if parts.len() >= 3 {
+                        // FLUSH TABLES table_name [, table_name2, ...]
+                        // 提取所有表名 (跳过 FLUSH TABLES)
+                        let table_names: Vec<String> = parts[2..]
+                            .iter()
+                            .filter(|s| !s.is_empty() && **s != ",")
+                            .map(|s| s.trim_end_matches(',').to_string())
+                            .collect();
+
+                        if table_names.is_empty() {
+                            return results.error(
+                                ErrorKind::ER_PARSE_ERROR,
+                                b"No table name specified for FLUSH TABLES",
+                            );
+                        }
+
+                        log::info!("💾 Flushing tables: {:?}", table_names);
+
+                        let mut failed_tables = Vec::new();
+                        for table_name in &table_names {
+                            match self.engine.flush_table(table_name).await {
+                                Ok(_) => {
+                                    log::info!("✅ Flushed table '{}'", table_name);
+                                }
+                                Err(e) => {
+                                    log::error!("❌ Failed to flush table '{}': {}", table_name, e);
+                                    failed_tables.push(table_name.clone());
+                                }
+                            }
+                        }
+
+                        if !failed_tables.is_empty() {
+                            let error_msg =
+                                format!("Failed to flush tables: {}", failed_tables.join(", "));
+                            return results
+                                .error(ErrorKind::ER_UNKNOWN_ERROR, error_msg.as_bytes());
+                        }
+
+                        log::info!("✅ Successfully flushed {} tables", table_names.len());
+                        return results.completed(0, 0);
+                    } else {
+                        return results
+                            .error(ErrorKind::ER_PARSE_ERROR, b"Invalid FLUSH TABLES syntax");
+                    }
+                })
+            });
         }
 
         // INSERT 语句
@@ -337,7 +430,31 @@ async fn handle_create_table(
                 name: col_name,
                 index: true,
             },
+            "TINYINT" | "INT8" => FieldOption::I8 {
+                name: col_name,
+                index: true,
+            },
+            "SMALLINT" | "INT16" => FieldOption::I16 {
+                name: col_name,
+                index: true,
+            },
             "BIGINT" | "INT64" => FieldOption::I64 {
+                name: col_name,
+                index: true,
+            },
+            "TINYINT UNSIGNED" | "UINT8" => FieldOption::U8 {
+                name: col_name,
+                index: true,
+            },
+            "SMALLINT UNSIGNED" | "UINT16" => FieldOption::U16 {
+                name: col_name,
+                index: true,
+            },
+            "INT UNSIGNED" | "UINT32" => FieldOption::U32 {
+                name: col_name,
+                index: true,
+            },
+            "BIGINT UNSIGNED" | "UINT64" => FieldOption::U64 {
                 name: col_name,
                 index: true,
             },
@@ -353,7 +470,12 @@ async fn handle_create_table(
                 name: col_name,
                 index: true,
             },
-            "TEXT" | "STRING" | "VARCHAR" => FieldOption::Keyword {
+            "TIMESTAMP" | "DATETIME" => FieldOption::Timestamp {
+                name: col_name,
+                index: true,
+                format: Some("iso8601".to_string()),
+            },
+            "TEXT" | "STRING" | "VARCHAR" | "CHAR" => FieldOption::Keyword {
                 name: col_name,
                 index: true,
                 is_array: false,
