@@ -92,8 +92,6 @@ pub enum PartitionStrategyType {
     Hash,
     /// 范围分区
     Range,
-    /// 列表分区
-    List,
     /// 自定义分区
     Custom,
     /// 无分区
@@ -141,7 +139,6 @@ impl From<RangePartitionInput> for RangePartition {
         RangePartition {
             start: val.start.into(),
             end: val.end.into(),
-            partition_id: val.partition_id as usize,
         }
     }
 }
@@ -260,10 +257,8 @@ impl From<FileHandlerTypeEnum> for crate::segment_loader::FileHandlerType {
 pub struct LoadSegmentInput {
     /// 表名
     pub table: String,
-    /// 分区ID（可选，如果不提供则使用 partition_value 生成）
-    pub partition_id: Option<String>,
-    /// 分区值（可选，用于生成 partition_id）
-    pub partition_value: Option<String>,
+    /// 分区名称（必须提供，且符合目录名称规范）
+    pub partition_name: String,
     /// 文件路径（支持 .parquet 和 .jsonl 格式）
     pub file_path: String,
     /// 文件处理类型（Parquet 必需：REFERENCE/MOVE/COPY，JSONL 不需要）
@@ -274,7 +269,7 @@ pub struct LoadSegmentInput {
 pub struct LoadSegmentResult {
     pub success: bool,
     pub documents_loaded: usize,
-    pub partition_id: String,
+    pub partition_name: String,
     pub message: String,
 }
 
@@ -426,8 +421,18 @@ impl QueryRoot {
 
         for partition_id in partition_ids {
             if let Some(partition) = engine.get_partition(&name, &partition_id).await {
+                eprintln!(
+                    "🔍 [table_detail] Partition name: {}, address: {:p}",
+                    partition.name(),
+                    &*partition
+                );
+
                 // 获取 frozen segments
                 let frozen_segments = partition.get_frozen_segments();
+                eprintln!(
+                    "🔍 [table_detail] frozen_segments count: {}",
+                    frozen_segments.len()
+                );
                 let mut segments = Vec::new();
 
                 // 收集 frozen segments 信息
@@ -618,99 +623,70 @@ impl MutationRoot {
         };
 
         // 构建分区策略
-        let (partition_strategy, num_partitions) = if let Some(strategy_input) =
-            input.partition_strategy
-        {
-            match strategy_input.strategy_type {
-                PartitionStrategyType::Hash => {
-                    let field = strategy_input.field.ok_or_else(|| {
-                        async_graphql::Error::new("Hash strategy requires 'field' parameter")
-                    })?;
-                    let num_partitions = strategy_input.num_partitions.ok_or_else(|| {
-                        async_graphql::Error::new(
-                            "Hash strategy requires 'num_partitions' parameter",
-                        )
-                    })? as usize;
+        let (partition_strategy, num_partitions) =
+            if let Some(strategy_input) = input.partition_strategy {
+                match strategy_input.strategy_type {
+                    PartitionStrategyType::Hash => {
+                        let field = strategy_input.field.ok_or_else(|| {
+                            async_graphql::Error::new("Hash strategy requires 'field' parameter")
+                        })?;
+                        let num_partitions = strategy_input.num_partitions.ok_or_else(|| {
+                            async_graphql::Error::new(
+                                "Hash strategy requires 'num_partitions' parameter",
+                            )
+                        })? as usize;
 
-                    (
-                        PartitionStrategy::Hash {
-                            field,
+                        (
+                            PartitionStrategy::Hash {
+                                field,
+                                num_partitions,
+                            },
                             num_partitions,
-                        },
-                        num_partitions,
-                    )
-                }
-                PartitionStrategyType::Range => {
-                    let field = strategy_input.field.ok_or_else(|| {
-                        async_graphql::Error::new("Range strategy requires 'field' parameter")
-                    })?;
-                    let ranges_input = strategy_input.ranges.ok_or_else(|| {
-                        async_graphql::Error::new("Range strategy requires 'ranges' parameter")
-                    })?;
-
-                    let ranges: Vec<RangePartition> =
-                        ranges_input.into_iter().map(|r| r.into()).collect();
-
-                    let num_partitions = ranges.len();
-
-                    (PartitionStrategy::Range { field, ranges }, num_partitions)
-                }
-                PartitionStrategyType::List => {
-                    let field = strategy_input.field.ok_or_else(|| {
-                        async_graphql::Error::new("List strategy requires 'field' parameter")
-                    })?;
-                    let value_mapping_str = strategy_input.value_mapping.ok_or_else(|| {
-                        async_graphql::Error::new("List strategy requires 'value_mapping' parameter (format: 'value1:0,value2:1')")
-                    })?;
-
-                    // 解析值映射 "value1:0,value2:1,value3:2"
-                    let mut values = std::collections::HashMap::new();
-                    for pair in value_mapping_str.split(',') {
-                        let parts: Vec<&str> = pair.split(':').collect();
-                        if parts.len() == 2 {
-                            let value = parts[0].trim().to_string();
-                            let partition_id: usize = parts[1].trim().parse().map_err(|_| {
-                                async_graphql::Error::new(format!(
-                                    "Invalid partition_id in value_mapping: {}",
-                                    parts[1]
-                                ))
-                            })?;
-                            values.insert(value, partition_id);
-                        }
+                        )
                     }
+                    PartitionStrategyType::Range => {
+                        let field = strategy_input.field.ok_or_else(|| {
+                            async_graphql::Error::new("Range strategy requires 'field' parameter")
+                        })?;
+                        let ranges_input = strategy_input.ranges.ok_or_else(|| {
+                            async_graphql::Error::new("Range strategy requires 'ranges' parameter")
+                        })?;
 
-                    let num_partitions = values.values().max().map(|v| v + 1).unwrap_or(1);
+                        let ranges: Vec<RangePartition> =
+                            ranges_input.into_iter().map(|r| r.into()).collect();
 
-                    (PartitionStrategy::List { field, values }, num_partitions)
+                        let num_partitions = ranges.len();
+
+                        (PartitionStrategy::Range { field, ranges }, num_partitions)
+                    }
+                    PartitionStrategyType::Custom => {
+                        // Custom 分区不需要其他参数
+                        (PartitionStrategy::Custom, 0)
+                    }
+                    PartitionStrategyType::None => {
+                        // None 分区策略，所有数据在一个 partition
+                        (PartitionStrategy::None, 1)
+                    }
                 }
-                PartitionStrategyType::Custom => {
-                    // Custom 分区不需要其他参数
-                    (PartitionStrategy::Custom, 0)
-                }
-                PartitionStrategyType::None => {
-                    // None 分区策略，所有数据在一个 partition
-                    (PartitionStrategy::None, 1)
-                }
-            }
-        } else {
-            // 如果未指定分区策略，使用默认的 Hash 策略
-            let partition_field = input.primary_key.clone().unwrap_or_else(|| {
-                fields
-                    .first()
-                    .map(|f| f.name().to_string())
-                    .unwrap_or_default()
-            });
+            } else {
+                // 如果未指定分区策略，使用默认的 Hash 策略
+                let partition_field = input.primary_key.clone().unwrap_or_else(|| {
+                    fields
+                        .first()
+                        .map(|f| f.name().to_string())
+                        .unwrap_or_default()
+                });
 
-            let partition_count = input.partition_count.unwrap_or(1) as usize;
+                let partition_count = input.partition_count.unwrap_or(1) as usize;
 
-            (
-                PartitionStrategy::Hash {
-                    field: partition_field,
-                    num_partitions: partition_count,
-                },
-                partition_count,
-            )
-        };
+                (
+                    PartitionStrategy::Hash {
+                        field: partition_field,
+                        num_partitions: partition_count,
+                    },
+                    partition_count,
+                )
+            };
 
         // 创建表
         engine
@@ -858,31 +834,17 @@ impl MutationRoot {
         let doc_count = engine
             .load_segment(
                 &input.table,
-                input.partition_id.clone(),
-                input.partition_value.clone(),
+                input.partition_name.clone(),
                 file_path,
                 handler_type,
             )
             .await
             .map_err(|e| async_graphql::Error::new(format!("Load segment failed: {}", e)))?;
 
-        // 确定使用的 partition_id
-        let partition_id = if let Some(id) = input.partition_id {
-            id
-        } else if let Some(value) = input.partition_value {
-            let meta = engine
-                .get_table_meta(&input.table)
-                .map_err(|e| async_graphql::Error::new(format!("Table not found: {}", e)))?;
-            meta.partition_strategy
-                .generate_partition_id(&input.table, 0, Some(&value))
-        } else {
-            "unknown".to_string()
-        };
-
         Ok(LoadSegmentResult {
             success: true,
             documents_loaded: doc_count,
-            partition_id,
+            partition_name: input.partition_name,
             message: format!(
                 "Successfully loaded {} documents from {}",
                 doc_count, input.file_path

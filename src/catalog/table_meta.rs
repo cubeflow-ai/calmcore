@@ -1,7 +1,6 @@
 /// Table 元数据定义
 use crate::schema::Schema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// 表的元数据
@@ -41,16 +40,8 @@ pub enum PartitionStrategy {
     Range {
         /// 分区字段名
         field: String,
-        /// 范围列表 [(起始值, 结束值, partition_id)]
+        /// 范围列表 [(起始值, 结束值, partition_name)]
         ranges: Vec<RangePartition>,
-    },
-
-    /// 列表分区 - 适合枚举值
-    List {
-        /// 分区字段名
-        field: String,
-        /// 值到 partition 的映射
-        values: HashMap<String, usize>,
     },
 
     /// 自定义分区 - 用户通过load文件来加载分区信息
@@ -65,70 +56,54 @@ impl PartitionStrategy {
         match self {
             PartitionStrategy::Hash { field, .. } => Some(field),
             PartitionStrategy::Range { field, .. } => Some(field),
-            PartitionStrategy::List { field, .. } => Some(field),
             PartitionStrategy::Custom => None,
             PartitionStrategy::None => None,
         }
     }
 
-    /// 根据分区策略生成 partition_id
-    pub fn generate_partition_id(
-        &self,
-        table_name: &str,
-        partition_index: usize,
-        partition_value: Option<&str>,
-    ) -> String {
+    /// 根据分区策略生成所有 partition_name 列表
+    pub fn generate_partitions(&self, parallel_workers: usize) -> Vec<String> {
         match self {
             PartitionStrategy::Hash { .. } => {
                 // Hash 分区：使用19位数字，不足补0
-                format!("{:019}", partition_index)
+                (0..parallel_workers)
+                    .map(|i| format!("{:019}", i))
+                    .collect()
             }
             PartitionStrategy::Range { ranges, .. } => {
                 // Range 分区：使用 start_end 格式
-                if let Some(range) = ranges.get(partition_index) {
-                    format!(
-                        "{}_{}",
-                        Self::format_partition_value(&range.start),
-                        Self::format_partition_value(&range.end)
-                    )
-                } else {
-                    format!("range_{}", partition_index)
-                }
-            }
-            PartitionStrategy::List { .. } => {
-                // List 分区：使用 value 值，处理特殊字符
-                if let Some(value) = partition_value {
-                    Self::sanitize_filename(value)
-                } else {
-                    format!("list_{}", partition_index)
-                }
+                ranges
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}_{}",
+                            Self::format_partition_value(&r.start),
+                            Self::format_partition_value(&r.end)
+                        )
+                    })
+                    .collect()
             }
             PartitionStrategy::Custom => {
-                // Custom 分区：用户自定义，使用 value 或 index
-                if let Some(value) = partition_value {
-                    Self::sanitize_filename(value)
-                } else {
-                    format!("custom_{}", partition_index)
-                }
+                vec![]
             }
             PartitionStrategy::None => {
                 // None 分区：使用表名
-                table_name.to_string()
+                vec![format!("{:019}", 0)]
             }
         }
     }
 
-    /// 生成 partition 目录名（统一格式：partition-{id}）
+    /// 生成 partition 目录名
     ///
-    /// 这个方法确保所有地方使用统一的目录命名格式
-    pub fn generate_partition_dir_name(partition_id: &str) -> String {
-        format!("partition-{}", partition_id)
+    /// 格式：partition-{partition_name}
+    pub fn generate_partition_dir_name(partition_name: &str) -> String {
+        format!("partition-{}", partition_name)
     }
 
-    /// 从 partition 目录名中提取 partition_id
+    /// 从 partition 目录名中提取 partition_name
     ///
     /// 例如：从 "partition-0000000000000000001" 提取 "0000000000000000001"
-    pub fn extract_partition_id_from_dir_name(dir_name: &str) -> Option<String> {
+    pub fn extract_partition_from_dir_name(dir_name: &str) -> Option<String> {
         dir_name.strip_prefix("partition-").map(|s| s.to_string())
     }
 
@@ -144,7 +119,7 @@ impl PartitionStrategy {
     }
 
     /// 清理文件名中的特殊字符
-    fn sanitize_filename(value: &str) -> String {
+    pub fn sanitize_filename(value: &str) -> String {
         value
             .chars()
             .map(|c| match c {
@@ -163,8 +138,6 @@ pub struct RangePartition {
     pub start: PartitionValue,
     /// 结束值（不包含）
     pub end: PartitionValue,
-    /// partition ID
-    pub partition_id: usize,
 }
 
 /// 分区值（支持常见类型）
@@ -181,7 +154,7 @@ pub enum PartitionValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionMeta {
     /// partition ID
-    pub partition_id: usize,
+    pub partition_name: String,
 
     /// 包含的 segment 列表
     pub segments: Vec<SegmentInfo>,
@@ -262,63 +235,40 @@ impl TableMeta {
         work_dir.join("tables").join(&self.table_name)
     }
 
-    /// 获取 partition 目录路径（使用 partition_id 字符串）
-    pub fn partition_dir_by_id(&self, work_dir: &Path, partition_id: &str) -> PathBuf {
-        self.table_dir(work_dir)
-            .join(PartitionStrategy::generate_partition_dir_name(partition_id))
+    /// 获取 partition 目录路径（使用 partition_name 字符串）
+    pub fn partition_dir_by_name(&self, work_dir: &Path, partition_name: &str) -> PathBuf {
+        let dir_name = PartitionStrategy::generate_partition_dir_name(partition_name);
+        self.table_dir(work_dir).join("partitions").join(dir_name)
     }
 
-    /// 获取 partition 目录路径（使用 partition_index）
-    ///
-    /// 已废弃：建议使用 partition_dir_by_id
-    #[deprecated(note = "Use partition_dir_by_id instead")]
-    pub fn partition_dir(&self, work_dir: &Path, partition_id: usize) -> PathBuf {
-        let id =
-            self.partition_strategy
-                .generate_partition_id(&self.table_name, partition_id, None);
-        self.partition_dir_by_id(work_dir, &id)
+    /// 获取 partition 目录路径（使用 partition_name 字符串）- 别名方法
+    pub fn partition_dir_by_id(&self, work_dir: &Path, partition_name: &str) -> PathBuf {
+        self.partition_dir_by_name(work_dir, partition_name)
     }
 
-    /// 获取 segment 目录路径（使用字符串 partition_id）
+    /// 获取 segment 目录路径（使用字符串 partition_name
     pub fn segment_dir_by_id(
         &self,
         work_dir: &PathBuf,
-        partition_id: &str,
+        partition_name: &str,
         start: u64,
         end: u64,
     ) -> PathBuf {
-        self.partition_dir_by_id(work_dir, partition_id)
+        self.partition_dir_by_id(work_dir, partition_name)
             .join(format!("segment-{}-{}", start, end))
-    }
-
-    /// 获取 segment 目录路径（使用 usize partition_id）
-    ///
-    /// 已废弃：建议使用 segment_dir_by_id
-    #[deprecated(note = "Use segment_dir_by_id instead")]
-    pub fn segment_dir(
-        &self,
-        work_dir: &PathBuf,
-        partition_id: usize,
-        start: u64,
-        end: u64,
-    ) -> PathBuf {
-        let id =
-            self.partition_strategy
-                .generate_partition_id(&self.table_name, partition_id, None);
-        self.segment_dir_by_id(work_dir, &id, start, end)
     }
 }
 
 impl PartitionMeta {
     /// 创建新的 partition 元数据
-    pub fn new(partition_id: usize) -> Self {
+    pub fn new(partition_name: String) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
         Self {
-            partition_id,
+            partition_name,
             segments: Vec::new(),
             created_at: now,
             updated_at: now,

@@ -280,24 +280,8 @@ impl DistributedExecutor {
         sort_limit_info: Option<crate::compute::optimizer::SortLimitInfo>,
     ) -> CoreResult<QueryResult> {
         let table_name = self.query_builder.extract_table_name(sql)?;
-        let meta = self.engine.get_table_meta(&table_name)?;
 
-        // 根据分区策略获取分区列表
-        let partition_ids = match &meta.partition_strategy {
-            crate::catalog::PartitionStrategy::Custom => {
-                // Custom 分区：动态查询实际存在的分区
-                self.engine.list_partitions(&table_name).await
-            }
-            _ => {
-                // 其他分区策略：使用 parallel_workers 生成分区 ID
-                (0..meta.parallel_workers)
-                    .map(|idx| {
-                        meta.partition_strategy
-                            .generate_partition_id(&table_name, idx, None)
-                    })
-                    .collect()
-            }
-        };
+        let partition_names = self.engine.list_partitions(&table_name).await;
 
         // 🔧 提取 limit hint 和生成分区 SQL
         let (limit_hint, partition_sql) = if let Some(info) = &sort_limit_info {
@@ -317,7 +301,7 @@ impl DistributedExecutor {
         log::info!(
             "🔍 [execute_query] table='{}', partitions={}, has_sort={}, limit_hint={:?}, partition_sql='{}'",
             table_name,
-            partition_ids.len(),
+            partition_names.len(),
             sort_fields.is_some(),
             limit_hint,
             partition_sql
@@ -326,11 +310,11 @@ impl DistributedExecutor {
         // 并行查询所有 partition
         let mut all_batches = Vec::new();
 
-        for partition_id in &partition_ids {
+        for partition_name in &partition_names {
             match self
                 .execute_on_partition(
                     &table_name,
-                    partition_id,
+                    partition_name,
                     &partition_sql,
                     sort_fields.clone(),
                     limit_hint,
@@ -341,7 +325,7 @@ impl DistributedExecutor {
                     all_batches.extend(batches);
                 }
                 Err(e) => {
-                    log::warn!("⚠️  Partition {} failed: {}", partition_id, e);
+                    log::warn!("⚠️  Partition {} failed: {}", partition_name, e);
                 }
             }
         }
@@ -351,7 +335,7 @@ impl DistributedExecutor {
             "📊 [execute_query] Collected {} batches with {} total rows from {} partitions",
             all_batches.len(),
             total_rows_before,
-            partition_ids.len()
+            partition_names.len()
         );
 
         // matched_docs 就是返回的总行数（在 LIMIT 之前）
@@ -378,14 +362,14 @@ impl DistributedExecutor {
     async fn execute_on_partition(
         &self,
         table_name: &str,
-        partition_id: &str,
+        partition_name: &str,
         sql: &str,
         sort_hints: Option<Vec<(String, bool)>>,
         limit_hint: Option<usize>,
     ) -> CoreResult<Vec<RecordBatch>> {
         log::info!(
-            "🔧 [execute_on_partition] partition_id={}, table='{}', sql='{}', sort_hints={:?}, limit_hint={:?}",
-            partition_id,
+            "🔧 [execute_on_partition] partition_name={}, table='{}', sql='{}', sort_hints={:?}, limit_hint={:?}",
+            partition_name,
             table_name,
             sql,
             sort_hints,
@@ -396,12 +380,12 @@ impl DistributedExecutor {
 
         let partition = self
             .engine
-            .get_partition(table_name, partition_id)
+            .get_partition(table_name, partition_name)
             .await
             .ok_or_else(|| {
                 CoreError::NotExisted(format!(
                     "Partition {} not found for table '{}'",
-                    partition_id, table_name
+                    partition_name, table_name
                 ))
             })?;
 
@@ -427,8 +411,8 @@ impl DistributedExecutor {
 
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         log::info!(
-            "✅ [execute_on_partition] partition_id={}, returned {} batches with {} total rows",
-            partition_id,
+            "✅ [execute_on_partition] partition_name={}, returned {} batches with {} total rows",
+            partition_name,
             batches.len(),
             total_rows
         );
@@ -568,12 +552,12 @@ impl DistributedExecutor {
     async fn execute_sql_on_partition_old(
         &self,
         table_name: &str,
-        partition_id: &str,
+        partition_name: &str,
         sql: &str,
     ) -> CoreResult<Vec<RecordBatch>> {
         eprintln!(
             "🔍 [execute_sql_on_partition] Starting query on partition {} for table '{}'",
-            partition_id, table_name
+            partition_name, table_name
         );
         eprintln!("🔍 [execute_sql_on_partition] SQL: {}", sql);
 
@@ -582,18 +566,18 @@ impl DistributedExecutor {
         // 获取分区
         let partition = self
             .engine
-            .get_partition(table_name, partition_id)
+            .get_partition(table_name, partition_name)
             .await
             .ok_or_else(|| {
                 crate::utils::error::CoreError::NotExisted(format!(
                     "Partition {} not found for table '{}'",
-                    partition_id, table_name
+                    partition_name, table_name
                 ))
             })?;
 
         eprintln!(
             "🔍 [execute_sql_on_partition] Got partition {}, registering table...",
-            partition_id
+            partition_name
         );
 
         // 注册分区到 DataFusion 的默认 catalog 和 schema
@@ -644,7 +628,7 @@ impl DistributedExecutor {
 
         eprintln!(
             "🔍 [execute_sql_on_partition] Partition {} returned {} batches",
-            partition_id,
+            partition_name,
             batches.len()
         );
 
@@ -659,36 +643,20 @@ impl DistributedExecutor {
         // 提取表名
         let table_name = self.query_builder.extract_table_name(sql)?;
 
-        let meta = self.engine.get_table_meta(&table_name)?;
-
         // 根据分区策略获取分区列表
-        let partition_ids = match &meta.partition_strategy {
-            crate::catalog::PartitionStrategy::Custom => {
-                // Custom 分区：动态查询实际存在的分区
-                self.engine.list_partitions(&table_name).await
-            }
-            _ => {
-                // 其他分区策略：使用 parallel_workers 生成分区 ID
-                (0..meta.parallel_workers)
-                    .map(|idx| {
-                        meta.partition_strategy
-                            .generate_partition_id(&table_name, idx, None)
-                    })
-                    .collect()
-            }
-        };
+        let partition_names = self.engine.list_partitions(&table_name).await;
 
         eprintln!(
             "🔍 [DistributedExecutor] Executing distributed aggregation on table '{}' with {} partitions",
-            table_name, partition_ids.len()
+            table_name, partition_names.len()
         );
 
         // 并行在所有分区上执行聚合
         let mut partition_results = Vec::new();
 
-        for partition_id in &partition_ids {
+        for partition_name in &partition_names {
             match self
-                .execute_sql_on_partition_old(&table_name, partition_id, sql)
+                .execute_sql_on_partition_old(&table_name, partition_name, sql)
                 .await
             {
                 Ok(batches) => {
@@ -697,7 +665,7 @@ impl DistributedExecutor {
                 Err(e) => {
                     eprintln!(
                         "⚠️  [DistributedExecutor] Failed to execute aggregation on partition {}: {}",
-                        partition_id, e
+                        partition_name, e
                     );
                 }
             }
@@ -731,34 +699,21 @@ impl DistributedExecutor {
         // 创建一个临时的SessionContext来执行查询并获取schema
         let ctx = SessionContext::new();
 
-        // 获取表的元数据以生成 partition_id
-        let meta = self.engine.get_table_meta(table_name)?;
-
-        // 根据分区策略获取第一个分区 ID
-        let partition_id = match &meta.partition_strategy {
-            crate::catalog::PartitionStrategy::Custom => {
-                // Custom 分区：查询实际存在的第一个分区
-                let partitions = self.engine.list_partitions(table_name).await;
-                partitions.into_iter().next().ok_or_else(|| {
-                    CoreError::NotExisted(format!("No partitions found for table '{}'", table_name))
-                })?
-            }
-            _ => {
-                // 其他分区策略：使用索引 0 生成分区 ID
-                meta.partition_strategy
-                    .generate_partition_id(table_name, 0, None)
-            }
-        };
+        // 直接从 engine 获取第一个 partition
+        let partition_names = self.engine.list_partitions(table_name).await;
+        let first_partition_name = partition_names.into_iter().next().ok_or_else(|| {
+            CoreError::NotExisted(format!("No partitions found for table '{}'", table_name))
+        })?;
 
         // 获取第一个partition来注册表（只是为了获取schema）
         let partition = self
             .engine
-            .get_partition(table_name, &partition_id)
+            .get_partition(table_name, &first_partition_name)
             .await
             .ok_or_else(|| {
                 CoreError::NotExisted(format!(
                     "Partition {} not found for table '{}'",
-                    partition_id, table_name
+                    first_partition_name, table_name
                 ))
             })?;
 
@@ -891,24 +846,13 @@ impl DistributedExecutor {
 
     /// 获取表的总行数（无 WHERE）
     async fn get_total_count(&self, table_name: &str) -> CoreResult<u64> {
-        let meta = self.engine.get_table_meta(table_name)?;
-
-        let partition_ids = match &meta.partition_strategy {
-            crate::catalog::PartitionStrategy::Custom => {
-                self.engine.list_partitions(table_name).await
-            }
-            _ => (0..meta.parallel_workers)
-                .map(|idx| {
-                    meta.partition_strategy
-                        .generate_partition_id(table_name, idx, None)
-                })
-                .collect(),
-        };
+        // 直接从 engine 获取所有 partition 列表
+        let partition_names = self.engine.list_partitions(table_name).await;
 
         // 并行统计所有分区的行数
         let mut total_count = 0u64;
-        for partition_id in &partition_ids {
-            if let Some(partition) = self.engine.get_partition(table_name, partition_id).await {
+        for partition_name in &partition_names {
+            if let Some(partition) = self.engine.get_partition(table_name, partition_name).await {
                 total_count += partition.total_count();
             }
         }
@@ -935,25 +879,15 @@ impl DistributedExecutor {
 
         // Step 1: 解析 SQL,提取 filters
         let ctx = SessionContext::new();
-        let meta = self.engine.get_table_meta(table_name)?;
 
-        let partition_ids = match &meta.partition_strategy {
-            crate::catalog::PartitionStrategy::Custom => {
-                self.engine.list_partitions(table_name).await
-            }
-            _ => (0..meta.parallel_workers)
-                .map(|idx| {
-                    meta.partition_strategy
-                        .generate_partition_id(table_name, idx, None)
-                })
-                .collect(),
-        };
+        // 直接从 engine 获取所有 partition 列表
+        let partition_names = self.engine.list_partitions(table_name).await;
 
         // 为了提取 filters,需要注册一个临时表
         // 使用第一个 partition 的 schema
         if let Some(first_partition) = self
             .engine
-            .get_partition(table_name, &partition_ids[0])
+            .get_partition(table_name, &partition_names[0])
             .await
         {
             let provider = Arc::new(crate::compute::PartitionTableProvider::new(
@@ -983,8 +917,8 @@ impl DistributedExecutor {
         // Step 3: 并行计算所有 partition 的 bitmap cardinality
         let mut total_matched = 0u64;
 
-        for partition_id in &partition_ids {
-            if let Some(partition) = self.engine.get_partition(table_name, partition_id).await {
+        for partition_name in &partition_names {
+            if let Some(partition) = self.engine.get_partition(table_name, partition_name).await {
                 let partition_count = self.count_partition_with_filters(&partition, &filters)?;
                 total_matched += partition_count;
             }
@@ -1149,26 +1083,15 @@ impl DistributedExecutor {
         table_name: &str,
         info: crate::compute::optimizer::PureLimitInfo,
     ) -> CoreResult<QueryResult> {
-        let meta = self.engine.get_table_meta(table_name)?;
-
-        let partition_ids = match &meta.partition_strategy {
-            crate::catalog::PartitionStrategy::Custom => {
-                self.engine.list_partitions(table_name).await
-            }
-            _ => (0..meta.parallel_workers)
-                .map(|idx| {
-                    meta.partition_strategy
-                        .generate_partition_id(table_name, idx, None)
-                })
-                .collect(),
-        };
+        // 直接从 engine 获取所有 partition 列表
+        let partition_names = self.engine.list_partitions(table_name).await;
 
         let mut all_batches = Vec::new();
         let mut collected_rows = 0;
         let target_rows = info.offset.unwrap_or(0) + info.limit;
 
         // 串行遍历分区，达到目标行数就停止
-        for partition_id in &partition_ids {
+        for partition_name in &partition_names {
             if collected_rows >= target_rows {
                 log::info!(
                     "✅ Early termination: collected {} >= target {}",
@@ -1181,7 +1104,7 @@ impl DistributedExecutor {
             match self
                 .execute_on_partition(
                     table_name,
-                    partition_id,
+                    partition_name,
                     sql,
                     None,
                     Some(target_rows - collected_rows),
@@ -1199,7 +1122,7 @@ impl DistributedExecutor {
                     }
                 }
                 Err(e) => {
-                    log::warn!("⚠️  Partition {} failed: {}", partition_id, e);
+                    log::warn!("⚠️  Partition {} failed: {}", partition_name, e);
                 }
             }
         }
@@ -1249,30 +1172,19 @@ impl DistributedExecutor {
         table_name: &str,
     ) -> CoreResult<QueryResult> {
         // 串行扫描所有分区，按自然顺序返回
-        let meta = self.engine.get_table_meta(table_name)?;
-
-        let partition_ids = match &meta.partition_strategy {
-            crate::catalog::PartitionStrategy::Custom => {
-                self.engine.list_partitions(table_name).await
-            }
-            _ => (0..meta.parallel_workers)
-                .map(|idx| {
-                    meta.partition_strategy
-                        .generate_partition_id(table_name, idx, None)
-                })
-                .collect(),
-        };
+        // 直接从 engine 获取所有 partition 列表
+        let partition_names = self.engine.list_partitions(table_name).await;
 
         let mut all_batches = Vec::new();
 
-        for partition_id in &partition_ids {
+        for partition_name in &partition_names {
             match self
-                .execute_on_partition(table_name, partition_id, sql, None, None)
+                .execute_on_partition(table_name, partition_name, sql, None, None)
                 .await
             {
                 Ok(batches) => all_batches.extend(batches),
                 Err(e) => {
-                    log::warn!("⚠️  Partition {} failed: {}", partition_id, e);
+                    log::warn!("⚠️  Partition {} failed: {}", partition_name, e);
                 }
             }
         }

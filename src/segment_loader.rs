@@ -34,7 +34,7 @@ impl SegmentLoader {
     ///
     /// # 参数
     /// - `table_name`: 表名
-    /// - `partition_id`: 分区ID
+    /// - `partition_name`: 分区ID
     /// - `file_path`: 外部文件路径
     /// - `handler_type`: 文件处理类型
     /// - `schema`: 表的 schema
@@ -44,7 +44,7 @@ impl SegmentLoader {
     pub async fn load_segment(
         &self,
         table_name: &str,
-        partition_id: &str,
+        partition_name: &str,
         file_path: &Path,
         handler_type: FileHandlerType,
         _schema: &Schema,
@@ -70,7 +70,7 @@ impl SegmentLoader {
             .work_dir
             .join("tables")
             .join(table_name)
-            .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(partition_id))
+            .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(partition_name))
             .join("temp_load");
 
         std::fs::create_dir_all(&temp_dir)
@@ -151,7 +151,7 @@ impl SegmentLoader {
             "Loaded {} documents from file {:?} for partition {}",
             doc_count,
             file_path,
-            partition_id
+            partition_name
         );
 
         // 清理临时目录

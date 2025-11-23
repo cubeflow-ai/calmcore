@@ -27,7 +27,7 @@ pub struct PartitionTableProvider {
 impl std::fmt::Debug for PartitionTableProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PartitionTableProvider")
-            .field("partition_id", &self.partition.id())
+            .field("partition_name", &self.partition.name())
             .field("schema", &self.schema)
             .finish()
     }
@@ -113,7 +113,7 @@ impl TableProvider for PartitionTableProvider {
 
         log::info!(
             "🔍 [PartitionTableProvider::scan] Starting scan for partition {}, filters={:?}, limit={:?}",
-            self.partition.id(),
+            self.partition.name(),
             filters,
             limit
         );

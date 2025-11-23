@@ -62,9 +62,7 @@ impl Catalog {
         self.save_table_meta(&meta)?;
 
         // 创建 partition 目录和元数据
-        for i in 0..meta.parallel_workers {
-            self.create_partition(i, &meta)?;
-        }
+        self.create_partition(&meta)?;
 
         // 添加到缓存
         {
@@ -113,25 +111,21 @@ impl Catalog {
         Ok(())
     }
 
-    /// 获取 partition 元数据
+    /// 获取 partition 元数据（通过 partition_name）
     pub fn get_partition_meta(
         &self,
         table_name: &str,
-        partition_id: usize,
+        partition_name: &str,
     ) -> CoreResult<PartitionMeta> {
         let table = self.get_table(table_name)?;
-        let partition_id_str =
-            table
-                .partition_strategy
-                .generate_partition_id(table_name, partition_id, None);
         let partition_meta_path = table
-            .partition_dir_by_id(&self.work_dir, &partition_id_str)
+            .partition_dir_by_name(&self.work_dir, partition_name)
             .join("meta.json");
 
         if !partition_meta_path.exists() {
             return Err(CoreError::NotExisted(format!(
                 "Partition {} meta not found for table '{}'",
-                partition_id, table_name
+                partition_name, table_name
             )));
         }
 
@@ -147,12 +141,8 @@ impl Catalog {
     /// 保存 partition 元数据
     pub fn save_partition_meta(&self, table_name: &str, meta: &PartitionMeta) -> CoreResult<()> {
         let table = self.get_table(table_name)?;
-        let partition_id_str =
-            table
-                .partition_strategy
-                .generate_partition_id(table_name, meta.partition_id, None);
         let partition_meta_path = table
-            .partition_dir_by_id(&self.work_dir, &partition_id_str)
+            .partition_dir_by_name(&self.work_dir, &meta.partition_name)
             .join("meta.json");
 
         let content = serde_json::to_string_pretty(meta).map_err(|e| {
@@ -192,30 +182,45 @@ impl Catalog {
     }
 
     /// 创建 partition 目录和元数据
-    fn create_partition(&self, partition_id: usize, table_meta: &TableMeta) -> CoreResult<()> {
-        let partition_id_str = table_meta.partition_strategy.generate_partition_id(
-            &table_meta.table_name,
-            partition_id,
-            None,
-        );
-        let partition_dir = table_meta.partition_dir_by_id(&self.work_dir, &partition_id_str);
-        let segments_dir = partition_dir.join("segments");
+    fn create_partition(&self, table_meta: &TableMeta) -> CoreResult<()> {
+        let partitions = table_meta
+            .partition_strategy
+            .generate_partitions(table_meta.parallel_workers);
 
-        // 创建目录
-        fs::create_dir_all(&segments_dir).map_err(|e| {
-            CoreError::IOError(format!("Failed to create partition directories: {}", e))
-        })?;
+        for partition in partitions {
+            // partition 目录直接在 table_dir 下，不需要额外的 segments 子目录
+            let partition_dir = table_meta.partition_dir_by_name(&self.work_dir, &partition);
 
-        // 创建 partition 元数据
-        let partition_meta = PartitionMeta::new(partition_id);
-        let meta_path = partition_dir.join("meta.json");
-        let content = serde_json::to_string_pretty(&partition_meta).map_err(|e| {
-            CoreError::IOError(format!("Failed to serialize partition meta: {}", e))
-        })?;
+            // 创建 partition 目录
+            fs::create_dir_all(&partition_dir).map_err(|e| {
+                CoreError::IOError(format!(
+                    "Failed to create partition directory '{}': {}",
+                    partition_dir.display(),
+                    e
+                ))
+            })?;
 
-        fs::write(&meta_path, content)
-            .map_err(|e| CoreError::IOError(format!("Failed to write partition meta: {}", e)))?;
+            // 创建 partition 元数据
+            let partition_meta = PartitionMeta::new(partition.clone());
+            let meta_path = partition_dir.join("meta.json");
+            let content = serde_json::to_string_pretty(&partition_meta).map_err(|e| {
+                CoreError::IOError(format!("Failed to serialize partition meta: {}", e))
+            })?;
 
+            fs::write(&meta_path, content).map_err(|e| {
+                CoreError::IOError(format!(
+                    "Failed to write partition meta to '{}': {}",
+                    meta_path.display(),
+                    e
+                ))
+            })?;
+
+            log::info!(
+                "Created partition directory: {} (name: {})",
+                partition_dir.display(),
+                partition
+            );
+        }
         Ok(())
     }
 
@@ -320,13 +325,13 @@ mod tests {
         let table_dir = table.table_dir(&catalog.work_dir);
         assert!(table_dir.exists());
         assert!(table_dir.join("meta.json").exists());
-        assert!(table_dir.join("partitions").exists());
 
-        for i in 0..4 {
-            let partition_dir = table.partition_dir(&catalog.work_dir, i);
+        // 验证 partition 目录
+        let partitions = table.partition_strategy.generate_partitions(4);
+        for partition_name in partitions {
+            let partition_dir = table.partition_dir_by_name(&catalog.work_dir, &partition_name);
             assert!(partition_dir.exists());
             assert!(partition_dir.join("meta.json").exists());
-            assert!(partition_dir.join("segments").exists());
         }
     }
 }

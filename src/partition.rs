@@ -21,11 +21,11 @@ use crate::{
 
 pub struct WriteInfo(pub Vec<(Arc<Segment>, Vec<u32>)>);
 
-/// 持久化通知回调 (table_name, partition_id)
+/// 持久化通知回调 (table_name, partition_name)
 pub type PersistNotifyCallback = mpsc::UnboundedSender<(String, String)>;
 
 pub struct Partition {
-    pub id: String,
+    pub name: String,
     table_name: String,
     current_segment: RwLock<Segment>,
     frozen_segments: RwLock<Vec<(u64, Arc<Segment>)>>, // (seg_id, segment)
@@ -50,7 +50,7 @@ impl Partition {
         let schema = Arc::new(schema);
         let arrow_schema = schema.to_arrow_schema();
         Partition {
-            id,
+            name: id,
             table_name,
             base_dir,
             schema: schema.clone(),
@@ -307,7 +307,7 @@ impl Partition {
         // 4. flush notify Engine to check for persist
         let _ = self
             .persist_notify
-            .send((self.table_name.clone(), self.id.clone()));
+            .send((self.table_name.clone(), self.name.clone()));
 
         Ok(seg_id)
     }
@@ -336,6 +336,42 @@ impl Partition {
         use std::fs::File;
 
         println!("📦 Adding segment from Parquet: {}", parquet_path);
+        println!("  📍 Partition ID: {}", self.name);
+        println!("  📍 Partition address: {:p}", self);
+
+        // 0. Check if this file has already been loaded (防止重复加载)
+        // 直接判断路径是否已存在于 frozen_segments 中
+
+        println!(
+            "  📊 frozen_segments count: {}",
+            self.frozen_segments.read().unwrap().len()
+        );
+        {
+            let frozen_segments = self.frozen_segments.read().unwrap();
+            for (seg_id, segment) in frozen_segments.iter() {
+                if let Some(existing_path) = segment.get_parquet_path() {
+                    println!(
+                        "================{:?}===================={:?}",
+                        existing_path,
+                        segment.get_parquet_path()
+                    );
+                    // 直接比较路径字符串
+                    if existing_path == parquet_path {
+                        let error_msg = format!(
+                            "Segment already loaded: path '{}' is already loaded as segment {} (range: {}-{})",
+                            parquet_path, seg_id, segment.start, segment.next_doc_id() - 1
+                        );
+                        println!("⚠️  {}", error_msg);
+                        return Err(CoreError::InvalidParam(error_msg));
+                    }
+                }
+            }
+        }
+
+        println!(
+            "  ✓ Path not found in existing segments, proceeding to load: {}",
+            parquet_path
+        );
 
         // 1. Open and read Parquet file metadata
         let file = File::open(parquet_path)
@@ -773,7 +809,7 @@ impl Partition {
 
         let arrow_schema = schema.to_arrow_schema();
         Ok(Partition {
-            id,
+            name: id,
             table_name,
             base_dir,
             schema,
@@ -838,8 +874,8 @@ impl Partition {
     }
 
     /// 获取 Partition ID
-    pub fn id(&self) -> &str {
-        &self.id
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Get schema reference
@@ -872,14 +908,14 @@ impl Partition {
     ///
     /// 调用后保证：所有数据已写入磁盘
     pub fn persist_all(&self) -> CoreResult<()> {
-        println!("[Partition {}] Starting persist_all...", self.id);
+        println!("[Partition {}] Starting persist_all...", self.name);
 
         // 1. Flush 当前活跃 segment
         let current_count = self.current_segment.read().unwrap().doc_count();
         if current_count > 0 {
             log::info!(
                 "[Partition {}] Flushing current segment ({} records)",
-                self.id,
+                self.name,
                 current_count
             );
             self.flush(false)?;
@@ -888,13 +924,13 @@ impl Partition {
         // 2. 持久化所有未持久化的 segments
         let unpersisted = self.get_unpersisted_segments();
         if unpersisted.is_empty() {
-            log::info!("[Partition {}] All segments already persisted", self.id);
+            log::info!("[Partition {}] All segments already persisted", self.name);
             return Ok(());
         }
 
         log::info!(
             "[Partition {}] Persisting {} segments...",
-            self.id,
+            self.name,
             unpersisted.len()
         );
 
@@ -903,12 +939,12 @@ impl Partition {
         // 3. 验证
         let remaining = self.get_unpersisted_segments();
         if remaining.is_empty() {
-            log::info!("[Partition {}] All data persisted", self.id);
+            log::info!("[Partition {}] All data persisted", self.name);
             Ok(())
         } else {
             Err(CoreError::Internal(format!(
                 "Partition {} still has {} unpersisted segments",
-                self.id,
+                self.name,
                 remaining.len()
             )))
         }

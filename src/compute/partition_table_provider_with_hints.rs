@@ -29,7 +29,7 @@ pub struct PartitionTableProviderWithHints {
 impl std::fmt::Debug for PartitionTableProviderWithHints {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PartitionTableProviderWithHints")
-            .field("partition_id", &self.partition.id())
+            .field("partition_name", &self.partition.name())
             .field("schema", &self.schema)
             .field("sort", &self.sort)
             .finish()
@@ -128,7 +128,7 @@ impl TableProvider for PartitionTableProviderWithHints {
 
         log::info!(
             "🔍 [PartitionTableProviderWithHints::scan] Starting scan for partition {}, filters={:?}, limit={:?}, limit_hint={:?}, effective_limit={:?}, sort={:?}",
-            self.partition.id(),
+            self.partition.name(),
             filters,
             limit,
             self.limit_hint,

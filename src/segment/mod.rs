@@ -873,11 +873,8 @@ impl Segment {
         // 5. Load row data (check for Parquet format first, then BTree format)
         let parquet_path = format!("{}/rowdata.parquet", row_data_path);
         let row_data = if std::path::Path::new(&parquet_path).exists() {
-            // New format: Parquet file
+            // Parquet file format
             RowDataStore::new_parquet(&parquet_path)?
-        } else if std::path::Path::new(&row_data_path).exists() {
-            // Old format: BTree
-            RowDataStore::new_disk(&row_data_path, U32RecordBatchSerializer::default())?
         } else {
             RowDataStore::new_memory(32)
         };
@@ -1141,11 +1138,13 @@ impl Segment {
             let rowdata_path = format!("{}/rowdata", segment_path);
             let parquet_path = format!("{}/rowdata.parquet", rowdata_path);
             let disk_row_data = if std::path::Path::new(&parquet_path).exists() {
-                // New format: Parquet file
+                // Parquet file format
                 RowDataStore::new_parquet(&parquet_path)?
             } else {
-                // Old format: BTree
-                RowDataStore::new_disk(&rowdata_path, U32RecordBatchSerializer::default())?
+                return Err(CoreError::IOError(format!(
+                    "Parquet file not found: {}",
+                    parquet_path
+                )));
             };
             *self.row_data.write().unwrap() = disk_row_data;
         } else {
@@ -1374,6 +1373,11 @@ impl Segment {
     /// Check if segment is persisted to disk
     pub fn is_persisted(&self) -> bool {
         self.persisted.load(Ordering::Relaxed)
+    }
+
+    /// Get the parquet file path if this segment references an external file
+    pub fn get_parquet_path(&self) -> Option<&str> {
+        self.base_path.as_deref()
     }
 
     /// Get segment base path (if persisted)
