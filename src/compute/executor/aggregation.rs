@@ -163,6 +163,14 @@ impl AggregationMerger {
                 || field_name.contains("max")
                 || field_name.contains("min"));
 
+            eprintln!(
+                "🔍 [AggregationMerger] Column {}: name='{}', type={:?}, is_agg={}",
+                col_idx,
+                field.name(),
+                field.data_type(),
+                is_agg
+            );
+
             if is_agg {
                 agg_col_indices.push(col_idx);
             } else {
@@ -171,9 +179,11 @@ impl AggregationMerger {
         }
 
         eprintln!(
-            "🔍 [AggregationMerger] Identified {} group columns and {} aggregation columns",
+            "🔍 [AggregationMerger] Identified {} group columns {:?} and {} aggregation columns {:?}",
             group_col_indices.len(),
-            agg_col_indices.len()
+            group_col_indices,
+            agg_col_indices.len(),
+            agg_col_indices
         );
 
         if group_col_indices.is_empty() {
