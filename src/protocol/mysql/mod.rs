@@ -49,6 +49,21 @@ impl MysqlServer {
                                     return;
                                 }
 
+                                // 禁用 Nagle 算法，减少小包延迟（跨平台）
+                                if let Err(e) = std_stream.set_nodelay(true) {
+                                    log::warn!("Failed to set TCP_NODELAY: {}", e);
+                                }
+
+                                // 设置读写超时，避免无响应连接长时间占用资源（跨平台）
+                                // 30秒超时适用于正常查询，对于长时间运行的查询客户端会保持活动
+                                let timeout = std::time::Duration::from_secs(30);
+                                if let Err(e) = std_stream.set_read_timeout(Some(timeout)) {
+                                    log::warn!("Failed to set read timeout: {}", e);
+                                }
+                                if let Err(e) = std_stream.set_write_timeout(Some(timeout)) {
+                                    log::warn!("Failed to set write timeout: {}", e);
+                                }
+
                                 let backend = CalmBackend {
                                     engine,
                                     username,
@@ -597,6 +612,14 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                     results,
                 ))
             });
+        }
+
+        // KILL QUERY 命令 (JDBC 超时取消)
+        if query_lower.starts_with("kill query") || query_lower.starts_with("kill") {
+            log::info!("📝 [MySQL] Received KILL command: {}", query_trimmed);
+            // 在单连接场景下,KILL 命令意义不大,直接返回成功
+            // 实际的查询取消由客户端断开连接来实现
+            return results.completed(0, 0);
         }
 
         // 未识别的查询,打印日志

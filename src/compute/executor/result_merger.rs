@@ -1,7 +1,6 @@
 /// 结果合并工具
 ///
 /// 提供 RecordBatch 合并、空结果创建等功能
-
 use std::sync::Arc;
 
 use datafusion::arrow::array::{new_empty_array, ArrayRef};
