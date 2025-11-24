@@ -6,16 +6,23 @@ use crate::schema::Schema;
 use datafusion::arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use msql_srv::*;
+use sha1::{Digest, Sha1};
 use std::io;
 use std::sync::Arc;
 
 pub struct MysqlServer {
     engine: Arc<Engine>,
+    username: String,
+    password: String,
 }
 
 impl MysqlServer {
-    pub fn new(engine: Arc<Engine>) -> Self {
-        Self { engine }
+    pub fn new(engine: Arc<Engine>, username: String, password: String) -> Self {
+        Self {
+            engine,
+            username,
+            password,
+        }
     }
 
     pub async fn start(self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -26,6 +33,8 @@ impl MysqlServer {
                 Ok((stream, addr)) => {
                     println!("MySQL client connected from: {}", addr);
                     let engine = self.engine.clone();
+                    let username = self.username.clone();
+                    let password = self.password.clone();
 
                     // 将 tokio TcpStream 转换为 std TcpStream 并设置为阻塞模式
                     // msql_srv 需要阻塞式的 std::net::TcpStream
@@ -40,7 +49,11 @@ impl MysqlServer {
                                     return;
                                 }
 
-                                let backend = CalmBackend { engine };
+                                let backend = CalmBackend {
+                                    engine,
+                                    username,
+                                    password,
+                                };
 
                                 // 处理连接
                                 match MysqlIntermediary::run_on_tcp(backend, std_stream) {
@@ -74,10 +87,106 @@ impl MysqlServer {
 
 struct CalmBackend {
     engine: Arc<Engine>,
+    username: String,
+    password: String,
+}
+
+/// MySQL 密码验证 - mysql_native_password 插件
+///
+/// MySQL 5.x/8.x 使用的标准认证方式:
+/// 1. Server 发送 20 字节的 scramble (salt)
+/// 2. Client 计算: XOR(SHA1(password), SHA1(scramble + SHA1(SHA1(password))))
+/// 3. Server 验证: 计算相同的值并比较
+fn verify_mysql_native_password(password: &str, auth_response: &[u8], scramble: &[u8]) -> bool {
+    if auth_response.is_empty() {
+        // 空密码的情况
+        return password.is_empty();
+    }
+
+    if scramble.len() != 20 {
+        eprintln!("❌ [Auth] Invalid scramble length: {}", scramble.len());
+        return false;
+    }
+
+    if auth_response.len() != 20 {
+        eprintln!(
+            "❌ [Auth] Invalid auth_response length: {}",
+            auth_response.len()
+        );
+        return false;
+    }
+
+    // 1. SHA1(password)
+    let mut hasher = Sha1::new();
+    hasher.update(password.as_bytes());
+    let stage1 = hasher.finalize();
+
+    // 2. SHA1(SHA1(password))
+    let mut hasher = Sha1::new();
+    hasher.update(&stage1);
+    let stage2 = hasher.finalize();
+
+    // 3. SHA1(scramble + SHA1(SHA1(password)))
+    let mut hasher = Sha1::new();
+    hasher.update(scramble);
+    hasher.update(&stage2);
+    let stage3 = hasher.finalize();
+
+    // 4. XOR(SHA1(password), SHA1(scramble + SHA1(SHA1(password))))
+    let mut expected = [0u8; 20];
+    for i in 0..20 {
+        expected[i] = stage1[i] ^ stage3[i];
+    }
+
+    // 5. 比较结果
+    expected == auth_response
 }
 
 impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
     type Error = io::Error;
+
+    fn after_authentication(&mut self, context: &AuthenticationContext<'_>) -> io::Result<()> {
+        // 验证用户名
+        if let Some(client_username) = &context.username {
+            let client_username_str = String::from_utf8_lossy(client_username);
+
+            // 检查用户名是否匹配
+            if client_username_str != self.username {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("Access denied for user '{}'", client_username_str),
+                ));
+            }
+
+            // 验证密码
+            if let (Some(auth_response), Some(scramble)) =
+                (&context.auth_response, &context.scramble)
+            {
+                if !verify_mysql_native_password(&self.password, auth_response, scramble) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "Access denied for user '{}' (using password: YES)",
+                            client_username_str
+                        ),
+                    ));
+                }
+            } else {
+                // 没有密码数据的情况（不应该发生）
+                if !self.password.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "Access denied for user '{}' (no auth data)",
+                            client_username_str
+                        ),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
 
     fn on_prepare(&mut self, _query: &str, info: StatementMetaWriter<W>) -> io::Result<()> {
         // 简单返回,暂不支持 prepared statement
@@ -132,6 +241,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             || query_lower.starts_with("select @@")
             || query_lower.starts_with("select version()")
             || query_lower.starts_with("select database()")
+            || query_lower.starts_with("select $$")  // MySQL 客户端初始化查询
             || query_lower == "select 1"
             || query_lower.starts_with("show variables")
             || query_lower.starts_with("show session")
@@ -156,7 +266,8 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                 // 处理多列的 @@variable 查询 (JDBC 初始化查询)
                 return self.handle_session_variables_query(query_without_comment, results);
             }
-            // 事务命令和其他初始化命令返回成功
+            // select $$ 和其他初始化命令直接返回成功
+            // 避免发送复杂的结果集导致协议问题
             return results.completed(0, 0);
         }
 
@@ -923,6 +1034,12 @@ fn write_query_result<W: io::Read + io::Write>(
     schema: &SchemaRef,
     batches: &[RecordBatch],
 ) -> io::Result<()> {
+    eprintln!(
+        "📤 [write_query_result] Starting, {} columns, {} batches",
+        schema.fields().len(),
+        batches.len()
+    );
+
     let columns: Vec<msql_srv::Column> = schema
         .fields()
         .iter()

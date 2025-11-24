@@ -9,9 +9,12 @@ pub(crate) fn write_eof_packet<W: Read + Write>(
     w: &mut PacketConn<W>,
     s: StatusFlags,
 ) -> io::Result<()> {
+    eprintln!("📨 [Protocol] Sending EOF packet, status={:?}", s);
     w.write_all(&[0xFE, 0x00, 0x00])?;
     w.write_u16::<LittleEndian>(s.bits())?;
-    w.end_packet()
+    w.end_packet()?;
+    eprintln!("✅ [Protocol] EOF packet sent");
+    Ok(())
 }
 
 pub(crate) fn write_ok_packet<W: Read + Write>(
@@ -20,12 +23,15 @@ pub(crate) fn write_ok_packet<W: Read + Write>(
     last_insert_id: u64,
     s: StatusFlags,
 ) -> io::Result<()> {
+    eprintln!("📨 [Protocol] Sending OK packet, rows={}, status={:?}", rows, s);
     w.write_u8(0x00)?; // OK packet type
     w.write_lenenc_int(rows)?;
     w.write_lenenc_int(last_insert_id)?;
     w.write_u16::<LittleEndian>(s.bits())?;
     w.write_all(&[0x00, 0x00])?; // no warnings
-    w.end_packet()
+    w.end_packet()?;
+    eprintln!("✅ [Protocol] OK packet sent");
+    Ok(())
 }
 
 pub fn write_err<W: Read + Write>(

@@ -77,11 +77,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(port) = config.mysql_port {
         let addr = format!("{}:{}", config.host, port);
         println!("🚀 Starting MySQL server on {}", addr);
-        println!("   Connect: mysql -h {} -P {} -u root", config.host, port);
+        println!(
+            "   Connect: mysql -h {} -P {} -u {} {}",
+            config.host,
+            port,
+            config.user,
+            if config.password.is_empty() { "" } else { "-p" }
+        );
 
         let engine_clone = engine.clone();
+        let user = config.user.clone();
+        let password = config.password.clone();
         let handle = tokio::spawn(async move {
-            let server = MysqlServer::new(engine_clone);
+            let server = MysqlServer::new(engine_clone, user, password);
             if let Err(e) = server.start(&addr).await {
                 eprintln!("❌ MySQL server error: {}", e);
             }

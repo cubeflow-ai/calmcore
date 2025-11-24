@@ -212,6 +212,10 @@ pub trait MysqlShim<W: Read + Write> {
 pub struct AuthenticationContext<'a> {
     /// The username exactly as passed by the client,
     pub username: Option<Vec<u8>>,
+    /// The auth response (scrambled password) exactly as passed by the client
+    pub auth_response: Option<Vec<u8>>,
+    /// The server's scramble/salt used for authentication
+    pub scramble: Option<&'a [u8]>,
     #[cfg(feature = "tls")]
     /// The TLS certificate chain presented by the client.
     pub tls_client_certs: Option<&'a [rustls::pki_types::CertificateDer<'a>]>,
@@ -271,10 +275,13 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
         self.rw.write_all(&b"5.1.10-alpha-msql-proxy\0"[..])?;
 
         self.rw.write_all(&[0x08, 0x00, 0x00, 0x00])?; // TODO: connection ID
-        self.rw.write_all(&b";X,po_k}\0"[..])?; // auth seed
-                                                // PATCHED: Add CLIENT_SECURE_CONNECTION (0x8000) and CLIENT_PLUGIN_AUTH (0x00080000) for JDBC
-                                                // Original: [0x00, 0x42] = 0x4200 (CLIENT_PROTOCOL_41 | CLIENT_MULTI_STATEMENTS)
-                                                // New: [0x00, 0xC2] = 0xC200 (adds CLIENT_SECURE_CONNECTION = 0x8000)
+                                                       // 生成 20 字节的随机 scramble (salt)
+        let scramble1 = b";X,po_k}";
+        self.rw.write_all(scramble1)?;
+        self.rw.write_all(&[0x00])?; // null terminator
+                                     // PATCHED: Add CLIENT_SECURE_CONNECTION (0x8000) and CLIENT_PLUGIN_AUTH (0x00080000) for JDBC
+                                     // Original: [0x00, 0x42] = 0x4200 (CLIENT_PROTOCOL_41 | CLIENT_MULTI_STATEMENTS)
+                                     // New: [0x00, 0xC2] = 0xC200 (adds CLIENT_SECURE_CONNECTION = 0x8000)
         let capabilities = &mut [0x00, 0xC2]; // Low 16 bits: 4.1 proto + SECURE_CONNECTION
         #[cfg(feature = "tls")]
         if tls_conf.is_some() {
@@ -287,11 +294,20 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
                                            // Original: [0x00, 0x00] = 0x00000000
                                            // New: [0x08, 0x00] = 0x00000008 shifted left = 0x00080000 (CLIENT_PLUGIN_AUTH)
         self.rw.write_all(&[0x08, 0x00])?; // High 16 bits: CLIENT_PLUGIN_AUTH
-        self.rw.write_all(&[0x00])?; // no plugins
+        self.rw.write_all(&[0x15])?; // auth plugin data length (21 bytes = 8 + 12 + null)
         self.rw.write_all(&[0x00; 6][..])?; // filler
         self.rw.write_all(&[0x00; 4][..])?; // filler
-        self.rw.write_all(&b">o6^Wz!/kM}N\0"[..])?; // 4.1+ servers must extend salt
+        let scramble2 = b">o6^Wz!/kM}N";
+        self.rw.write_all(scramble2)?; // 4.1+ servers must extend salt
+        self.rw.write_all(&[0x00])?; // null terminator
+                                     // 指定认证插件为 mysql_native_password (而不是 caching_sha2_password)
+        self.rw.write_all(b"mysql_native_password\0")?;
         self.rw.flush()?;
+
+        // 保存完整的 scramble (20 bytes = 8 + 12)
+        let mut full_scramble = Vec::with_capacity(20);
+        full_scramble.extend_from_slice(scramble1);
+        full_scramble.extend_from_slice(scramble2);
 
         let mut auth_context = AuthenticationContext::default();
 
@@ -331,7 +347,14 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
                 .1;
 
             auth_context.username = handshake.username.map(|x| x.to_vec());
+            auth_context.auth_response = handshake.auth_response.map(|x| x.to_vec());
+            auth_context.scramble = Some(&full_scramble);
 
+            eprintln!(
+                "🔐 [Handshake] Client handshake packet seq={}, setting server seq={}",
+                seq,
+                seq + 1
+            );
             self.rw.set_seq(seq + 1);
 
             #[cfg(not(feature = "tls"))]
@@ -390,6 +413,8 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
                     .1;
 
                 auth_context.username = handshake.username.map(|x| x.to_vec());
+                auth_context.auth_response = handshake.auth_response.map(|x| x.to_vec());
+                // scramble 在TLS握手前已经设置，不需要重新设置
 
                 self.rw.set_seq(seq + 1);
 
@@ -407,8 +432,10 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
             }
         }
 
+        eprintln!("✅ [Auth] Authentication successful, sending OK packet");
         writers::write_ok_packet(&mut self.rw, 0, 0, StatusFlags::empty())?;
         self.rw.flush()?;
+        eprintln!("✅ [Auth] OK packet sent, entering command loop\n");
 
         Ok(())
     }
@@ -418,8 +445,15 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
 
         let mut stmts: HashMap<u32, _> = HashMap::new();
         while let Some((seq, packet)) = self.rw.next()? {
+            eprintln!(
+                "📥 [Protocol] Received command packet, seq={}, len={}",
+                seq,
+                packet.len()
+            );
             self.rw.set_seq(seq + 1);
+            eprintln!("📝 [Protocol] Set seq to {} for response", seq + 1);
             let cmd = commands::parse(&packet).unwrap().1;
+            eprintln!("🔍 [Protocol] Command type: {:?}", cmd);
             match cmd {
                 Command::Query(q) => {
                     if q.starts_with(b"SELECT @@") || q.starts_with(b"select @@") {
@@ -530,6 +564,7 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
                 }
             }
             self.rw.flush()?;
+            eprintln!("✅ [Protocol] Command completed and flushed\n");
         }
         Ok(())
     }

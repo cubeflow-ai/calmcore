@@ -21,6 +21,14 @@ pub struct Config {
     #[serde(default = "default_mysql_port")]
     pub mysql_port: Option<u16>,
 
+    /// 用户名（适用于 MySQL, Elasticsearch 等）
+    #[serde(default = "default_user")]
+    pub user: String,
+
+    /// 密码（适用于 MySQL, Elasticsearch 等）
+    #[serde(default = "default_password")]
+    pub password: String,
+
     /// 日志配置
     #[serde(default)]
     pub log: LogSettings,
@@ -95,6 +103,14 @@ fn default_mysql_port() -> Option<u16> {
     Some(3307)
 }
 
+fn default_user() -> String {
+    "root".to_string()
+}
+
+fn default_password() -> String {
+    "calm".to_string()
+}
+
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
 }
@@ -142,6 +158,8 @@ impl Default for Config {
             graphql_port: default_graphql_port(),
             es_port: default_es_port(),
             mysql_port: default_mysql_port(),
+            user: default_user(),
+            password: default_password(),
             log: LogSettings::default(),
             engine: EngineSettings::default(),
         }
@@ -214,6 +232,22 @@ impl Config {
                         return Err("Missing value for --mysql-port".into());
                     }
                 }
+                "--user" | "-u" => {
+                    if i + 1 < args.len() {
+                        config.user = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        return Err("Missing value for --user".into());
+                    }
+                }
+                "--password" | "-p" => {
+                    if i + 1 < args.len() {
+                        config.password = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        return Err("Missing value for --password".into());
+                    }
+                }
                 "--data-dir" => {
                     if i + 1 < args.len() {
                         config.engine.data_dir = PathBuf::from(&args[i + 1]);
@@ -283,6 +317,12 @@ impl Config {
         if let Ok(port) = std::env::var("CALM_MYSQL_PORT") {
             config.mysql_port = Some(port.parse()?);
         }
+        if let Ok(user) = std::env::var("CALM_USER") {
+            config.user = user;
+        }
+        if let Ok(password) = std::env::var("CALM_PASSWORD") {
+            config.password = password;
+        }
         if let Ok(dir) = std::env::var("CALM_DATA_DIR") {
             config.engine.data_dir = PathBuf::from(dir);
         }
@@ -337,6 +377,8 @@ impl Config {
         println!("    --graphql-port <PORT>          GraphQL 服务端口 [default: 9567]");
         println!("    --es-port <PORT>               Elasticsearch 服务端口 [default: 9200]");
         println!("    --mysql-port <PORT>            MySQL 服务端口 [default: 3307]");
+        println!("    -u, --user <USER>              用户名 [default: root]");
+        println!("    -p, --password <PASSWORD>      密码 [default: '']");
         println!("    --data-dir <DIR>               数据目录 [default: ./data]");
         println!("    --log-level <LEVEL>            日志级别 (trace|debug|info|warn|error) [default: info]");
         println!("    --log-file <FILE>              日志文件路径 [default: ./logs/calm.log]");
@@ -351,6 +393,8 @@ impl Config {
         println!("    CALM_GRAPHQL_PORT              GraphQL 服务端口");
         println!("    CALM_ES_PORT                   Elasticsearch 服务端口");
         println!("    CALM_MYSQL_PORT                MySQL 服务端口");
+        println!("    CALM_USER                      用户名");
+        println!("    CALM_PASSWORD                  密码");
         println!("    CALM_DATA_DIR                  数据目录");
         println!("    CALM_LOG_LEVEL                 日志级别");
         println!("    CALM_LOG_FILE                  日志文件路径");

@@ -797,6 +797,60 @@ impl DistributedExecutor {
             )
         };
 
+        // 移除 ORDER BY _nature 子句（因为 _nature 是虚拟列，不在表 schema 中）
+        let mut empty_sql = empty_sql;
+        log::info!("🔍 [Schema] Original empty SQL: {}", empty_sql);
+
+        let sql_upper = empty_sql.to_uppercase();
+        if let Some(order_pos) = sql_upper.find("ORDER BY") {
+            // 获取 ORDER BY 之后的内容
+            let after_order_upper = &sql_upper[order_pos + 8..].trim_start(); // "ORDER BY".len() = 8
+
+            // 检查是否是 ORDER BY _nature (允许空格和反引号)
+            let is_nature_order = after_order_upper.starts_with("_NATURE")
+                || after_order_upper.starts_with("`_NATURE`");
+
+            log::info!(
+                "🔍 [Schema] Found ORDER BY at position {}, is_nature_order: {}",
+                order_pos,
+                is_nature_order
+            );
+
+            if is_nature_order {
+                // 找到 LIMIT 或 OFFSET 的位置
+                let after_order = &sql_upper[order_pos..];
+                let limit_pos = after_order.find("LIMIT");
+                let offset_pos = after_order.find("OFFSET");
+
+                // 找到第一个出现的位置
+                let end_pos = match (limit_pos, offset_pos) {
+                    (Some(l), Some(o)) => order_pos + l.min(o),
+                    (Some(l), None) => order_pos + l,
+                    (None, Some(o)) => order_pos + o,
+                    (None, None) => empty_sql.len(),
+                };
+
+                // 移除 ORDER BY _nature 部分
+                let before = empty_sql[..order_pos].trim();
+                let after = if end_pos < empty_sql.len() {
+                    empty_sql[end_pos..].trim()
+                } else {
+                    ""
+                };
+
+                empty_sql = if after.is_empty() {
+                    before.to_string()
+                } else {
+                    format!("{} {}", before, after)
+                };
+
+                log::info!(
+                    "🔍 [Schema] Removed ORDER BY _nature, new SQL: {}",
+                    empty_sql
+                );
+            }
+        }
+
         let df = ctx
             .sql(&empty_sql)
             .await
@@ -884,6 +938,14 @@ impl DistributedExecutor {
     async fn get_total_count(&self, table_name: &str) -> CoreResult<u64> {
         // 直接从 engine 获取所有 partition 列表
         let partition_names = self.engine.list_partitions(table_name).await;
+
+        // 检查表是否存在
+        if partition_names.is_empty() {
+            return Err(CoreError::NotExisted(format!(
+                "Table '{}' not found or has no partitions",
+                table_name
+            )));
+        }
 
         // 🚀 并行统计所有分区的行数
         let futures: Vec<_> = partition_names

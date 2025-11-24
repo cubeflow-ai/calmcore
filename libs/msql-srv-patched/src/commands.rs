@@ -7,6 +7,7 @@ pub struct ClientHandshake<'a> {
     maxps: u32,
     collation: u16,
     pub(crate) username: Option<&'a [u8]>,
+    pub(crate) auth_response: Option<&'a [u8]>,
 }
 
 pub fn client_handshake(i: &[u8], after_tls: bool) -> nom::IResult<&[u8], ClientHandshake<'_>> {
@@ -35,6 +36,47 @@ pub fn client_handshake(i: &[u8], after_tls: bool) -> nom::IResult<&[u8], Client
             (i, None)
         };
 
+        // 解析 auth_response (密码数据)
+        // 注意：只有在非SSL模式下或TLS握手完成后才解析密码
+        // 在SSL握手之前，客户端只发送能力标志，不发送用户名和密码
+        let (i, auth_response) = if after_tls || !capabilities.contains(CapabilityFlags::CLIENT_SSL)
+        {
+            // 根据 MySQL 协议，CLIENT_SECURE_CONNECTION 优先于 CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+            if capabilities.contains(CapabilityFlags::CLIENT_SECURE_CONNECTION) {
+                // 1 byte length + data (标准的 mysql_native_password 格式)
+                let (i, len) = nom::number::complete::le_u8(i)?;
+                if len > 0 {
+                    let (i, auth_data) = nom::bytes::complete::take(len)(i)?;
+                    (i, Some(auth_data))
+                } else {
+                    (i, None)
+                }
+            } else if capabilities.contains(CapabilityFlags::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) {
+                // Length-encoded string (不太常用)
+                let (i, len) = nom::number::complete::le_u8(i)?;
+                if len > 0 && len < 251 {
+                    let (i, auth_data) = nom::bytes::complete::take(len)(i)?;
+                    (i, Some(auth_data))
+                } else {
+                    (i, None)
+                }
+            } else {
+                // Null-terminated string (old protocol)
+                let (i, auth_data) = nom::bytes::complete::take_until(&b"\0"[..])(i)?;
+                let (i, _) = nom::bytes::complete::tag(b"\0")(i)?;
+                (
+                    i,
+                    if auth_data.is_empty() {
+                        None
+                    } else {
+                        Some(auth_data)
+                    },
+                )
+            }
+        } else {
+            (i, None)
+        };
+
         Ok((
             i,
             ClientHandshake {
@@ -42,6 +84,7 @@ pub fn client_handshake(i: &[u8], after_tls: bool) -> nom::IResult<&[u8], Client
                 maxps,
                 collation: u16::from(collation[0]),
                 username,
+                auth_response,
             },
         ))
     } else {
@@ -51,6 +94,22 @@ pub fn client_handshake(i: &[u8], after_tls: bool) -> nom::IResult<&[u8], Client
         let maxps = (maxps2 as u32) << 16 | maxps1 as u32;
         let (i, username) = nom::bytes::complete::take_until(&b"\0"[..])(i)?;
 
+        // 旧协议的 auth_response（null-terminated）
+        let (i, _) = nom::bytes::complete::tag(b"\0")(i)?;
+        let (i, auth_response) = if !i.is_empty() {
+            let (i, auth_data) = nom::bytes::complete::take_until(&b"\0"[..])(i)?;
+            (
+                i,
+                if auth_data.is_empty() {
+                    None
+                } else {
+                    Some(auth_data)
+                },
+            )
+        } else {
+            (i, None)
+        };
+
         Ok((
             i,
             ClientHandshake {
@@ -58,6 +117,7 @@ pub fn client_handshake(i: &[u8], after_tls: bool) -> nom::IResult<&[u8], Client
                 maxps,
                 collation: 0,
                 username: Some(username),
+                auth_response,
             },
         ))
     }
