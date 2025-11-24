@@ -143,19 +143,47 @@ impl AggregationMerger {
         );
 
         // 推断哪些列是 GROUP BY 列，哪些是聚合列
-        // 简化假设：第一列是 GROUP BY 列，其余是聚合列
-        // TODO: 更复杂的 SQL 解析
-        if num_columns < 2 {
+        // 策略: 检查列的数据类型和名称
+        // - 聚合列: 通常是数值类型 (Int64, Float64) 且名称包含 COUNT/SUM/AVG/MAX/MIN
+        // - 分组列: 其他所有列
+        let mut group_col_indices = Vec::new();
+        let mut agg_col_indices = Vec::new();
+
+        for col_idx in 0..num_columns {
+            let field = schema.field(col_idx);
+            let field_name = field.name().to_lowercase();
+
+            // 判断是否是聚合列
+            let is_agg = matches!(
+                field.data_type(),
+                DataType::Int64 | DataType::Float64 | DataType::UInt64
+            ) && (field_name.contains("count")
+                || field_name.contains("sum")
+                || field_name.contains("avg")
+                || field_name.contains("max")
+                || field_name.contains("min"));
+
+            if is_agg {
+                agg_col_indices.push(col_idx);
+            } else {
+                group_col_indices.push(col_idx);
+            }
+        }
+
+        eprintln!(
+            "🔍 [AggregationMerger] Identified {} group columns and {} aggregation columns",
+            group_col_indices.len(),
+            agg_col_indices.len()
+        );
+
+        if group_col_indices.is_empty() {
             return Err(crate::utils::error::CoreError::InvalidParam(
-                "GROUP BY query must have at least 2 columns (group + aggregation)".to_string(),
+                "No GROUP BY columns found in result".to_string(),
             ));
         }
 
-        let group_col_idx = 0;
-        let group_field = schema.field(group_col_idx);
-
         // 收集所有分区的数据到 HashMap
-        // key: group_key, value: Vec<aggregation_values>
+        // key: composite_group_key, value: Vec<aggregation_values>
         let mut grouped_data: HashMap<String, Vec<Vec<Option<f64>>>> = HashMap::new();
 
         for batches in partition_results {
@@ -163,12 +191,17 @@ impl AggregationMerger {
                 let num_rows = batch.num_rows();
 
                 for row_idx in 0..num_rows {
-                    // 提取 group key
-                    let group_key = self.extract_group_key(batch, group_col_idx, row_idx)?;
+                    // 提取复合 group key (所有分组列的组合)
+                    let mut group_key_parts = Vec::new();
+                    for &col_idx in &group_col_indices {
+                        let part = self.extract_group_key(batch, col_idx, row_idx)?;
+                        group_key_parts.push(part);
+                    }
+                    let group_key = group_key_parts.join("|"); // 使用 | 分隔多个分组列
 
                     // 提取聚合值
                     let mut agg_values = Vec::new();
-                    for col_idx in 1..num_columns {
+                    for &col_idx in &agg_col_indices {
                         let value = self.extract_numeric_value(batch, col_idx, row_idx);
                         agg_values.push(value);
                     }
@@ -184,15 +217,20 @@ impl AggregationMerger {
         );
 
         // 构造最终结果
-        let mut final_group_keys = Vec::new();
-        let mut final_agg_columns: Vec<Vec<f64>> = vec![Vec::new(); num_columns - 1];
+        let mut final_group_key_parts: Vec<Vec<String>> = vec![Vec::new(); group_col_indices.len()];
+        let mut final_agg_columns: Vec<Vec<f64>> = vec![Vec::new(); agg_col_indices.len()];
 
-        for (group_key, rows) in grouped_data.iter() {
-            final_group_keys.push(group_key.clone());
+        for (composite_key, rows) in grouped_data.iter() {
+            // 拆分复合键
+            let parts: Vec<&str> = composite_key.split('|').collect();
+            for (i, part) in parts.iter().enumerate() {
+                if i < final_group_key_parts.len() {
+                    final_group_key_parts[i].push(part.to_string());
+                }
+            }
 
             // 对每个聚合列进行合并
-            for agg_idx in 0..(num_columns - 1) {
-                let col_idx = agg_idx + 1;
+            for (agg_idx, &col_idx) in agg_col_indices.iter().enumerate() {
                 let _field = schema.field(col_idx);
 
                 // 收集该组在该聚合列的所有值
@@ -224,35 +262,52 @@ impl AggregationMerger {
         // 构造 RecordBatch
         let mut columns: Vec<ArrayRef> = Vec::new();
 
-        // Group column (假设是字符串)
-        match group_field.data_type() {
-            DataType::Utf8 => {
-                columns.push(Arc::new(StringArray::from(final_group_keys)));
-            }
-            DataType::Int64 => {
-                let int_keys: Vec<i64> = final_group_keys
-                    .iter()
-                    .map(|s| s.parse().unwrap_or(0))
-                    .collect();
-                columns.push(Arc::new(Int64Array::from(int_keys)));
-            }
-            _ => {
-                return Err(crate::utils::error::CoreError::InvalidParam(format!(
-                    "Unsupported GROUP BY column type: {:?}",
-                    group_field.data_type()
-                )));
+        // 添加所有分组列
+        for (i, &col_idx) in group_col_indices.iter().enumerate() {
+            let field = schema.field(col_idx);
+            let values = &final_group_key_parts[i];
+
+            match field.data_type() {
+                DataType::Utf8 => {
+                    columns.push(Arc::new(StringArray::from(values.clone())));
+                }
+                DataType::Int64 => {
+                    let int_keys: Vec<i64> =
+                        values.iter().map(|s| s.parse().unwrap_or(0)).collect();
+                    columns.push(Arc::new(Int64Array::from(int_keys)));
+                }
+                DataType::Int32 => {
+                    let int_keys: Vec<i32> =
+                        values.iter().map(|s| s.parse().unwrap_or(0)).collect();
+                    columns.push(Arc::new(Int32Array::from(int_keys)));
+                }
+                DataType::UInt64 => {
+                    let int_keys: Vec<u64> =
+                        values.iter().map(|s| s.parse().unwrap_or(0)).collect();
+                    columns.push(Arc::new(UInt64Array::from(int_keys)));
+                }
+                _ => {
+                    return Err(crate::utils::error::CoreError::InvalidParam(format!(
+                        "Unsupported GROUP BY column type: {:?}",
+                        field.data_type()
+                    )));
+                }
             }
         }
 
-        // Aggregation columns
-        for (agg_idx, values) in final_agg_columns.iter().enumerate() {
-            let col_idx = agg_idx + 1;
+        // 添加所有聚合列
+        for (agg_idx, &col_idx) in agg_col_indices.iter().enumerate() {
             let field = schema.field(col_idx);
+            let values = &final_agg_columns[agg_idx];
 
             match field.data_type() {
                 DataType::Int64 => {
                     let int_values: Vec<i64> = values.iter().map(|&v| v as i64).collect();
                     columns.push(Arc::new(Int64Array::from(int_values)));
+                }
+                DataType::UInt64 => {
+                    let int_values: Vec<u64> = values.iter().map(|&v| v as u64).collect();
+                    columns.push(Arc::new(UInt64Array::from(int_values)));
                 }
                 DataType::Float64 => {
                     columns.push(Arc::new(Float64Array::from(values.clone())));
