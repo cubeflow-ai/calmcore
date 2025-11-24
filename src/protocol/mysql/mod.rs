@@ -31,7 +31,7 @@ impl MysqlServer {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    println!("MySQL client connected from: {}", addr);
+                    log::info!("MySQL client connected from: {}", addr);
                     let engine = self.engine.clone();
                     let username = self.username.clone();
                     let password = self.password.clone();
@@ -45,7 +45,7 @@ impl MysqlServer {
                             Ok(std_stream) => {
                                 // 设置为阻塞模式，msql_srv 期望阻塞 I/O
                                 if let Err(e) = std_stream.set_nonblocking(false) {
-                                    eprintln!("Failed to set blocking mode: {}", e);
+                                    log::error!("Failed to set blocking mode: {}", e);
                                     return;
                                 }
 
@@ -73,27 +73,27 @@ impl MysqlServer {
                                 // 处理连接
                                 match MysqlIntermediary::run_on_tcp(backend, std_stream) {
                                     Ok(_) => {
-                                        eprintln!(
-                                            "✅ [MySQL] Client {} disconnected normally",
+                                        log::info!(
+                                            "MySQL client {} disconnected normally",
                                             peer_addr
                                         );
                                     }
                                     Err(e) => {
-                                        eprintln!("❌ [MySQL] Client {} error: {}", peer_addr, e);
+                                        log::error!("MySQL client {} error: {}", peer_addr, e);
                                     }
                                 }
 
                                 // 连接结束,资源应该被释放
-                                eprintln!("🧹 [MySQL] Cleaning up connection from {}", peer_addr);
+                                log::debug!("Cleaning up MySQL connection from {}", peer_addr);
                             }
                             Err(e) => {
-                                eprintln!("Failed to convert stream: {}", e);
+                                log::error!("Failed to convert stream: {}", e);
                             }
                         }
                     });
                 }
                 Err(e) => {
-                    eprintln!("MySQL connection failed: {}", e);
+                    log::error!("MySQL connection failed: {}", e);
                 }
             }
         }
@@ -119,13 +119,13 @@ fn verify_mysql_native_password(password: &str, auth_response: &[u8], scramble: 
     }
 
     if scramble.len() != 20 {
-        eprintln!("❌ [Auth] Invalid scramble length: {}", scramble.len());
+        log::error!("Invalid scramble length: {}", scramble.len());
         return false;
     }
 
     if auth_response.len() != 20 {
-        eprintln!(
-            "❌ [Auth] Invalid auth_response length: {}",
+        log::error!(
+            "Invalid auth_response length: {}",
             auth_response.len()
         );
         return false;
@@ -623,8 +623,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         }
 
         // 未识别的查询,打印日志
-        log::warn!("❌ Unsupported SQL query: {}", query_trimmed);
-        eprintln!("❌ [MySQL Protocol] Unsupported query: {}", query_trimmed);
+        log::warn!("Unsupported SQL query: {}", query_trimmed);
 
         results.error(
             ErrorKind::ER_NOT_SUPPORTED_YET,
@@ -719,22 +718,22 @@ async fn execute_query<W: io::Read + io::Write>(
         Ok(result) => result,
         Err(e) => {
             let msg = format!("SQL execution failed: {}", e);
-            eprintln!("❌ [SQL] Error: {}", msg);
+            log::error!("SQL Error: {}", msg);
             return results.error(ErrorKind::ER_PARSE_ERROR, msg.as_bytes());
         }
     };
 
-    eprintln!("🔍 [MySQL Query] {}", query);
-    eprintln!(
-        "🔍 [MySQL Result] matched_docs={}, result_rows={}",
+    log::debug!("MySQL Query: {}", query);
+    log::debug!(
+        "MySQL Result: matched_docs={}, result_rows={}",
         result.matched_docs,
         result.batch.num_rows()
     );
 
     // 即使返回 0 行,也要返回空结果集(而不是 completed)
     // 否则 JDBC 会认为这不是一个 SELECT 查询
-    eprintln!(
-        "✅ [MySQL Query] Returning {} rows (matched {} docs)",
+    log::debug!(
+        "Returning {} rows (matched {} docs)",
         result.batch.num_rows(),
         result.matched_docs
     );
@@ -1057,8 +1056,8 @@ fn write_query_result<W: io::Read + io::Write>(
     schema: &SchemaRef,
     batches: &[RecordBatch],
 ) -> io::Result<()> {
-    eprintln!(
-        "📤 [write_query_result] Starting, {} columns, {} batches",
+    log::debug!(
+        "write_query_result: {} columns, {} batches",
         schema.fields().len(),
         batches.len()
     );
@@ -1091,15 +1090,15 @@ fn write_query_result<W: io::Read + io::Write>(
 
                 // 检查写入是否成功 - 客户端断开会返回错误
                 if let Err(e) = row_writer.write_col(value) {
-                    eprintln!("⚠️  [MySQL] Client disconnected or write failed: {}", e);
+                    log::debug!("Client disconnected or write failed: {}", e);
                     return Err(e);
                 }
             }
 
             // 结束当前行
             if let Err(e) = row_writer.end_row() {
-                eprintln!(
-                    "⚠️  [MySQL] Client disconnected at row {}: {}",
+                log::debug!(
+                    "Client disconnected at row {}: {}",
                     rows_written, e
                 );
                 return Err(e);
@@ -1112,15 +1111,15 @@ fn write_query_result<W: io::Read + io::Write>(
             if rows_written % FLUSH_INTERVAL == 0 {
                 // msql_srv 的 RowWriter 没有 flush 方法,但 end_row 会写入
                 // TCP socket 会自动实现背压
-                eprintln!(
-                    "📤 [MySQL] Sent {} rows (may block if client is slow)",
+                log::debug!(
+                    "Sent {} rows (may block if client is slow)",
                     rows_written
                 );
             }
         }
     }
 
-    eprintln!("✅ [MySQL] Finished sending {} rows", rows_written);
+    log::debug!("Finished sending {} rows", rows_written);
     row_writer.finish()
 }
 

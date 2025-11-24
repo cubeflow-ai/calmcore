@@ -7,7 +7,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 
 use crate::compute::optimizer::{ExecutionHints, PureLimitInfo};
 use crate::engine::Engine;
-use crate::utils::error::{CoreError, CoreResult};
+use crate::utils::error::CoreResult;
 
 use super::partition_executor::PartitionExecutor;
 use super::result_merger::ResultMerger;

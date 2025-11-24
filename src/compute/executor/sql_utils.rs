@@ -82,6 +82,7 @@ impl SqlUtils {
     }
 
     /// 从 SQL 中移除 OFFSET，替换为新的 LIMIT
+    #[allow(dead_code)]
     pub fn remove_offset(sql: &str, new_limit: usize) -> String {
         let sql_lower = sql.to_lowercase();
 
@@ -94,7 +95,8 @@ impl SqlUtils {
         }
     }
 
-    /// 确保排序字段在 SELECT 列表中
+    /// 确保排序字段在 SELECT 中
+    #[allow(dead_code)]
     pub fn ensure_sort_fields_in_select(
         sql: &str,
         sort_fields: &[(String, bool)],
@@ -218,6 +220,7 @@ impl SqlUtils {
     }
 
     /// 字符串方式添加字段到 SELECT 列表
+    #[allow(dead_code)]
     fn add_fields_to_select(sql: &str, fields: &[String]) -> CoreResult<String> {
         let sql_upper = sql.to_uppercase();
 

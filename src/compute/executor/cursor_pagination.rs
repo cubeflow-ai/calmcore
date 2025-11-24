@@ -4,7 +4,7 @@
 /// 传统 OFFSET 分页：LIMIT 1000 OFFSET 10000 需要读取 11000 行
 /// 游标分页：WHERE id > last_id LIMIT 1000 只需要读取 1000 行
 
-use crate::utils::error::{CoreError, CoreResult};
+use crate::utils::error::CoreResult;
 
 /// 游标信息
 #[derive(Debug, Clone)]

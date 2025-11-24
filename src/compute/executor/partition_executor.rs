@@ -91,6 +91,7 @@ impl PartitionExecutor {
     }
 
     /// 在单个 partition 上执行查询（旧版本，用于聚合）
+    #[allow(dead_code)]
     pub async fn execute_sql_on_partition(
         &self,
         table_name: &str,

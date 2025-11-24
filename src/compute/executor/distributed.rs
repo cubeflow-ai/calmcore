@@ -799,7 +799,7 @@ impl DistributedExecutor {
 
         // 移除 ORDER BY _nature 子句（因为 _nature 是虚拟列，不在表 schema 中）
         let mut empty_sql = empty_sql;
-        log::info!("🔍 [Schema] Original empty SQL: {}", empty_sql);
+        log::debug!("Original empty SQL: {}", empty_sql);
 
         let sql_upper = empty_sql.to_uppercase();
         if let Some(order_pos) = sql_upper.find("ORDER BY") {
@@ -810,8 +810,8 @@ impl DistributedExecutor {
             let is_nature_order = after_order_upper.starts_with("_NATURE")
                 || after_order_upper.starts_with("`_NATURE`");
 
-            log::info!(
-                "🔍 [Schema] Found ORDER BY at position {}, is_nature_order: {}",
+            log::debug!(
+                "Found ORDER BY at position {}, is_nature_order: {}",
                 order_pos,
                 is_nature_order
             );
@@ -844,8 +844,8 @@ impl DistributedExecutor {
                     format!("{} {}", before, after)
                 };
 
-                log::info!(
-                    "🔍 [Schema] Removed ORDER BY _nature, new SQL: {}",
+                log::debug!(
+                    "Removed ORDER BY _nature, new SQL: {}",
                     empty_sql
                 );
             }
@@ -1486,7 +1486,7 @@ impl DistributedExecutor {
     /// 从SQL中移除 _partition 和 _segment 虚拟字段
     /// 这些字段只用于路由，不是实际表字段
     fn remove_virtual_columns_from_sql(&self, sql: &str) -> CoreResult<String> {
-        use datafusion::sql::sqlparser::ast::{BinaryOperator, Expr, SetExpr, Statement, Value};
+        use datafusion::sql::sqlparser::ast::{SetExpr, Statement};
         use datafusion::sql::sqlparser::dialect::MySqlDialect;
         use datafusion::sql::sqlparser::parser::Parser;
 
