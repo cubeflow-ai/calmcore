@@ -52,6 +52,10 @@ pub struct NaturalOrderInfo {
     pub has_where_filter: bool,
     /// WHERE 条件的 SQL 文本（如果有）
     pub where_clause: Option<String>,
+    /// 查询的字段列表（用于投影下推）
+    pub projection_fields: Vec<String>,
+    /// 是否是 SELECT *
+    pub is_select_star: bool,
 }
 
 /// COUNT(*) 无 GROUP BY 信息
@@ -245,6 +249,8 @@ pub fn analyze_query(statement: Statement) -> Option<QueryPlan> {
                 offset,
                 has_where_filter: has_where,
                 where_clause,
+                projection_fields: execution_hints.projection_fields.clone(),
+                is_select_star: execution_hints.is_select_star,
             })
         }
         // ORDER BY + LIMIT -> 并行 TopK

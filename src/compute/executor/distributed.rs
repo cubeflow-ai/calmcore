@@ -1235,16 +1235,25 @@ impl DistributedExecutor {
         let limit = info.limit;
 
         log::info!(
-            "🌿 [Natural Order] table={}, offset={}, limit={}, has_where={}, where_clause={:?}",
+            "🌿 [Natural Order] table={}, offset={}, limit={}, has_where={}, where_clause={:?}, projection={:?}",
             table_name,
             offset,
             limit,
             info.has_where_filter,
-            info.where_clause
+            info.where_clause,
+            info.projection_fields
         );
 
         let result = executor
-            .execute_natural_order(sql, table_name, limit, offset, info.where_clause.as_deref())
+            .execute_natural_order(
+                sql,
+                table_name,
+                limit,
+                offset,
+                info.where_clause.as_deref(),
+                &info.projection_fields,
+                info.is_select_star,
+            )
             .await?;
 
         // 将 natural_order_executor 的 QueryResult 转换为 distributed 的 QueryResult

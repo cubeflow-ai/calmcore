@@ -69,10 +69,12 @@ impl NaturalOrderExecutor {
     /// * `limit` - LIMIT 值
     /// * `offset` - OFFSET 值
     /// * `where_clause` - WHERE 条件的 SQL 文本（可选）
+    /// * `projection_fields` - 投影字段列表（用于列裁剪）
+    /// * `is_select_star` - 是否是 SELECT *
     ///
     /// # 示例
     /// ```sql
-    /// SELECT * FROM table WHERE app_name='test' ORDER BY _nature LIMIT 1000 OFFSET 1000000;
+    /// SELECT app_name, timestamp FROM table WHERE app_name='test' ORDER BY _nature LIMIT 1000 OFFSET 1000000;
     /// ```
     pub async fn execute_natural_order(
         &self,
@@ -81,15 +83,19 @@ impl NaturalOrderExecutor {
         limit: usize,
         offset: usize,
         where_clause: Option<&str>,
+        projection_fields: &[String],
+        is_select_star: bool,
     ) -> CoreResult<QueryResult> {
         let total_start = std::time::Instant::now();
 
         log::info!(
-            "🌿 [NaturalOrder] Executing natural order query: table={}, limit={}, offset={}, where={:?}",
+            "🌿 [NaturalOrder] Executing natural order query: table={}, limit={}, offset={}, where={:?}, projection={:?}, is_select_star={}",
             table_name,
             limit,
             offset,
-            where_clause
+            where_clause,
+            projection_fields,
+            is_select_star
         );
 
         // 第一步：构建元数据索引
@@ -128,7 +134,14 @@ impl NaturalOrderExecutor {
         // 第三步：从 segments 读取数据（带 skip）
         let step3_start = std::time::Instant::now();
         let batches = self
-            .read_from_segments(table_name, sql, &target_segments, where_clause)
+            .read_from_segments(
+                table_name,
+                sql,
+                &target_segments,
+                where_clause,
+                projection_fields,
+                is_select_star,
+            )
             .await?;
         log::info!(
             "⏱️  [NaturalOrder] Step 3 (read segments): {:?}",
@@ -323,12 +336,16 @@ impl NaturalOrderExecutor {
     /// # 参数
     /// * `target_segments` - Vec<(partition_name, segment_id, skip, read_count)>
     /// * `where_clause` - WHERE 条件的 SQL 文本（可选）
+    /// * `projection_fields` - 投影字段列表
+    /// * `is_select_star` - 是否是 SELECT *
     async fn read_from_segments(
         &self,
         table_name: &str,
         sql: &str,
         target_segments: &[(String, String, usize, usize)],
         where_clause: Option<&str>,
+        projection_fields: &[String],
+        is_select_star: bool,
     ) -> CoreResult<Vec<RecordBatch>> {
         // 清理 SQL：移除 ORDER BY _nature 和 LIMIT/OFFSET
         let _cleaned_sql = self.clean_sql_for_segment_query(sql)?;
@@ -423,6 +440,8 @@ impl NaturalOrderExecutor {
                     *skip,
                     *read_count,
                     where_clause,
+                    projection_fields,
+                    is_select_star,
                 )
                 .await?;
             log::debug!(
@@ -447,7 +466,7 @@ impl NaturalOrderExecutor {
 
     /// 从 segment 数据读取（带 skip）
     ///
-    /// 核心优化：通过 bitmap 跳过不需要的行
+    /// 核心优化：通过 bitmap 跳过不需要的行，支持列裁剪
     async fn read_from_segment_data(
         &self,
         schema: Arc<ArrowSchema>,
@@ -458,6 +477,8 @@ impl NaturalOrderExecutor {
         skip: usize,
         read_count: usize,
         where_clause: Option<&str>,
+        projection_fields: &[String],
+        is_select_star: bool,
     ) -> CoreResult<RecordBatch> {
         use crate::compute::segment_scanner::SegmentScanner;
 
@@ -480,8 +501,32 @@ impl NaturalOrderExecutor {
             Vec::new()
         };
 
-        // 🚀 核心优化：使用 SegmentScanner 的 scan_with_skip
-        let batch = scanner.scan_with_skip_and_limit(&filters, skip, read_count)?;
+        // 🚀 构建投影列索引
+        let projection = if is_select_star {
+            None // SELECT * 读取所有列
+        } else {
+            // 根据字段名找到列索引
+            let mut indices = Vec::new();
+            for field_name in projection_fields {
+                if let Some((idx, _)) = schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, f)| f.name() == field_name)
+                {
+                    indices.push(idx);
+                }
+            }
+            if indices.is_empty() {
+                None // 如果没有找到任何列，读取所有列
+            } else {
+                Some(indices)
+            }
+        };
+
+        // 🚀 核心优化：使用 SegmentScanner 的 scan_with_skip 并应用投影下推
+        let batch =
+            scanner.scan_with_skip_and_limit(&filters, skip, read_count, projection.as_ref())?;
 
         Ok(batch)
     }
@@ -489,13 +534,115 @@ impl NaturalOrderExecutor {
     /// 从 WHERE SQL 文本解析成 DataFusion 过滤器表达式
     fn parse_where_filters(
         &self,
-        _where_sql: &str,
+        where_sql: &str,
         _schema: &Arc<ArrowSchema>,
     ) -> CoreResult<Vec<datafusion::logical_expr::Expr>> {
-        // TODO: 实现 WHERE 条件解析
-        // 暂时返回空，需要使用 DataFusion 的 SQL parser
-        log::warn!("⚠️  WHERE condition parsing not yet implemented");
+        use datafusion::sql::sqlparser::dialect::GenericDialect;
+        use datafusion::sql::sqlparser::parser::Parser;
+
+        // 构造一个临时的 SELECT 语句来解析 WHERE 条件
+        let temp_sql = format!("SELECT * FROM dummy WHERE {}", where_sql);
+
+        // 解析 SQL
+        let dialect = GenericDialect {};
+        let statements = Parser::parse_sql(&dialect, &temp_sql)
+            .map_err(|e| CoreError::Internal(format!("Failed to parse WHERE clause: {}", e)))?;
+
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 从 AST 提取 WHERE 表达式
+        use datafusion::sql::sqlparser::ast::{SetExpr, Statement};
+        if let Statement::Query(query) = &statements[0] {
+            if let SetExpr::Select(select) = query.body.as_ref() {
+                if let Some(selection) = &select.selection {
+                    // 将 sqlparser 的 Expr 转换为 DataFusion 的 Expr
+                    // 使用简单的转换策略
+                    match self.convert_sql_expr_to_df_expr(selection) {
+                        Ok(expr) => {
+                            log::info!("✅ [NaturalOrder] Parsed WHERE filter: {:?}", expr);
+                            return Ok(vec![expr]);
+                        }
+                        Err(e) => {
+                            log::warn!("⚠️  Failed to convert WHERE expression: {}, returning empty filters", e);
+                            return Ok(Vec::new());
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(Vec::new())
+    }
+
+    /// 将 sqlparser 的 Expr 转换为 DataFusion 的 Expr
+    fn convert_sql_expr_to_df_expr(
+        &self,
+        sql_expr: &datafusion::sql::sqlparser::ast::Expr,
+    ) -> CoreResult<datafusion::logical_expr::Expr> {
+        use datafusion::logical_expr::{col, lit};
+        use datafusion::sql::sqlparser::ast::Expr as SqlExpr;
+
+        match sql_expr {
+            // 二元操作: a = b, a > b, etc.
+            SqlExpr::BinaryOp { left, op, right } => {
+                let left_expr = self.convert_sql_expr_to_df_expr(left)?;
+                let right_expr = self.convert_sql_expr_to_df_expr(right)?;
+
+                use datafusion::sql::sqlparser::ast::BinaryOperator;
+                let df_expr = match op {
+                    BinaryOperator::Eq => left_expr.eq(right_expr),
+                    BinaryOperator::NotEq => left_expr.not_eq(right_expr),
+                    BinaryOperator::Lt => left_expr.lt(right_expr),
+                    BinaryOperator::LtEq => left_expr.lt_eq(right_expr),
+                    BinaryOperator::Gt => left_expr.gt(right_expr),
+                    BinaryOperator::GtEq => left_expr.gt_eq(right_expr),
+                    BinaryOperator::And => left_expr.and(right_expr),
+                    BinaryOperator::Or => left_expr.or(right_expr),
+                    _ => {
+                        return Err(CoreError::Internal(format!(
+                            "Unsupported binary operator: {:?}",
+                            op
+                        )))
+                    }
+                };
+                Ok(df_expr)
+            }
+
+            // 列引用
+            SqlExpr::Identifier(ident) => Ok(col(&ident.value)),
+
+            // 值字面量（新版本使用 ValueWithSpan）
+            SqlExpr::Value(value_with_span) => {
+                use datafusion::sql::sqlparser::ast::Value;
+                match &value_with_span.value {
+                    Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+                        Ok(lit(s.clone()))
+                    }
+                    Value::Number(n, _) => {
+                        // 尝试解析为 i64
+                        if let Ok(num) = n.parse::<i64>() {
+                            Ok(lit(num))
+                        } else if let Ok(num) = n.parse::<f64>() {
+                            Ok(lit(num))
+                        } else {
+                            Err(CoreError::Internal(format!("Invalid number: {}", n)))
+                        }
+                    }
+                    _ => Err(CoreError::Internal(format!(
+                        "Unsupported value type: {:?}",
+                        value_with_span
+                    ))),
+                }
+            }
+
+            // 其他类型暂不支持
+            _ => Err(CoreError::Internal(format!(
+                "Unsupported SQL expression type: {:?}",
+                sql_expr
+            ))),
+        }
     }
 
     /// 清理 SQL：移除 ORDER BY _nature 和 LIMIT/OFFSET

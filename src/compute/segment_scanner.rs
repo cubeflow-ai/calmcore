@@ -198,6 +198,7 @@ impl SegmentScanner {
     /// - `filters`: WHERE 过滤条件
     /// - `skip`: 跳过的物理行数（包括已删除的行）
     /// - `limit`: 读取的物理行数上限
+    /// - `projection`: 投影列索引（用于列裁剪）
     ///
     /// # 返回
     /// 返回过滤后的实际数据，行数可能少于 limit（因为删除或过滤）
@@ -206,6 +207,7 @@ impl SegmentScanner {
         filters: &[Expr],
         skip: usize,
         limit: usize,
+        projection: Option<&Vec<usize>>,
     ) -> crate::utils::error::CoreResult<RecordBatch> {
         use crate::utils::error::CoreError;
 
@@ -229,17 +231,22 @@ impl SegmentScanner {
         );
 
         log::debug!(
-            "🔍 [SegmentScanner::scan_with_skip_and_limit] doc_count={}, skip={}, limit={}, reading docs [{}, {})",
+            "🔍 [SegmentScanner::scan_with_skip_and_limit] doc_count={}, skip={}, limit={}, reading docs [{}, {}), projection={:?}",
             self.doc_count,
             skip,
             limit,
             start_doc_id,
-            end_doc_id
+            end_doc_id,
+            projection
         );
 
-        // 读取物理数据
+        // 读取物理数据（应用投影下推）
         let read_start = std::time::Instant::now();
-        let batch = self.read_docs_by_ids(&physical_doc_ids)?;
+        let batch = if let Some(proj) = projection {
+            self.read_docs_by_ids_with_projection(&physical_doc_ids, proj)?
+        } else {
+            self.read_docs_by_ids(&physical_doc_ids)?
+        };
         log::info!(
             "    ⏱️  [scan] read_docs_by_ids ({}): {:?}",
             physical_doc_ids.len(),
@@ -319,20 +326,30 @@ impl SegmentScanner {
         let indices: Vec<u32> = bitmap.iter().map(|doc_id| doc_id - base_doc_id).collect();
 
         if indices.is_empty() {
-            return self.create_empty_batch();
+            // 返回与输入 batch 相同 schema 的空 batch
+            let empty_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| datafusion::arrow::array::new_empty_array(field.data_type()))
+                .collect();
+            return RecordBatch::try_new(batch.schema(), empty_columns)
+                .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)));
         }
 
         let indices_array = UInt32Array::from(indices);
         let mut columns = Vec::new();
 
-        for i in 0..self.schema.fields().len() {
+        // 使用 batch 实际的列数，而不是 self.schema（投影后列数会不同）
+        for i in 0..batch.num_columns() {
             let column = batch.column(i);
             let taken = take(column, &indices_array, None)
                 .map_err(|e| CoreError::Internal(format!("Failed to take rows: {}", e)))?;
             columns.push(taken);
         }
 
-        RecordBatch::try_new(self.schema.clone(), columns)
+        // 使用 batch 的 schema，而不是 self.schema
+        RecordBatch::try_new(batch.schema(), columns)
             .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))
     }
 
@@ -349,6 +366,25 @@ impl SegmentScanner {
             .collect();
 
         RecordBatch::try_new(self.schema.clone(), empty_columns)
+            .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)))
+    }
+
+    /// 创建空的 RecordBatch（带投影）
+    fn create_empty_batch_with_projection(
+        &self,
+        projection: &[usize],
+    ) -> crate::utils::error::CoreResult<RecordBatch> {
+        use crate::utils::error::CoreError;
+        use datafusion::arrow::array::new_empty_array;
+
+        let projected_schema = self.build_projected_schema(Some(&projection.to_vec()));
+        let empty_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = projected_schema
+            .fields()
+            .iter()
+            .map(|field| new_empty_array(field.data_type()))
+            .collect();
+
+        RecordBatch::try_new(projected_schema, empty_columns)
             .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)))
     }
 
@@ -519,6 +555,152 @@ impl SegmentScanner {
         // 合并所有 batches
         use datafusion::arrow::compute::concat_batches;
         concat_batches(&self.schema, &batches)
+            .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
+    }
+
+    /// 根据 doc_ids 读取数据（带投影下推）
+    fn read_docs_by_ids_with_projection(
+        &self,
+        doc_ids: &[u32],
+        projection: &[usize],
+    ) -> crate::utils::error::CoreResult<RecordBatch> {
+        use crate::utils::error::CoreError;
+
+        let read_start = std::time::Instant::now();
+
+        if doc_ids.is_empty() {
+            return self.create_empty_batch_with_projection(projection);
+        }
+
+        log::debug!(
+            "📖 [read_docs_by_ids_with_projection] Requested {} doc_ids with projection {:?}",
+            doc_ids.len(),
+            projection
+        );
+
+        // 查找 doc_ids 对应的 batch_key
+        let lookup_start = std::time::Instant::now();
+        let batch_doc_map = self.raw_data.batch_lookup_doc_ids(doc_ids);
+        log::debug!(
+            "      ⏱️  [read_docs] batch_lookup: {:?}",
+            lookup_start.elapsed()
+        );
+
+        if batch_doc_map.is_empty() {
+            log::warn!("⚠️  batch_lookup_doc_ids returned empty");
+            return self.create_empty_batch_with_projection(projection);
+        }
+
+        // 🚀 投影下推：只读取需要的列
+        let batch_read_start = std::time::Instant::now();
+        let source_batches = if batch_doc_map.len() <= 5 {
+            let batch_keys: Vec<u32> = batch_doc_map.keys().copied().collect();
+            let result = self
+                .raw_data
+                .get_batch_with_projection(&batch_keys, Some(projection));
+            log::info!(
+                "      ⏱️  [read_docs] batch_read ({} RowGroups, {} cols): {:?}",
+                batch_keys.len(),
+                projection.len(),
+                batch_read_start.elapsed()
+            );
+            result
+        } else {
+            HashMap::new()
+        };
+
+        // 构建投影后的 schema
+        let projected_schema = self.build_projected_schema(Some(&projection.to_vec()));
+
+        // 读取各个 batch 并合并
+        let merge_start = std::time::Instant::now();
+        let mut batches = Vec::new();
+        for (batch_key, doc_ids_in_batch) in batch_doc_map {
+            // 尝试从批量读取的结果中获取，否则单独读取
+            let batch = if let Some(b) = source_batches.get(&batch_key) {
+                b.clone()
+            } else {
+                // 单独读取时也应用投影
+                match self
+                    .raw_data
+                    .get_with_projection(&batch_key, Some(projection))
+                {
+                    Some(b) => b,
+                    None => {
+                        log::warn!("⚠️  Batch not found for key={}", batch_key);
+                        continue;
+                    }
+                }
+            };
+
+            {
+                let batch_size = batch.num_rows() as u32;
+                let indices: Vec<u32> = doc_ids_in_batch
+                    .iter()
+                    .filter_map(|doc_id| {
+                        let relative_idx = doc_id - batch_key;
+                        if relative_idx < batch_size {
+                            Some(relative_idx)
+                        } else {
+                            log::error!(
+                                "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
+                                doc_id, batch_key, relative_idx, batch_size
+                            );
+                            None
+                        }
+                    })
+                    .collect();
+
+                if indices.is_empty() {
+                    log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
+                    continue;
+                }
+
+                // 使用 arrow 的 take 操作提取指定行
+                use datafusion::arrow::array::UInt32Array;
+                use datafusion::arrow::compute::take;
+
+                let indices_array = UInt32Array::from(indices);
+                let mut columns = Vec::new();
+
+                for i in 0..batch.num_columns() {
+                    let column = batch.column(i);
+                    let taken = take(column, &indices_array, None).map_err(|e| {
+                        CoreError::Internal(format!(
+                            "Failed to take rows from batch {}: {}",
+                            batch_key, e
+                        ))
+                    })?;
+                    columns.push(taken);
+                }
+
+                let selected_batch = RecordBatch::try_new(projected_schema.clone(), columns)
+                    .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))?;
+                batches.push(selected_batch);
+            }
+        }
+
+        log::debug!(
+            "      ⏱️  [read_docs] merge & extract: {:?}",
+            merge_start.elapsed()
+        );
+
+        log::info!(
+            "      ⏱️  [read_docs] TOTAL read_docs_by_ids_with_projection: {:?}",
+            read_start.elapsed()
+        );
+
+        if batches.is_empty() {
+            return self.create_empty_batch_with_projection(projection);
+        }
+
+        if batches.len() == 1 {
+            return Ok(batches.into_iter().next().unwrap());
+        }
+
+        // 合并所有 batches
+        use datafusion::arrow::compute::concat_batches;
+        concat_batches(&projected_schema, &batches)
             .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
     }
 
