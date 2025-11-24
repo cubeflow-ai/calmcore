@@ -297,6 +297,133 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             return write_query_result(results, &schema, &[batch]);
         }
 
+        // SHOW PARTITIONS [FROM|IN] table
+        if query_lower.starts_with("show partitions") {
+            // 解析表名
+            let base = query_lower
+                .strip_suffix(';')
+                .unwrap_or(query_lower.as_str())
+                .trim();
+            let rest = base.trim_start_matches("show partitions").trim();
+
+            let table_name_opt = if rest.is_empty() {
+                None
+            } else if let Some(after_from) = rest.strip_prefix("from ") {
+                Some(after_from.trim().to_string())
+            } else if let Some(after_in) = rest.strip_prefix("in ") {
+                Some(after_in.trim().to_string())
+            } else {
+                None
+            };
+
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("Table", DataType::Utf8, false),
+                Field::new("Partition", DataType::Utf8, false),
+                Field::new("Segment", DataType::Utf8, false),
+                Field::new("SegmentType", DataType::Utf8, false),
+                Field::new("CreatedAt", DataType::Utf8, false),
+                Field::new("DocCount", DataType::Utf8, false),
+            ]));
+
+            return tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let mut tables = Vec::new();
+                    let mut partitions = Vec::new();
+                    let mut segments = Vec::new();
+                    let mut segment_types = Vec::new();
+                    let mut created_list = Vec::new();
+                    let mut doc_counts = Vec::new();
+
+                    if let Some(table_name) = table_name_opt {
+                        let part_names = self.engine.list_partitions(&table_name).await;
+                        for p in part_names {
+                            let seg_infos = self.engine.list_segments(&table_name, &p).await;
+                            if seg_infos.is_empty() {
+                                tables.push(table_name.clone());
+                                partitions.push(p.clone());
+                                segments.push(String::from("-"));
+                                segment_types.push(String::from("-"));
+                                created_list.push(String::from("-"));
+                                doc_counts.push(String::from("-"));
+                            } else {
+                                for (seg_id, doc_count, created_ts_ms, is_current) in seg_infos {
+                                    tables.push(table_name.clone());
+                                    partitions.push(p.clone());
+                                    segments.push(seg_id.to_string());
+                                    let seg_type = if is_current { "current" } else { "frozen" };
+                                    segment_types.push(seg_type.to_string());
+                                    // 格式化时间戳为本地时区 2025-11-24 11:24:33.006
+                                    let dt = chrono::DateTime::from_timestamp_millis(
+                                        created_ts_ms as i64,
+                                    )
+                                    .unwrap_or_else(|| {
+                                        chrono::DateTime::from_timestamp(0, 0).unwrap()
+                                    })
+                                    .with_timezone(&chrono::Local);
+                                    let formatted = dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+                                    created_list.push(formatted);
+                                    doc_counts.push(doc_count.to_string());
+                                }
+                            }
+                        }
+                    } else {
+                        let all_keys = self.engine.list_all_partition_keys().await;
+                        for (t, p) in all_keys {
+                            let seg_infos = self.engine.list_segments(&t, &p).await;
+                            if seg_infos.is_empty() {
+                                tables.push(t.clone());
+                                partitions.push(p.clone());
+                                segments.push(String::from("-"));
+                                segment_types.push(String::from("-"));
+                                created_list.push(String::from("-"));
+                                doc_counts.push(String::from("-"));
+                            } else {
+                                for (seg_id, doc_count, created_ts_ms, is_current) in seg_infos {
+                                    tables.push(t.clone());
+                                    partitions.push(p.clone());
+                                    segments.push(seg_id.to_string());
+                                    let seg_type = if is_current { "current" } else { "frozen" };
+                                    segment_types.push(seg_type.to_string());
+                                    let dt = chrono::DateTime::from_timestamp_millis(
+                                        created_ts_ms as i64,
+                                    )
+                                    .unwrap_or_else(|| {
+                                        chrono::DateTime::from_timestamp(0, 0).unwrap()
+                                    })
+                                    .with_timezone(&chrono::Local);
+                                    let formatted = dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+                                    created_list.push(formatted);
+                                    doc_counts.push(doc_count.to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    let table_array = StringArray::from(tables);
+                    let partition_array = StringArray::from(partitions);
+                    let segment_array = StringArray::from(segments);
+                    let segment_type_array = StringArray::from(segment_types);
+                    let created_array = StringArray::from(created_list);
+                    let doc_count_array = StringArray::from(doc_counts);
+
+                    let batch = RecordBatch::try_new(
+                        schema.clone(),
+                        vec![
+                            Arc::new(table_array),
+                            Arc::new(partition_array),
+                            Arc::new(segment_array),
+                            Arc::new(segment_type_array),
+                            Arc::new(created_array),
+                            Arc::new(doc_count_array),
+                        ],
+                    )
+                    .map_err(io::Error::other)?;
+
+                    write_query_result(results, &schema, &[batch])
+                })
+            });
+        }
+
         // DESCRIBE / DESC table
         if query_lower.starts_with("describe ") || query_lower.starts_with("desc ") {
             return tokio::task::block_in_place(|| {
@@ -327,7 +454,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
         results.error(
             ErrorKind::ER_NOT_SUPPORTED_YET,
-            b"Only SELECT/INSERT/DELETE/CREATE TABLE/DROP TABLE/SHOW TABLES/SHOW DATABASES/DESCRIBE supported",
+            b"Only SELECT/INSERT/DELETE/CREATE TABLE/DROP TABLE/SHOW TABLES/SHOW DATABASES/SHOW PARTITIONS/DESCRIBE supported",
         )
     }
 }

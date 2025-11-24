@@ -26,7 +26,7 @@ use std::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, RwLock,
     },
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// 控制非主键字段的索引写入模式
@@ -1080,11 +1080,17 @@ impl Segment {
 
         // 5. Save segment metadata (to temp directory)
         let meta_path = format!("{}/meta.json", segment_tmp_path);
+        // 使用 Unix 毫秒时间戳持久化创建时间，便于外部展示
+        let created_ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         let meta = if is_external_parquet {
             serde_json::json!({
                 "start": self.start,
                 "doc_id_gen": self.doc_id_gen.load(Ordering::Relaxed),
                 "max_doc_id": self.max_doc_id.load(Ordering::Relaxed),
+                "created_ts_ms": created_ts_ms,
                 "external_parquet": self.base_path.clone(),
             })
         } else {
@@ -1092,6 +1098,7 @@ impl Segment {
                 "start": self.start,
                 "doc_id_gen": self.doc_id_gen.load(Ordering::Relaxed),
                 "max_doc_id": self.max_doc_id.load(Ordering::Relaxed),
+                "created_ts_ms": created_ts_ms,
             })
         };
         std::fs::write(&meta_path, meta.to_string())
@@ -1304,16 +1311,25 @@ impl Segment {
             .map(|(i, f)| (f.name().to_string(), i))
             .collect();
 
-        // 5. Load row_data from disk (check meta.json for external reference first)
+        // 5. Load row_data and created_at from disk (check meta.json first)
         let meta_path = format!("{}/meta.json", segment_path);
-        let external_parquet_path = if std::path::Path::new(&meta_path).exists() {
-            let meta_content = std::fs::read_to_string(&meta_path).ok();
-            meta_content
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                .and_then(|meta| meta["external_parquet"].as_str().map(String::from))
-        } else {
-            None
-        };
+        let (external_parquet_path, created_ts_ms_opt) =
+            if std::path::Path::new(&meta_path).exists() {
+                let meta_content = std::fs::read_to_string(&meta_path).ok();
+                let meta_json = meta_content
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
+
+                let external = meta_json
+                    .as_ref()
+                    .and_then(|meta| meta["external_parquet"].as_str().map(String::from));
+                let created_ts_ms = meta_json
+                    .as_ref()
+                    .and_then(|meta| meta["created_ts_ms"].as_u64());
+
+                (external, created_ts_ms)
+            } else {
+                (None, None)
+            };
 
         let (row_data, base_path) = if let Some(external_path) = external_parquet_path {
             println!(
@@ -1350,12 +1366,27 @@ impl Segment {
             }
         };
 
+        // 使用 meta 中的 created_ts_ms 恢复逻辑创建时间；如果没有就使用当前时间
+        let created_at = if let Some(created_ts_ms) = created_ts_ms_opt {
+            let now_instant = Instant::now();
+            let now_ts_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let age_ms = now_ts_ms.saturating_sub(created_ts_ms);
+            now_instant
+                .checked_sub(std::time::Duration::from_millis(age_ms))
+                .unwrap_or(now_instant)
+        } else {
+            Instant::now()
+        };
+
         let segment = Self {
             start: start_id,
             doc_id_gen: AtomicU32::new(doc_id_gen),
             max_doc_id: AtomicU32::new(max_doc_id_relative),
             persisted: AtomicBool::new(true), // 从磁盘加载 = 已持久化
-            created_at: Instant::now(),       // 加载时使用当前时间
+            created_at,
             pk_bloomfilter: RwLock::new(pk_bloomfilter),
             deleted: RwLock::new(deleted),
             fields: RwLock::new(fields),
@@ -1401,6 +1432,11 @@ impl Segment {
     /// Get current doc count in this segment
     pub fn doc_count(&self) -> u32 {
         self.doc_id_gen.load(Ordering::Relaxed)
+    }
+
+    /// Get segment creation time as duration since process start
+    pub fn created_since_start(&self) -> std::time::Duration {
+        self.created_at.elapsed()
     }
 
     /// Get segment age (time since creation)

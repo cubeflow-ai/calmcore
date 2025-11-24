@@ -569,6 +569,58 @@ impl Engine {
             .collect()
     }
 
+    /// 列出指定表/分区下的所有 segment 信息（包括 frozen 和 current）
+    /// 返回: (segment_id, doc_count, created_ts_ms, is_current)
+    pub async fn list_segments(
+        &self,
+        table_name: &str,
+        partition_name: &str,
+    ) -> Vec<(u64, u64, u64, bool)> {
+        let key = PartitionKey {
+            table_name: table_name.to_string(),
+            partition_name: partition_name.to_string(),
+        };
+        let partitions = self.partitions.read().await;
+        if let Some(partition) = partitions.get(&key) {
+            let mut infos = Vec::new();
+
+            // frozen segments
+            let frozen = partition.get_frozen_segments();
+            for (seg_id, seg) in frozen.iter() {
+                // 估算绝对创建时间戳：当前时间戳减去 age
+                let age = seg.created_since_start();
+                let now_ts_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let created_ts_ms = now_ts_ms.saturating_sub(age.as_millis() as u64);
+                infos.push((
+                    *seg_id,
+                    seg.doc_count() as u64,
+                    created_ts_ms,
+                    false, // is_current = false for frozen
+                ));
+            }
+            drop(frozen);
+
+            // current segment
+            let current = partition.get_current_segment();
+            let age = current.created_since_start();
+            let now_ts_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let created_ts_ms = now_ts_ms.saturating_sub(age.as_millis() as u64);
+            let seg_id = current.start; // Use actual start ID
+            infos.push((seg_id, current.doc_count() as u64, created_ts_ms, true));
+            drop(current);
+
+            infos
+        } else {
+            Vec::new()
+        }
+    }
+
     /// 触发特定 Partition 的持久化检查
     pub fn trigger_persist(&self, table_name: &str, partition_name: &str) {
         let key = PartitionKey {
