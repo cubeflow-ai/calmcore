@@ -307,25 +307,38 @@ impl DistributedExecutor {
             partition_sql
         );
 
-        // 并行查询所有 partition
+        // 🚀 并行查询所有 partition
         let mut all_batches = Vec::new();
 
-        for partition_name in &partition_names {
-            match self
-                .execute_on_partition(
-                    &table_name,
-                    partition_name,
-                    &partition_sql,
-                    sort_fields.clone(),
-                    limit_hint,
-                )
-                .await
-            {
+        let futures: Vec<_> = partition_names
+            .iter()
+            .map(|partition_name| {
+                let table_name = table_name.clone();
+                let partition_name = partition_name.clone();
+                let partition_sql = partition_sql.clone();
+                let sort_fields = sort_fields.clone();
+                async move {
+                    self.execute_on_partition(
+                        &table_name,
+                        &partition_name,
+                        &partition_sql,
+                        sort_fields,
+                        limit_hint,
+                    )
+                    .await
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        for (idx, result) in results.into_iter().enumerate() {
+            match result {
                 Ok(batches) => {
                     all_batches.extend(batches);
                 }
                 Err(e) => {
-                    log::warn!("⚠️  Partition {} failed: {}", partition_name, e);
+                    log::warn!("⚠️  Partition {} failed: {}", partition_names[idx], e);
                 }
             }
         }
@@ -651,21 +664,33 @@ impl DistributedExecutor {
             table_name, partition_names.len()
         );
 
-        // 并行在所有分区上执行聚合
+        // 🚀 并行在所有分区上执行聚合
         let mut partition_results = Vec::new();
 
-        for partition_name in &partition_names {
-            match self
-                .execute_sql_on_partition_old(&table_name, partition_name, sql)
-                .await
-            {
+        let futures: Vec<_> = partition_names
+            .iter()
+            .map(|partition_name| {
+                let table_name = table_name.clone();
+                let partition_name = partition_name.clone();
+                let sql = sql.to_string();
+                async move {
+                    self.execute_sql_on_partition_old(&table_name, &partition_name, &sql)
+                        .await
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        for (idx, result) in results.into_iter().enumerate() {
+            match result {
                 Ok(batches) => {
                     partition_results.push(batches);
                 }
                 Err(e) => {
                     eprintln!(
                         "⚠️  [DistributedExecutor] Failed to execute aggregation on partition {}: {}",
-                        partition_name, e
+                        partition_names[idx], e
                     );
                 }
             }
@@ -849,13 +874,28 @@ impl DistributedExecutor {
         // 直接从 engine 获取所有 partition 列表
         let partition_names = self.engine.list_partitions(table_name).await;
 
-        // 并行统计所有分区的行数
-        let mut total_count = 0u64;
-        for partition_name in &partition_names {
-            if let Some(partition) = self.engine.get_partition(table_name, partition_name).await {
-                total_count += partition.total_count();
-            }
-        }
+        // 🚀 并行统计所有分区的行数
+        let futures: Vec<_> = partition_names
+            .iter()
+            .map(|partition_name| {
+                let table_name = table_name.to_string();
+                let partition_name = partition_name.clone();
+                async move {
+                    if let Some(partition) = self
+                        .engine
+                        .get_partition(&table_name, &partition_name)
+                        .await
+                    {
+                        partition.total_count()
+                    } else {
+                        0u64
+                    }
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+        let total_count: u64 = results.into_iter().sum();
 
         Ok(total_count)
     }
@@ -914,15 +954,29 @@ impl DistributedExecutor {
             filters.len()
         );
 
-        // Step 3: 并行计算所有 partition 的 bitmap cardinality
-        let mut total_matched = 0u64;
+        // Step 3: 🚀 并行计算所有 partition 的 bitmap cardinality
+        let futures: Vec<_> = partition_names
+            .iter()
+            .map(|partition_name| {
+                let table_name = table_name.to_string();
+                let partition_name = partition_name.clone();
+                let filters = filters.clone();
+                async move {
+                    if let Some(partition) = self
+                        .engine
+                        .get_partition(&table_name, &partition_name)
+                        .await
+                    {
+                        self.count_partition_with_filters(&partition, &filters)
+                    } else {
+                        Ok(0u64)
+                    }
+                }
+            })
+            .collect();
 
-        for partition_name in &partition_names {
-            if let Some(partition) = self.engine.get_partition(table_name, partition_name).await {
-                let partition_count = self.count_partition_with_filters(&partition, &filters)?;
-                total_matched += partition_count;
-            }
-        }
+        let results = futures::future::join_all(futures).await;
+        let total_matched: u64 = results.into_iter().filter_map(|r| r.ok()).sum();
 
         log::info!(
             "✅ [COUNT Bitmap] Total matched: {} (zero rows read)",

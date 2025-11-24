@@ -69,13 +69,16 @@ impl ParquetRowDataReader {
         // Fallback: if no metadata, calculate cumulative row counts as keys
         // For external Parquet files, doc_id = row_index (0-based)
         if key_to_rowgroup.is_empty() {
-            println!("  Warning: No row_group_keys metadata found, using cumulative row counts...");
+            log::warn!(
+                "  Warning: No row_group_keys metadata found, using cumulative row counts..."
+            );
             let mut cumulative_rows = 0u32;
             for rg_idx in 0..num_row_groups {
                 key_to_rowgroup.insert(cumulative_rows, rg_idx);
-                eprintln!(
+                log::debug!(
                     "    [ParquetRowDataReader] RowGroup {} -> key={} (cumulative rows)",
-                    rg_idx, cumulative_rows
+                    rg_idx,
+                    cumulative_rows
                 );
 
                 // Add this RowGroup's row count to cumulative total
@@ -236,15 +239,16 @@ impl ParquetRowDataReader {
     ) -> HashMap<u32, RecordBatch> {
         use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-        eprintln!(
+        log::debug!(
             "  [get_batch_with_projection] Called with keys: {:?}, projection: {:?}",
-            keys, projection
+            keys,
+            projection
         );
 
         let mut result = HashMap::new();
 
         if keys.is_empty() {
-            eprintln!("  [get_batch_with_projection] No keys provided, returning empty");
+            log::debug!("  [get_batch_with_projection] No keys provided, returning empty");
             return result;
         }
 
@@ -254,14 +258,15 @@ impl ParquetRowDataReader {
 
         for key in keys {
             if let Some(&rg_idx) = self.key_to_rowgroup.get(key) {
-                eprintln!(
+                log::debug!(
                     "  [get_batch_with_projection] key={} -> rg_idx={}",
-                    key, rg_idx
+                    key,
+                    rg_idx
                 );
                 row_group_indices.push(rg_idx);
                 key_to_rg_idx.insert(rg_idx, *key);
             } else {
-                eprintln!(
+                log::debug!(
                     "  [get_batch_with_projection] key={} NOT FOUND in key_to_rowgroup",
                     key
                 );
@@ -269,11 +274,11 @@ impl ParquetRowDataReader {
         }
 
         if row_group_indices.is_empty() {
-            eprintln!("  [get_batch_with_projection] No valid row groups found, returning empty");
+            log::debug!("  [get_batch_with_projection] No valid row groups found, returning empty");
             return result;
         }
 
-        eprintln!(
+        log::debug!(
             "  [get_batch_with_projection] Will read {} RowGroups",
             row_group_indices.len()
         );
@@ -335,14 +340,14 @@ impl ParquetRowDataReader {
             let mut batches = Vec::new();
             for batch_result in reader {
                 if let Ok(batch) = batch_result {
-                    eprintln!(
+                    log::debug!(
                         "  [get_batch_with_projection] Read batch with {} rows from RowGroup {}",
                         batch.num_rows(),
                         rg_idx
                     );
                     batches.push(batch);
                 } else {
-                    eprintln!(
+                    log::error!(
                         "  [get_batch_with_projection] Error reading batch from RowGroup {}",
                         rg_idx
                     );
@@ -359,7 +364,7 @@ impl ParquetRowDataReader {
                     {
                         Ok(b) => b,
                         Err(e) => {
-                            eprintln!(
+                            log::error!(
                                 "  [get_batch_with_projection] Error concatenating batches: {}",
                                 e
                             );
@@ -368,21 +373,21 @@ impl ParquetRowDataReader {
                     }
                 };
 
-                eprintln!(
+                log::debug!(
                     "  [get_batch_with_projection] Inserting key={} with {} rows",
                     key,
                     combined_batch.num_rows()
                 );
                 result.insert(key, combined_batch);
             } else {
-                eprintln!(
+                log::debug!(
                     "  [get_batch_with_projection] No batches read for RowGroup {}",
                     rg_idx
                 );
             }
         }
 
-        eprintln!(
+        log::debug!(
             "  [get_batch_with_projection] Returning {} batches",
             result.len()
         );
