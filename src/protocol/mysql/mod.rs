@@ -1,10 +1,8 @@
-mod cursor;
 mod insert_handler;
 
 use crate::engine::Engine;
 use crate::schema::field::FieldOption;
 use crate::schema::Schema;
-use cursor::CursorManager;
 use datafusion::arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use msql_srv::*;
@@ -31,23 +29,38 @@ impl MysqlServer {
 
                     // 将 tokio TcpStream 转换为 std TcpStream 并设置为阻塞模式
                     // msql_srv 需要阻塞式的 std::net::TcpStream
-                    tokio::task::spawn_blocking(move || match stream.into_std() {
-                        Ok(std_stream) => {
-                            // 设置为阻塞模式，msql_srv 期望阻塞 I/O
-                            if let Err(e) = std_stream.set_nonblocking(false) {
-                                eprintln!("Failed to set blocking mode: {}", e);
-                                return;
-                            }
+                    tokio::task::spawn_blocking(move || {
+                        let peer_addr = addr.to_string();
 
-                            let backend = CalmBackend {
-                                cursor_manager: Arc::new(CursorManager::new(engine)),
-                            };
-                            if let Err(e) = MysqlIntermediary::run_on_tcp(backend, std_stream) {
-                                eprintln!("Error handling MySQL client: {}", e);
+                        match stream.into_std() {
+                            Ok(std_stream) => {
+                                // 设置为阻塞模式，msql_srv 期望阻塞 I/O
+                                if let Err(e) = std_stream.set_nonblocking(false) {
+                                    eprintln!("Failed to set blocking mode: {}", e);
+                                    return;
+                                }
+
+                                let backend = CalmBackend { engine };
+
+                                // 处理连接
+                                match MysqlIntermediary::run_on_tcp(backend, std_stream) {
+                                    Ok(_) => {
+                                        eprintln!(
+                                            "✅ [MySQL] Client {} disconnected normally",
+                                            peer_addr
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!("❌ [MySQL] Client {} error: {}", peer_addr, e);
+                                    }
+                                }
+
+                                // 连接结束,资源应该被释放
+                                eprintln!("🧹 [MySQL] Cleaning up connection from {}", peer_addr);
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to convert stream: {}", e);
+                            Err(e) => {
+                                eprintln!("Failed to convert stream: {}", e);
+                            }
                         }
                     });
                 }
@@ -60,55 +73,52 @@ impl MysqlServer {
 }
 
 struct CalmBackend {
-    cursor_manager: Arc<CursorManager>,
+    engine: Arc<Engine>,
 }
 
 impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
     type Error = io::Error;
 
-    fn on_prepare(&mut self, query: &str, info: StatementMetaWriter<W>) -> io::Result<()> {
-        let stmt_id = self.cursor_manager.prepare_statement(query)?;
-        // 返回 statement 元数据 (暂不支持参数)
-        info.reply(stmt_id, &[], &[])
+    fn on_prepare(&mut self, _query: &str, info: StatementMetaWriter<W>) -> io::Result<()> {
+        // 简单返回,暂不支持 prepared statement
+        info.reply(0, &[], &[])
     }
 
     fn on_execute(
         &mut self,
-        id: u32,
+        _id: u32,
         _params: ParamParser,
         results: QueryResultWriter<W>,
     ) -> io::Result<()> {
-        // 查找 prepared statement
-        let query = match self.cursor_manager.get_prepared_query(id) {
-            Some(q) => q,
-            None => {
-                return results.error(
-                    ErrorKind::ER_UNKNOWN_STMT_HANDLER,
-                    format!("Unknown prepared statement ID: {}", id).as_bytes(),
-                );
-            }
-        };
-
-        log::info!("▶️  Executing prepared statement ID={}: {}", id, query);
-
-        // 执行查询
-        let engine = self.cursor_manager.engine.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(execute_query(engine, &query, results))
-        })
+        // 暂不支持 prepared statement execution
+        results.error(
+            ErrorKind::ER_NOT_SUPPORTED_YET,
+            b"Prepared statements not fully supported. Use regular queries with LIMIT/OFFSET for pagination.",
+        )
     }
 
-    fn on_close(&mut self, stmt: u32) {
-        self.cursor_manager.close_statement(stmt);
+    fn on_close(&mut self, _stmt: u32) {
+        // No-op
     }
 
     fn on_query(&mut self, query: &str, results: QueryResultWriter<W>) -> io::Result<()> {
         let query_trimmed = query.trim();
 
+        // 去除 MySQL 注释 (/* ... */)
+        let query_without_comment = if query_trimmed.starts_with("/*") {
+            if let Some(end_pos) = query_trimmed.find("*/") {
+                query_trimmed[end_pos + 2..].trim()
+            } else {
+                query_trimmed
+            }
+        } else {
+            query_trimmed
+        };
+
         // 规范化前缀用于判断语句类型（将多个空格合并为一个）
         // 只处理前 100 个字符，避免大型 INSERT 语句的性能问题
-        let prefix_len = query_trimmed.len().min(100);
-        let prefix = &query_trimmed[..prefix_len];
+        let prefix_len = query_without_comment.len().min(100);
+        let prefix = &query_without_comment[..prefix_len];
 
         // 将连续空格替换为单个空格，然后转小写
         let query_lower = prefix
@@ -121,27 +131,30 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         if query_lower.starts_with("set ")
             || query_lower.starts_with("select @@")
             || query_lower.starts_with("select version()")
+            || query_lower.starts_with("select database()")
             || query_lower == "select 1"
             || query_lower.starts_with("show variables")
             || query_lower.starts_with("show session")
             || query_lower.starts_with("show collation")
             || query_lower.starts_with("show charset")
+            || query_lower.starts_with("show warnings")
+            || query_lower.starts_with("show errors")
+            || query_lower.starts_with("show status")
+            || query_lower.starts_with("show engines")
+            || query_lower.starts_with("show plugins")
+            || query_lower.starts_with("show processlist")
             || query_lower == "commit"
             || query_lower == "rollback"
             || query_lower == "begin"
             || query_lower.starts_with("start transaction")
         {
             // 返回空结果或默认值
-            if query_lower.starts_with("select @@") || query_lower.starts_with("select version()") {
-                let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-                    "result",
-                    DataType::Utf8,
-                    false,
-                )]));
-                let result = StringArray::from(vec!["calm-0.1.0"]);
-                let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(result)])
-                    .map_err(io::Error::other)?;
-                return write_query_result(results, &schema, &[batch]);
+            if query_lower.starts_with("select @@")
+                || query_lower.starts_with("select version()")
+                || query_lower.starts_with("select database()")
+            {
+                // 处理多列的 @@variable 查询 (JDBC 初始化查询)
+                return self.handle_session_variables_query(query_without_comment, results);
             }
             // 事务命令和其他初始化命令返回成功
             return results.completed(0, 0);
@@ -156,14 +169,14 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
                     if parts.len() == 2 {
                         // FLUSH TABLES (刷新所有表)
-                        let tables = self.cursor_manager.engine.list_tables();
+                        let tables = self.engine.list_tables();
                         log::info!("💾 Flushing all {} tables", tables.len());
 
                         let mut success_count = 0;
                         let mut failed_tables = Vec::new();
 
                         for table_name in tables {
-                            match self.cursor_manager.engine.flush_table(&table_name).await {
+                            match self.engine.flush_table(&table_name).await {
                                 Ok(_) => {
                                     success_count += 1;
                                     log::info!("✅ Flushed table '{}'", table_name);
@@ -204,7 +217,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
                         let mut failed_tables = Vec::new();
                         for table_name in &table_names {
-                            match self.cursor_manager.engine.flush_table(table_name).await {
+                            match self.engine.flush_table(table_name).await {
                                 Ok(_) => {
                                     log::info!("✅ Flushed table '{}'", table_name);
                                 }
@@ -236,7 +249,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         if query_lower.starts_with("insert") {
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(insert_handler::handle_insert(
-                    self.cursor_manager.engine.clone(),
+                    self.engine.clone(),
                     query,
                     results,
                 ))
@@ -247,7 +260,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         if query_lower.starts_with("delete") {
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(handle_delete(
-                    self.cursor_manager.engine.clone(),
+                    self.engine.clone(),
                     query,
                     results,
                 ))
@@ -258,7 +271,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         if query_lower.starts_with("create table") {
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async move {
-                    match handle_create_table(&self.cursor_manager.engine, query).await {
+                    match handle_create_table(&self.engine, query).await {
                         Ok((schema, batches)) => write_query_result(results, &schema, &batches),
                         Err(e) => {
                             let msg = format!("CREATE TABLE failed: {}", e);
@@ -273,7 +286,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         if query_lower.starts_with("drop table") {
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async move {
-                    match handle_drop_table(&self.cursor_manager.engine, query).await {
+                    match handle_drop_table(&self.engine, query).await {
                         Ok((schema, batches)) => write_query_result(results, &schema, &batches),
                         Err(e) => {
                             let msg = format!("DROP TABLE failed: {}", e);
@@ -312,7 +325,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                 false,
             )]));
 
-            let table_names = self.cursor_manager.engine.list_tables();
+            let table_names = self.engine.list_tables();
             let tables: Vec<&str> = table_names.iter().map(|s| s.as_str()).collect();
 
             let tables_array = StringArray::from(tables);
@@ -360,17 +373,9 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                     let mut doc_counts = Vec::new();
 
                     if let Some(table_name) = table_name_opt {
-                        let part_names = self
-                            .cursor_manager
-                            .engine
-                            .list_partitions(&table_name)
-                            .await;
+                        let part_names = self.engine.list_partitions(&table_name).await;
                         for p in part_names {
-                            let seg_infos = self
-                                .cursor_manager
-                                .engine
-                                .list_segments(&table_name, &p)
-                                .await;
+                            let seg_infos = self.engine.list_segments(&table_name, &p).await;
                             if seg_infos.is_empty() {
                                 tables.push(table_name.clone());
                                 partitions.push(p.clone());
@@ -400,9 +405,9 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                             }
                         }
                     } else {
-                        let all_keys = self.cursor_manager.engine.list_all_partition_keys().await;
+                        let all_keys = self.engine.list_all_partition_keys().await;
                         for (t, p) in all_keys {
-                            let seg_infos = self.cursor_manager.engine.list_segments(&t, &p).await;
+                            let seg_infos = self.engine.list_segments(&t, &p).await;
                             if seg_infos.is_empty() {
                                 tables.push(t.clone());
                                 partitions.push(p.clone());
@@ -461,7 +466,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         if query_lower.starts_with("describe ") || query_lower.starts_with("desc ") {
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async move {
-                    match handle_describe(&self.cursor_manager.engine, query).await {
+                    match handle_describe(&self.engine, query).await {
                         Ok((schema, batches)) => write_query_result(results, &schema, &batches),
                         Err(e) => {
                             let msg = format!("DESCRIBE failed: {}", e);
@@ -472,178 +477,101 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             });
         }
 
-        // DECLARE CURSOR
-        if query_lower.starts_with("declare ") && query_lower.contains(" cursor for ") {
-            return self.handle_declare_cursor(query, results);
-        }
-
-        // FETCH
-        if query_lower.starts_with("fetch ") {
-            return self.handle_fetch(query, results);
-        }
-
-        // CLOSE CURSOR
-        if query_lower.starts_with("close ") {
-            return self.handle_close_cursor(query, results);
-        }
-
         // SELECT 查询
         if query_lower.starts_with("select") {
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(execute_query(
-                    self.cursor_manager.engine.clone(),
+                    self.engine.clone(),
                     query,
                     results,
                 ))
             });
         }
 
-        log::error!("unsupport sql:{:?}", query);
+        // 未识别的查询,打印日志
+        log::warn!("❌ Unsupported SQL query: {}", query_trimmed);
+        eprintln!("❌ [MySQL Protocol] Unsupported query: {}", query_trimmed);
 
         results.error(
             ErrorKind::ER_NOT_SUPPORTED_YET,
-            b"Only SELECT/INSERT/DELETE/CREATE TABLE/DROP TABLE/SHOW TABLES/SHOW DATABASES/SHOW PARTITIONS/DESCRIBE/CURSOR supported",
+            b"Only SELECT/INSERT/DELETE/CREATE TABLE/DROP TABLE/SHOW TABLES/SHOW DATABASES/SHOW PARTITIONS/DESCRIBE supported. Use LIMIT/OFFSET for pagination.",
         )
     }
 }
 
 impl CalmBackend {
-    /// 处理 DECLARE CURSOR 命令
-    /// 语法: DECLARE cursor_name CURSOR FOR select_statement
-    fn handle_declare_cursor<W: io::Read + io::Write>(
-        &mut self,
+    /// 处理 SELECT @@variable 查询 (JDBC 初始化)
+    /// 解析查询中的所有列名并返回默认值
+    fn handle_session_variables_query<W: io::Read + io::Write>(
+        &self,
         query: &str,
         results: QueryResultWriter<'_, W>,
     ) -> io::Result<()> {
-        // 解析: DECLARE cursor_name CURSOR FOR select_statement
-        let query_lower = query.to_lowercase();
-        let parts: Vec<&str> = query.splitn(4, ' ').collect();
+        // 解析 SELECT 和 FROM 之间的列定义
+        let query_upper = query.to_uppercase();
+        let select_start = query_upper.find("SELECT").unwrap_or(0) + 6;
+        let from_pos = query_upper.find(" FROM ");
 
-        if parts.len() < 4 {
-            return results.error(
-                ErrorKind::ER_PARSE_ERROR,
-                b"Invalid DECLARE CURSOR syntax. Expected: DECLARE cursor_name CURSOR FOR select_statement",
-            );
-        }
-
-        let cursor_name = parts[1].to_string();
-
-        // 找到 "FOR" 之后的 SELECT 语句
-        let for_pos = query_lower.find(" for ").ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Missing 'FOR' in DECLARE CURSOR",
-            )
-        })?;
-
-        let select_query = query[for_pos + 5..].trim().to_string();
-
-        // 使用 CursorManager 声明游标
-        self.cursor_manager
-            .declare_cursor(cursor_name, select_query)?;
-
-        results.completed(0, 0)
-    }
-
-    /// 处理 FETCH 命令
-    /// 语法: FETCH [FORWARD] [count] FROM cursor_name
-    fn handle_fetch<W: io::Read + io::Write>(
-        &mut self,
-        query: &str,
-        results: QueryResultWriter<'_, W>,
-    ) -> io::Result<()> {
-        let parts: Vec<&str> = query.split_whitespace().collect();
-
-        if parts.len() < 3 {
-            return results.error(
-                ErrorKind::ER_PARSE_ERROR,
-                b"Invalid FETCH syntax. Expected: FETCH [count] FROM cursor_name",
-            );
-        }
-
-        // 解析 fetch 数量和 cursor 名称
-        let (fetch_count, cursor_name) = if parts[1].to_lowercase() == "forward" {
-            // FETCH FORWARD count FROM cursor_name
-            let count = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(1);
-            let cursor_idx = parts
-                .iter()
-                .position(|&p| p.to_lowercase() == "from")
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing FROM"))?;
-            let cursor_name = parts
-                .get(cursor_idx + 1)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing cursor name"))?
-                .to_string();
-            (count, cursor_name)
-        } else if parts[1].parse::<usize>().is_ok() {
-            // FETCH count FROM cursor_name
-            let count = parts[1].parse::<usize>().unwrap();
-            let cursor_idx = parts
-                .iter()
-                .position(|&p| p.to_lowercase() == "from")
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing FROM"))?;
-            let cursor_name = parts
-                .get(cursor_idx + 1)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing cursor name"))?
-                .to_string();
-            (count, cursor_name)
+        let columns_str = if let Some(from_pos) = from_pos {
+            &query[select_start..from_pos]
         } else {
-            // FETCH FROM cursor_name (默认 1 行)
-            let cursor_idx = parts
-                .iter()
-                .position(|&p| p.to_lowercase() == "from")
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing FROM"))?;
-            let cursor_name = parts
-                .get(cursor_idx + 1)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing cursor name"))?
-                .to_string();
-            (1, cursor_name)
+            &query[select_start..]
         };
 
-        // 使用 CursorManager 获取数据
-        let batch_opt = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                self.cursor_manager
-                    .fetch_from_cursor(&cursor_name, fetch_count),
-            )
-        })?;
+        // 解析列名和别名
+        let mut fields = Vec::new();
+        let mut values = Vec::new();
 
-        match batch_opt {
-            Some(batch) => {
-                let schema = batch.schema();
-                write_query_result(results, &schema, &[batch])
-            }
-            None => {
-                log::info!("⚠️  Cursor '{}' exhausted", cursor_name);
-                results.completed(0, 0)
-            }
+        for column_def in columns_str.split(',') {
+            let column_def = column_def.trim();
+
+            // 提取别名 (AS alias 或最后一个词)
+            let alias = if let Some(as_pos) = column_def.to_uppercase().rfind(" AS ") {
+                column_def[as_pos + 4..].trim()
+            } else {
+                // 没有 AS,使用整个定义作为列名
+                column_def.split_whitespace().last().unwrap_or("value")
+            };
+
+            fields.push(Field::new(alias, DataType::Utf8, true));
+
+            // 返回合理的默认值
+            let default_value = match alias.to_lowercase().as_str() {
+                "auto_increment_increment" => "1",
+                "character_set_client"
+                | "character_set_connection"
+                | "character_set_results"
+                | "character_set_server" => "utf8mb4",
+                "collation_server" | "collation_connection" => "utf8mb4_general_ci",
+                "init_connect" => "",
+                "interactive_timeout" | "wait_timeout" => "28800",
+                "language" => "/usr/share/mysql/english/",
+                "license" => "MIT",
+                "lower_case_table_names" => "0",
+                "max_allowed_packet" => "67108864",
+                "net_write_timeout" => "60",
+                "performance_schema" => "0",
+                "query_cache_size" => "0",
+                "query_cache_type" => "OFF",
+                "sql_mode" => "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION",
+                "system_time_zone" => "UTC",
+                "time_zone" => "SYSTEM",
+                "transaction_isolation" | "tx_isolation" => "REPEATABLE-READ",
+                _ => "calm-0.1.0",
+            };
+
+            values.push(default_value);
         }
-    }
 
-    /// 处理 CLOSE CURSOR 命令
-    /// 语法: CLOSE cursor_name
-    fn handle_close_cursor<W: io::Read + io::Write>(
-        &mut self,
-        query: &str,
-        results: QueryResultWriter<'_, W>,
-    ) -> io::Result<()> {
-        let parts: Vec<&str> = query.split_whitespace().collect();
+        let schema = Arc::new(ArrowSchema::new(fields));
+        let columns: Vec<ArrayRef> = values
+            .iter()
+            .map(|v| Arc::new(StringArray::from(vec![*v])) as ArrayRef)
+            .collect();
 
-        if parts.len() < 2 {
-            return results.error(
-                ErrorKind::ER_PARSE_ERROR,
-                b"Invalid CLOSE syntax. Expected: CLOSE cursor_name",
-            );
-        }
+        let batch = RecordBatch::try_new(schema.clone(), columns).map_err(io::Error::other)?;
 
-        let cursor_name = parts[1];
-
-        match self.cursor_manager.close_cursor(cursor_name) {
-            Ok(_) => results.completed(0, 0),
-            Err(e) => results.error(ErrorKind::ER_UNKNOWN_ERROR, e.to_string().as_bytes()),
-        }
+        write_query_result(results, &schema, &[batch])
     }
 }
 
@@ -669,19 +597,15 @@ async fn execute_query<W: io::Read + io::Write>(
         result.batch.num_rows()
     );
 
-    // 检查是否有数据
-    if result.batch.num_rows() == 0 {
-        eprintln!("⚠️  [MySQL Query] No rows returned - query returned empty result");
-        return results.completed(0, 0);
-    }
-
+    // 即使返回 0 行,也要返回空结果集(而不是 completed)
+    // 否则 JDBC 会认为这不是一个 SELECT 查询
     eprintln!(
         "✅ [MySQL Query] Returning {} rows (matched {} docs)",
         result.batch.num_rows(),
         result.matched_docs
     );
 
-    // 返回单个 batch
+    // 返回结果集 - write_query_result 内部会实现背压
     let schema = result.batch.schema();
     write_query_result(results, &schema, &[result.batch])
 }
@@ -1015,17 +939,48 @@ fn write_query_result<W: io::Read + io::Write>(
 
     let mut row_writer = results.start(&columns)?;
 
+    const FLUSH_INTERVAL: usize = 1000; // 每 1000 行 flush 一次,实现背压
+    let mut rows_written = 0;
+
     for batch in batches {
         for row_idx in 0..batch.num_rows() {
+            // 写入一行的所有列
             for col_idx in 0..batch.num_columns() {
                 let array = batch.column(col_idx);
                 let value = format_arrow_value(array, row_idx);
-                row_writer.write_col(value)?;
+
+                // 检查写入是否成功 - 客户端断开会返回错误
+                if let Err(e) = row_writer.write_col(value) {
+                    eprintln!("⚠️  [MySQL] Client disconnected or write failed: {}", e);
+                    return Err(e);
+                }
             }
-            row_writer.end_row()?;
+
+            // 结束当前行
+            if let Err(e) = row_writer.end_row() {
+                eprintln!(
+                    "⚠️  [MySQL] Client disconnected at row {}: {}",
+                    rows_written, e
+                );
+                return Err(e);
+            }
+
+            rows_written += 1;
+
+            // 每 FLUSH_INTERVAL 行强制 flush,实现 TCP 背压
+            // 如果客户端消费慢,这里会阻塞
+            if rows_written % FLUSH_INTERVAL == 0 {
+                // msql_srv 的 RowWriter 没有 flush 方法,但 end_row 会写入
+                // TCP socket 会自动实现背压
+                eprintln!(
+                    "📤 [MySQL] Sent {} rows (may block if client is slow)",
+                    rows_written
+                );
+            }
         }
     }
 
+    eprintln!("✅ [MySQL] Finished sending {} rows", rows_written);
     row_writer.finish()
 }
 

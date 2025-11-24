@@ -26,6 +26,9 @@ pub enum QueryType {
     GeneralAggregation(AggregationInfo),
 
     // ===== 非聚合查询 =====
+    /// ORDER BY _nature - 元数据驱动的自然顺序扫描（支持深度分页）
+    NaturalOrder(NaturalOrderInfo),
+
     /// 有 ORDER BY + LIMIT - 并行查询 + TopK 合并
     ParallelSortLimit(SortLimitInfo),
 
@@ -40,6 +43,16 @@ pub enum QueryType {
 }
 
 // ===== 聚合查询相关结构 =====
+
+/// 自然顺序查询信息
+#[derive(Debug, Clone, PartialEq)]
+pub struct NaturalOrderInfo {
+    pub limit: usize,
+    pub offset: Option<usize>,
+    pub has_where_filter: bool,
+    /// WHERE 条件的 SQL 文本（如果有）
+    pub where_clause: Option<String>,
+}
 
 /// COUNT(*) 无 GROUP BY 信息
 #[derive(Debug, Clone, PartialEq)]
@@ -128,6 +141,12 @@ pub struct ExecutionHints {
 
     /// 是否是 SELECT *
     pub is_select_star: bool,
+
+    /// 指定的 partition (如果 WHERE 条件包含 _partition = 'xxx')
+    pub target_partition: Option<String>,
+
+    /// 指定的 segment (如果 WHERE 条件包含 _segment = 'xxx')
+    pub target_segment: Option<String>,
 }
 
 /// WHERE 条件信息
@@ -197,15 +216,45 @@ pub fn analyze_query(statement: Statement) -> Option<QueryPlan> {
     });
     let has_where = execution_hints.has_where;
 
-    let query_type = match (has_order_by, has_limit) {
+    // 🚀 检查是否是 ORDER BY _nature
+    let is_natural_order = query.order_by.as_ref().map_or(false, |ob| {
+        if let datafusion::sql::sqlparser::ast::OrderByKind::Expressions(exprs) = &ob.kind {
+            exprs.iter().any(|expr| {
+                if let Expr::Identifier(ident) = &expr.expr {
+                    ident.value == "_nature"
+                } else {
+                    false
+                }
+            })
+        } else {
+            false
+        }
+    });
+
+    let query_type = match (has_order_by, has_limit, is_natural_order) {
+        // ORDER BY _nature -> 自然顺序查询（深度分页优化）
+        (true, _, true) => {
+            let (limit, offset) =
+                extract_limit_offset_from_ast(&query).unwrap_or((usize::MAX, None));
+
+            // 提取 WHERE 条件的 SQL 文本
+            let where_clause = extract_where_clause_sql(&query);
+
+            QueryType::NaturalOrder(NaturalOrderInfo {
+                limit,
+                offset,
+                has_where_filter: has_where,
+                where_clause,
+            })
+        }
         // ORDER BY + LIMIT -> 并行 TopK
-        (true, true) => {
+        (true, true, false) => {
             let mut sort_limit_info = analyze_sort_limit_from_ast(&query, &table_name)?;
             sort_limit_info.has_where_filter = has_where;
             QueryType::ParallelSortLimit(sort_limit_info)
         }
         // 只有 LIMIT -> 串行早停
-        (false, true) => {
+        (false, true, _) => {
             let (limit, offset) = extract_limit_offset_from_ast(&query)?;
             QueryType::SerialLimit(PureLimitInfo {
                 limit,
@@ -214,7 +263,7 @@ pub fn analyze_query(statement: Statement) -> Option<QueryPlan> {
             })
         }
         // 只有 ORDER BY -> 并行流式
-        (true, false) => {
+        (true, false, false) => {
             let sort_fields = query.order_by.as_ref().and_then(|ob| match &ob.kind {
                 datafusion::sql::sqlparser::ast::OrderByKind::Expressions(exprs) => {
                     extract_sort_fields_from_ast(exprs)
@@ -227,7 +276,7 @@ pub fn analyze_query(statement: Statement) -> Option<QueryPlan> {
             })
         }
         // 都没有 -> 串行全表扫描
-        (false, false) => QueryType::SerialFullScan,
+        (false, false, _) => QueryType::SerialFullScan,
     };
 
     Some(QueryPlan {
@@ -249,16 +298,21 @@ fn analyze_execution_hints(query: &Query) -> ExecutionHints {
                 where_conditions: vec![],
                 projection_fields: vec![],
                 is_select_star: false,
+                target_partition: None,
+                target_segment: None,
             }
         }
     };
 
     // 分析 WHERE 条件
-    let (has_where, where_conditions) = if let Some(selection) = &select.selection {
-        (true, extract_where_conditions(selection))
-    } else {
-        (false, vec![])
-    };
+    let (has_where, where_conditions, target_partition, target_segment) =
+        if let Some(selection) = &select.selection {
+            let conditions = extract_where_conditions(selection);
+            let (partition, segment) = extract_partition_segment_hints(selection);
+            (true, conditions, partition, segment)
+        } else {
+            (false, vec![], None, None)
+        };
 
     // 分析 SELECT 字段
     let mut projection_fields = Vec::new();
@@ -288,7 +342,22 @@ fn analyze_execution_hints(query: &Query) -> ExecutionHints {
         where_conditions,
         projection_fields,
         is_select_star,
+        target_partition,
+        target_segment,
     }
+}
+
+/// 从 Query 中提取 WHERE 条件的 SQL 文本
+fn extract_where_clause_sql(query: &datafusion::sql::sqlparser::ast::Query) -> Option<String> {
+    use datafusion::sql::sqlparser::ast::SetExpr;
+
+    if let SetExpr::Select(select) = query.body.as_ref() {
+        if let Some(selection) = &select.selection {
+            // 将 WHERE 表达式转换回 SQL 文本
+            return Some(format!("{}", selection));
+        }
+    }
+    None
 }
 
 /// 从 WHERE 表达式中提取条件信息
@@ -365,6 +434,62 @@ fn extract_field_name_from_expr(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Identifier(ident) => Some(ident.to_string().to_lowercase()),
         Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.to_string().to_lowercase()),
+        _ => None,
+    }
+}
+
+/// 从 WHERE 表达式中提取 _partition 和 _segment 的值
+/// 例如: WHERE _partition = '16_xxx' AND _segment = '0-575880'
+fn extract_partition_segment_hints(expr: &Expr) -> (Option<String>, Option<String>) {
+    let mut partition = None;
+    let mut segment = None;
+
+    match expr {
+        Expr::BinaryOp { left, op, right } => {
+            use datafusion::sql::sqlparser::ast::BinaryOperator;
+
+            // 处理等值条件: field = value
+            if matches!(op, BinaryOperator::Eq) {
+                if let Some(field_name) = extract_field_name_from_expr(left) {
+                    if field_name == "_partition" {
+                        // 提取 partition 值
+                        if let Some(value) = extract_string_value_from_expr(right) {
+                            partition = Some(value);
+                        }
+                    } else if field_name == "_segment" {
+                        // 提取 segment 值
+                        if let Some(value) = extract_string_value_from_expr(right) {
+                            segment = Some(value);
+                        }
+                    }
+                }
+            }
+
+            // 递归处理 AND 条件
+            if matches!(op, BinaryOperator::And) {
+                let (left_partition, left_segment) = extract_partition_segment_hints(left);
+                let (right_partition, right_segment) = extract_partition_segment_hints(right);
+
+                partition = partition.or(left_partition).or(right_partition);
+                segment = segment.or(left_segment).or(right_segment);
+            }
+        }
+        _ => {}
+    }
+
+    (partition, segment)
+}
+
+/// 从表达式中提取字符串值
+fn extract_string_value_from_expr(expr: &Expr) -> Option<String> {
+    use datafusion::sql::sqlparser::ast::ValueWithSpan;
+
+    match expr {
+        Expr::Value(ValueWithSpan { value, .. }) => match value {
+            Value::SingleQuotedString(s) => Some(s.clone()),
+            Value::DoubleQuotedString(s) => Some(s.clone()),
+            _ => None,
+        },
         _ => None,
     }
 }

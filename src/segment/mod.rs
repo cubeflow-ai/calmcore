@@ -8,7 +8,7 @@ use crate::{
     schema::{field::FieldOption, Schema},
     segment::field_store::{
         BooleanField, F32Field, F64Field, I16Field, I32Field, I64Field, I8Field, KeywordField,
-        PkWriter, U16Field, U32Field, U32RecordBatchSerializer, U64Field, U8Field,
+        PkWriter, U16Field, U32Field, U64Field, U8Field,
     },
     utils::error::{CoreError, CoreResult},
 };
@@ -1354,12 +1354,6 @@ impl Segment {
                     RowDataStore::new_parquet(&parquet_path)?,
                     Some(segment_path.clone()),
                 )
-            } else if std::path::Path::new(&row_data_path).exists() {
-                println!("  Loading row_data from BTree: {}", row_data_path);
-                (
-                    RowDataStore::new_disk(&row_data_path, U32RecordBatchSerializer::default())?,
-                    Some(segment_path.clone()),
-                )
             } else {
                 println!("  No row_data found, creating empty store");
                 (RowDataStore::new_memory(32), Some(segment_path.clone()))
@@ -1463,8 +1457,8 @@ impl Segment {
     /// Get cloned IndexReaders from this segment
     /// Returns HashMap of field_name -> Box<dyn IndexReader>
     /// This is fast because InvertedIndex is clone-friendly (Arc internally)
-    pub fn get_index_readers(&self) -> ahash::HashMap<String, Box<dyn IndexReader>> {
-        use ahash::{HashMap, HashMapExt};
+    pub fn get_index_readers(&self) -> std::collections::HashMap<String, Box<dyn IndexReader>> {
+        use std::collections::HashMap;
 
         let fields = self.fields.read().unwrap();
         let mut readers = HashMap::new();
@@ -1651,9 +1645,9 @@ impl Segment {
         // Extract memory BTree from RowDataStore
         let memory_tree = match row_data {
             RowDataStore::Memory(tree) => tree,
-            RowDataStore::Disk(_) | RowDataStore::Parquet(_) => {
+            RowDataStore::Parquet(_) => {
                 return Err(CoreError::Internal(
-                    "Cannot persist disk row_data".to_string(),
+                    "Cannot persist parquet row_data".to_string(),
                 ));
             }
         };

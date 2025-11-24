@@ -1,12 +1,12 @@
 use std::{
     any::Any,
+    collections::HashMap,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
 
 use crate::segment::{IndexReader, RowDataStore};
-use ahash::HashMap;
 use datafusion::scalar::ScalarValue;
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
@@ -173,6 +173,353 @@ impl SegmentScanner {
         } else {
             0
         }
+    }
+
+    /// 带 skip 和 limit 的扫描（用于自然顺序查询）
+    ///
+    /// # 参数
+    /// - `filters`: WHERE 条件表达式列表
+    /// - `skip`: 跳过的行数（在 bitmap 中跳过）
+    /// - `limit`: 最多返回的行数
+    ///
+    /// # 核心优化
+    /// 通过 bitmap 直接跳过 skip 行，只读取 limit 行数据
+    ///
+    /// # 示例
+    /// ```
+    /// // segment 有 10000 行，skip=5000, limit=1000
+    /// // 1. 应用 filters 得到 bitmap
+    /// // 2. 在 bitmap 中跳过前 5000 个 doc_id
+    /// // 3. 读取接下来的 1000 个 doc_id
+    /// ```
+    /// 扫描 segment 数据，支持跳过和限制行数
+    ///
+    /// # 参数
+    /// - `filters`: WHERE 过滤条件
+    /// - `skip`: 跳过的物理行数（包括已删除的行）
+    /// - `limit`: 读取的物理行数上限
+    ///
+    /// # 返回
+    /// 返回过滤后的实际数据，行数可能少于 limit（因为删除或过滤）
+    pub(crate) fn scan_with_skip_and_limit(
+        &self,
+        filters: &[Expr],
+        skip: usize,
+        limit: usize,
+    ) -> crate::utils::error::CoreResult<RecordBatch> {
+        use crate::utils::error::CoreError;
+
+        let scan_start = std::time::Instant::now();
+
+        // 计算要读取的物理 doc_ids 范围
+        let start_doc_id = skip as u32;
+        let end_doc_id = (skip + limit).min(self.doc_count as usize) as u32;
+
+        if start_doc_id >= self.doc_count {
+            // 起始位置超出范围，返回空
+            return self.create_empty_batch();
+        }
+
+        // 生成物理 doc_ids
+        let gen_ids_start = std::time::Instant::now();
+        let physical_doc_ids: Vec<u32> = (start_doc_id..end_doc_id).collect();
+        log::debug!(
+            "    ⏱️  [scan] generate doc_ids: {:?}",
+            gen_ids_start.elapsed()
+        );
+
+        log::debug!(
+            "🔍 [SegmentScanner::scan_with_skip_and_limit] doc_count={}, skip={}, limit={}, reading docs [{}, {})",
+            self.doc_count,
+            skip,
+            limit,
+            start_doc_id,
+            end_doc_id
+        );
+
+        // 读取物理数据
+        let read_start = std::time::Instant::now();
+        let batch = self.read_docs_by_ids(&physical_doc_ids)?;
+        log::info!(
+            "    ⏱️  [scan] read_docs_by_ids ({}): {:?}",
+            physical_doc_ids.len(),
+            read_start.elapsed()
+        );
+
+        // 如果没有过滤条件，直接返回
+        if filters.is_empty() {
+            // 应用删除标记过滤
+            let filter_start = std::time::Instant::now();
+            let valid_bitmap = self.get_valid_docs_in_range(start_doc_id, end_doc_id);
+            if valid_bitmap.is_empty() {
+                return self.create_empty_batch();
+            }
+
+            // 过滤掉已删除的行
+            let result = self.filter_batch_by_bitmap(&batch, &valid_bitmap, start_doc_id);
+            log::debug!("    ⏱️  [scan] filter bitmap: {:?}", filter_start.elapsed());
+            log::info!(
+                "    ⏱️  [scan] TOTAL scan_with_skip_and_limit: {:?}",
+                scan_start.elapsed()
+            );
+            return result;
+        }
+
+        // 应用 WHERE 过滤条件
+        let result_bitmap = self
+            .apply_filters(filters)
+            .ok_or_else(|| CoreError::Internal("Failed to apply filters".to_string()))?;
+
+        // 只保留在当前范围内且满足条件的行
+        let mut filtered_bitmap = RoaringBitmap::new();
+        for doc_id in start_doc_id..end_doc_id {
+            if result_bitmap.contains(doc_id) {
+                filtered_bitmap.insert(doc_id);
+            }
+        }
+
+        log::debug!(
+            "📊 [SegmentScanner] Physical range: [{}, {}), after filter: {} rows",
+            start_doc_id,
+            end_doc_id,
+            filtered_bitmap.len()
+        );
+
+        if filtered_bitmap.is_empty() {
+            return self.create_empty_batch();
+        }
+
+        // 过滤 batch
+        self.filter_batch_by_bitmap(&batch, &filtered_bitmap, start_doc_id)
+    }
+
+    /// 获取指定范围内的有效文档（未删除）
+    fn get_valid_docs_in_range(&self, start: u32, end: u32) -> RoaringBitmap {
+        let mut valid = RoaringBitmap::new();
+        for doc_id in start..end {
+            if self.valid_docs.contains(doc_id) {
+                valid.insert(doc_id);
+            }
+        }
+        valid
+    }
+
+    /// 根据 bitmap 过滤 RecordBatch
+    fn filter_batch_by_bitmap(
+        &self,
+        batch: &RecordBatch,
+        bitmap: &RoaringBitmap,
+        base_doc_id: u32,
+    ) -> crate::utils::error::CoreResult<RecordBatch> {
+        use crate::utils::error::CoreError;
+        use datafusion::arrow::array::UInt32Array;
+        use datafusion::arrow::compute::take;
+
+        // 将 bitmap 中的 doc_id 转换为 batch 内的相对索引
+        let indices: Vec<u32> = bitmap.iter().map(|doc_id| doc_id - base_doc_id).collect();
+
+        if indices.is_empty() {
+            return self.create_empty_batch();
+        }
+
+        let indices_array = UInt32Array::from(indices);
+        let mut columns = Vec::new();
+
+        for i in 0..self.schema.fields().len() {
+            let column = batch.column(i);
+            let taken = take(column, &indices_array, None)
+                .map_err(|e| CoreError::Internal(format!("Failed to take rows: {}", e)))?;
+            columns.push(taken);
+        }
+
+        RecordBatch::try_new(self.schema.clone(), columns)
+            .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))
+    }
+
+    /// 创建空的 RecordBatch
+    fn create_empty_batch(&self) -> crate::utils::error::CoreResult<RecordBatch> {
+        use crate::utils::error::CoreError;
+        use datafusion::arrow::array::new_empty_array;
+
+        let empty_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = self
+            .schema
+            .fields()
+            .iter()
+            .map(|field| new_empty_array(field.data_type()))
+            .collect();
+
+        RecordBatch::try_new(self.schema.clone(), empty_columns)
+            .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)))
+    }
+
+    /// 根据 doc_ids 读取数据
+    fn read_docs_by_ids(&self, doc_ids: &[u32]) -> crate::utils::error::CoreResult<RecordBatch> {
+        use crate::utils::error::CoreError;
+
+        let read_start = std::time::Instant::now();
+
+        if doc_ids.is_empty() {
+            return self.create_empty_batch();
+        }
+
+        log::debug!(
+            "📖 [read_docs_by_ids] Requested {} doc_ids: first={}, last={}, doc_count={}",
+            doc_ids.len(),
+            doc_ids.first().unwrap(),
+            doc_ids.last().unwrap(),
+            self.doc_count
+        );
+
+        // 查找 doc_ids 对应的 batch_key
+        let lookup_start = std::time::Instant::now();
+        let batch_doc_map = self.raw_data.batch_lookup_doc_ids(doc_ids);
+        log::debug!(
+            "      ⏱️  [read_docs] batch_lookup: {:?}",
+            lookup_start.elapsed()
+        );
+
+        if batch_doc_map.is_empty() {
+            log::warn!("⚠️  batch_lookup_doc_ids returned empty");
+            return self.create_empty_batch();
+        }
+
+        log::debug!(
+            "📋 [read_docs_by_ids] Found {} batches: keys={:?}",
+            batch_doc_map.len(),
+            batch_doc_map.keys().collect::<Vec<_>>()
+        );
+
+        // 🚀 性能优化:
+        // - 少量 batches (≤5): 批量读取,一次打开文件 → 快
+        // - 大量 batches (>5): 逐个读取,避免内存占用过大
+        let batch_read_start = std::time::Instant::now();
+        let source_batches = if batch_doc_map.len() <= 5 {
+            let batch_keys: Vec<u32> = batch_doc_map.keys().copied().collect();
+            let result = self.raw_data.get_batch_with_projection(&batch_keys, None);
+            log::info!(
+                "      ⏱️  [read_docs] batch_read ({} RowGroups): {:?}",
+                batch_keys.len(),
+                batch_read_start.elapsed()
+            );
+            result
+        } else {
+            HashMap::new() // 空,后面逐个读取
+        };
+
+        // 读取各个 batch 并合并
+        let merge_start = std::time::Instant::now();
+        let mut batches = Vec::new();
+        for (batch_key, doc_ids_in_batch) in batch_doc_map {
+            log::debug!(
+                "📦 Processing batch_key={}, contains {} doc_ids (first={}, last={})",
+                batch_key,
+                doc_ids_in_batch.len(),
+                doc_ids_in_batch.first().unwrap(),
+                doc_ids_in_batch.last().unwrap()
+            );
+
+            // 尝试从批量读取的结果中获取,否则单独读取
+            let batch = if let Some(b) = source_batches.get(&batch_key) {
+                b.clone()
+            } else {
+                match self.raw_data.get(&batch_key) {
+                    Some(b) => b,
+                    None => {
+                        log::warn!("⚠️  Batch not found for key={}", batch_key);
+                        continue;
+                    }
+                }
+            };
+
+            {
+                // 从 batch 中提取需要的行
+                // batch_key 是 batch 的起始 doc_id，需要转换为相对索引
+                let batch_size = batch.num_rows() as u32;
+
+                log::debug!(
+                    "📦 [read_docs_by_ids] batch_key={}, batch_size={}, doc_ids range=[{}, {}]",
+                    batch_key,
+                    batch_size,
+                    doc_ids_in_batch.first().unwrap(),
+                    doc_ids_in_batch.last().unwrap()
+                );
+
+                let indices: Vec<u32> = doc_ids_in_batch
+                    .iter()
+                    .filter_map(|doc_id| {
+                        let relative_idx = doc_id - batch_key;
+                        // 边界检查：确保索引在 batch 范围内
+                        if relative_idx < batch_size {
+                            Some(relative_idx)
+                        } else {
+                            log::error!(
+                                "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
+                                doc_id, batch_key, relative_idx, batch_size
+                            );
+                            None
+                        }
+                    })
+                    .collect();
+
+                if indices.is_empty() {
+                    log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
+                    continue;
+                }
+
+                log::trace!(
+                    "📖 [read_docs_by_ids] batch_key={}, batch_rows={}, reading {} indices (first few: {:?})",
+                    batch_key,
+                    batch_size,
+                    indices.len(),
+                    &indices[..indices.len().min(5)]
+                );
+
+                // 使用 arrow 的 take 操作提取指定行
+                use datafusion::arrow::array::UInt32Array;
+                use datafusion::arrow::compute::take;
+
+                let indices_array = UInt32Array::from(indices);
+                let mut columns = Vec::new();
+
+                for i in 0..self.schema.fields().len() {
+                    let column = batch.column(i);
+                    let taken = take(column, &indices_array, None).map_err(|e| {
+                        CoreError::Internal(format!(
+                            "Failed to take rows from batch {} (size={}): {}",
+                            batch_key, batch_size, e
+                        ))
+                    })?;
+                    columns.push(taken);
+                }
+
+                let selected_batch = RecordBatch::try_new(self.schema.clone(), columns)
+                    .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))?;
+                batches.push(selected_batch);
+            }
+        }
+
+        log::debug!(
+            "      ⏱️  [read_docs] merge & extract: {:?}",
+            merge_start.elapsed()
+        );
+
+        log::info!(
+            "      ⏱️  [read_docs] TOTAL read_docs_by_ids: {:?}",
+            read_start.elapsed()
+        );
+
+        if batches.is_empty() {
+            return self.create_empty_batch();
+        }
+
+        if batches.len() == 1 {
+            return Ok(batches.into_iter().next().unwrap());
+        }
+
+        // 合并所有 batches
+        use datafusion::arrow::compute::concat_batches;
+        concat_batches(&self.schema, &batches)
+            .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
     }
 
     /// 判断是否应该使用有序扫描

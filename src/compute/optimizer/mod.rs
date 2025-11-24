@@ -8,6 +8,7 @@ mod top_k_merger;
 
 pub use plan_analyzer::{
     analyze_query, AggregationInfo, ConditionType, CountGroupByInfo, CountOnlyInfo, ExecutionHints,
-    PureLimitInfo, QueryPlan, QueryType, SortLimitInfo, SortStreamingInfo, WhereCondition,
+    NaturalOrderInfo, PureLimitInfo, QueryPlan, QueryType, SortLimitInfo, SortStreamingInfo,
+    WhereCondition,
 };
 pub use top_k_merger::TopKMerger;

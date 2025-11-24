@@ -4,7 +4,7 @@ use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::*;
 
-use crate::compute::optimizer::{analyze_query, QueryType};
+use crate::compute::optimizer::{analyze_query, ExecutionHints, QueryType};
 use crate::compute::sql_normalizer::SqlNormalizer;
 use crate::compute::PartitionTableProvider;
 use crate::engine::Engine;
@@ -94,6 +94,13 @@ impl DistributedExecutor {
                     }
 
                     // ===== 非聚合查询路径 =====
+                    QueryType::NaturalOrder(info) => {
+                        log::info!(
+                            "🌿 [Natural Order] ORDER BY _nature - metadata-driven deep pagination"
+                        );
+                        self.execute_natural_order(&normalized_sql, &plan.table_name, info)
+                            .await
+                    }
                     QueryType::ParallelSortLimit(info) => {
                         log::info!("🔀 [Parallel] ORDER BY + LIMIT");
                         self.execute_parallel_sort_limit(&normalized_sql, &plan.table_name, info)
@@ -115,8 +122,12 @@ impl DistributedExecutor {
                     }
                     QueryType::SerialFullScan => {
                         log::info!("📄 [Serial] Full scan in natural order");
-                        self.execute_serial_full_scan(&normalized_sql, &plan.table_name)
-                            .await
+                        self.execute_serial_full_scan(
+                            &normalized_sql,
+                            &plan.table_name,
+                            &plan.execution_hints,
+                        )
+                        .await
                     }
                 }
             }
@@ -1208,6 +1219,40 @@ impl DistributedExecutor {
         })
     }
 
+    /// 执行自然顺序查询（ORDER BY _nature）
+    /// 使用元数据驱动的深度分页，避免读取不必要的数据
+    async fn execute_natural_order(
+        &self,
+        sql: &str,
+        table_name: &str,
+        info: crate::compute::optimizer::NaturalOrderInfo,
+    ) -> CoreResult<QueryResult> {
+        use crate::compute::executor::natural_order_executor::NaturalOrderExecutor;
+
+        let executor = NaturalOrderExecutor::new(self.engine.clone());
+
+        let offset = info.offset.unwrap_or(0);
+        let limit = info.limit;
+
+        log::info!(
+            "🌿 [Natural Order] table={}, offset={}, limit={}, has_where={}, where_clause={:?}",
+            table_name,
+            offset,
+            limit,
+            info.has_where_filter,
+            info.where_clause
+        );
+
+        let result = executor
+            .execute_natural_order(sql, table_name, limit, offset, info.where_clause.as_deref())
+            .await?;
+
+        // 将 natural_order_executor 的 QueryResult 转换为 distributed 的 QueryResult
+        Ok(QueryResult {
+            batch: result.batch,
+            matched_docs: result.matched_docs,
+        })
+    }
     /// 执行并行排序流式查询（ORDER BY 无 LIMIT）
     async fn execute_parallel_sort_streaming(
         &self,
@@ -1224,16 +1269,104 @@ impl DistributedExecutor {
         &self,
         sql: &str,
         table_name: &str,
+        hints: &ExecutionHints,
     ) -> CoreResult<QueryResult> {
-        // 串行扫描所有分区，按自然顺序返回
-        // 直接从 engine 获取所有 partition 列表
+        // 🔧 从SQL中移除 _partition 和 _segment 条件（这些是虚拟字段，实际表中不存在）
+        let cleaned_sql = self.remove_virtual_columns_from_sql(sql)?;
+
+        // 🔧 提取 LIMIT/OFFSET 信息用于下推
+        let (limit_hint, offset_value) = self.extract_limit_offset_from_sql(sql);
+
+        log::info!("🔧 [execute_serial_full_scan] Original SQL: {}", sql);
+        log::info!("🔧 [execute_serial_full_scan] Cleaned SQL: {}", cleaned_sql);
+        log::info!(
+            "🔧 [execute_serial_full_scan] LIMIT hint: {:?}, OFFSET: {:?}",
+            limit_hint,
+            offset_value
+        );
+
+        // 检查是否指定了 partition/segment
+        if let Some(ref partition_name) = hints.target_partition {
+            log::info!(
+                "🎯 [Partition Filter] Querying specific partition: {}",
+                partition_name
+            );
+
+            // 检查是否还指定了 segment
+            if let Some(ref segment_name) = hints.target_segment {
+                log::info!(
+                    "🎯 [Segment Filter] Querying specific segment: {}",
+                    segment_name
+                );
+                // TODO: 实现单个 segment 查询
+                // 目前先查询整个 partition
+            }
+
+            // 🚀 计算需要从partition拉取的行数：OFFSET + LIMIT
+            let fetch_limit = if let Some(limit) = limit_hint {
+                Some(offset_value.unwrap_or(0) + limit)
+            } else {
+                None
+            };
+
+            // 只查询指定的 partition
+            let batches = self
+                .execute_on_partition(table_name, partition_name, &cleaned_sql, None, fetch_limit)
+                .await?;
+
+            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            let matched_docs = total_rows;
+
+            let final_batch = if batches.is_empty() {
+                self.create_empty_batch_from_sql(sql, table_name).await?
+            } else {
+                // 合并所有batches
+                let merged = self.concat_batches(batches)?;
+
+                // 🔧 应用 OFFSET 和 LIMIT
+                if let Some(offset) = offset_value {
+                    if offset >= merged.num_rows() {
+                        // offset超出范围，返回空结果
+                        self.create_empty_batch_with_schema(merged.schema())?
+                    } else if let Some(limit) = limit_hint {
+                        // 有offset和limit
+                        let remaining = merged.num_rows() - offset;
+                        merged.slice(offset, remaining.min(limit))
+                    } else {
+                        // 只有offset
+                        merged.slice(offset, merged.num_rows() - offset)
+                    }
+                } else if let Some(limit) = limit_hint {
+                    // 只有limit
+                    merged.slice(0, limit.min(merged.num_rows()))
+                } else {
+                    // 无offset和limit
+                    merged
+                }
+            };
+
+            return Ok(QueryResult {
+                batch: final_batch,
+                matched_docs,
+            });
+        }
+
+        // 没有指定 partition,执行全表扫描
+        log::info!("📄 [Full Scan] Scanning all partitions");
         let partition_names = self.engine.list_partitions(table_name).await;
+
+        // 🚀 计算需要从每个partition拉取的行数
+        let fetch_limit = if let Some(limit) = limit_hint {
+            Some(offset_value.unwrap_or(0) + limit)
+        } else {
+            None
+        };
 
         let mut all_batches = Vec::new();
 
         for partition_name in &partition_names {
             match self
-                .execute_on_partition(table_name, partition_name, sql, None, None)
+                .execute_on_partition(table_name, partition_name, &cleaned_sql, None, fetch_limit)
                 .await
             {
                 Ok(batches) => all_batches.extend(batches),
@@ -1248,7 +1381,23 @@ impl DistributedExecutor {
         let final_batch = if all_batches.is_empty() {
             self.create_empty_batch_from_sql(sql, table_name).await?
         } else {
-            self.concat_batches(all_batches)?
+            let merged = self.concat_batches(all_batches)?;
+
+            // 🔧 应用 OFFSET 和 LIMIT
+            if let Some(offset) = offset_value {
+                if offset >= merged.num_rows() {
+                    self.create_empty_batch_with_schema(merged.schema())?
+                } else if let Some(limit) = limit_hint {
+                    let remaining = merged.num_rows() - offset;
+                    merged.slice(offset, remaining.min(limit))
+                } else {
+                    merged.slice(offset, merged.num_rows() - offset)
+                }
+            } else if let Some(limit) = limit_hint {
+                merged.slice(0, limit.min(merged.num_rows()))
+            } else {
+                merged
+            }
         };
 
         Ok(QueryResult {
@@ -1261,5 +1410,151 @@ impl DistributedExecutor {
     async fn execute_with_datafusion_fallback(&self, sql: &str) -> CoreResult<QueryResult> {
         // 使用通用的 query builder 执行
         self.execute_query(sql, None, None).await
+    }
+
+    /// 从SQL中移除 _partition 和 _segment 虚拟字段
+    /// 这些字段只用于路由，不是实际表字段
+    fn remove_virtual_columns_from_sql(&self, sql: &str) -> CoreResult<String> {
+        use datafusion::sql::sqlparser::ast::{BinaryOperator, Expr, SetExpr, Statement, Value};
+        use datafusion::sql::sqlparser::dialect::MySqlDialect;
+        use datafusion::sql::sqlparser::parser::Parser;
+
+        let dialect = MySqlDialect {};
+        let mut statements = Parser::parse_sql(&dialect, sql)
+            .map_err(|e| CoreError::InvalidParam(format!("Failed to parse SQL: {}", e)))?;
+
+        if statements.is_empty() {
+            return Ok(sql.to_string());
+        }
+
+        if let Statement::Query(ref mut query) = statements[0] {
+            if let SetExpr::Select(ref mut select) = *query.body {
+                if let Some(ref mut selection) = select.selection {
+                    // 递归移除 _partition 和 _segment 条件
+                    *selection = self.filter_virtual_columns_from_expr(selection.clone());
+
+                    // 如果WHERE条件被完全移除（只剩下虚拟字段），移除整个WHERE子句
+                    if Self::is_true_expr(selection) {
+                        select.selection = None;
+                    }
+                }
+            }
+        }
+
+        Ok(statements[0].to_string())
+    }
+
+    /// 递归过滤表达式中的虚拟字段条件
+    fn filter_virtual_columns_from_expr(
+        &self,
+        expr: datafusion::sql::sqlparser::ast::Expr,
+    ) -> datafusion::sql::sqlparser::ast::Expr {
+        use datafusion::sql::sqlparser::ast::{BinaryOperator, Expr, Value, ValueWithSpan};
+
+        match expr {
+            Expr::BinaryOp { left, op, right } => {
+                // 检查是否是虚拟字段条件
+                if matches!(op, BinaryOperator::Eq) {
+                    if let Expr::Identifier(ref ident) = *left {
+                        let field_name = ident.value.as_str();
+                        if field_name == "_partition" || field_name == "_segment" {
+                            // 返回 TRUE，这样在 AND 连接中会被忽略
+                            return Expr::Value(ValueWithSpan {
+                                value: Value::Boolean(true),
+                                span: datafusion::sql::sqlparser::tokenizer::Span::empty(),
+                            });
+                        }
+                    }
+                }
+
+                // 如果是 AND/OR，递归处理
+                match op {
+                    BinaryOperator::And => {
+                        let new_left = self.filter_virtual_columns_from_expr(*left);
+                        let new_right = self.filter_virtual_columns_from_expr(*right);
+
+                        // 优化：如果一边是TRUE，返回另一边
+                        if Self::is_true_expr(&new_left) {
+                            return new_right;
+                        }
+                        if Self::is_true_expr(&new_right) {
+                            return new_left;
+                        }
+
+                        Expr::BinaryOp {
+                            left: Box::new(new_left),
+                            op,
+                            right: Box::new(new_right),
+                        }
+                    }
+                    BinaryOperator::Or => {
+                        let new_left = self.filter_virtual_columns_from_expr(*left);
+                        let new_right = self.filter_virtual_columns_from_expr(*right);
+
+                        Expr::BinaryOp {
+                            left: Box::new(new_left),
+                            op,
+                            right: Box::new(new_right),
+                        }
+                    }
+                    _ => Expr::BinaryOp { left, op, right },
+                }
+            }
+            _ => expr,
+        }
+    }
+
+    /// 检查表达式是否是 TRUE
+    fn is_true_expr(expr: &datafusion::sql::sqlparser::ast::Expr) -> bool {
+        use datafusion::sql::sqlparser::ast::{Expr, Value, ValueWithSpan};
+        matches!(
+            expr,
+            Expr::Value(ValueWithSpan {
+                value: Value::Boolean(true),
+                ..
+            })
+        )
+    }
+
+    /// 从SQL中提取 LIMIT 和 OFFSET
+    fn extract_limit_offset_from_sql(&self, sql: &str) -> (Option<usize>, Option<usize>) {
+        // 使用简单的字符串解析，更可靠
+        let sql_lower = sql.to_lowercase();
+
+        let mut limit = None;
+        let mut offset = None;
+
+        // 查找 LIMIT 子句
+        if let Some(limit_pos) = sql_lower.find("limit") {
+            let after_limit = &sql[limit_pos + 5..].trim();
+
+            // LIMIT N OFFSET M 或 LIMIT M, N (MySQL 风格)
+            if let Some(comma_pos) = after_limit.find(',') {
+                // LIMIT OFFSET, LIMIT 形式
+                let offset_str = after_limit[..comma_pos].trim();
+                let limit_str = after_limit[comma_pos + 1..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+
+                offset = offset_str.parse().ok();
+                limit = limit_str.parse().ok();
+            } else {
+                // LIMIT N [OFFSET M] 形式
+                let parts: Vec<&str> = after_limit.split_whitespace().collect();
+                if !parts.is_empty() {
+                    limit = parts[0].parse().ok();
+                }
+
+                // 查找 OFFSET
+                if let Some(offset_idx) = parts.iter().position(|&s| s == "offset") {
+                    if offset_idx + 1 < parts.len() {
+                        offset = parts[offset_idx + 1].parse().ok();
+                    }
+                }
+            }
+        }
+
+        (limit, offset)
     }
 }
