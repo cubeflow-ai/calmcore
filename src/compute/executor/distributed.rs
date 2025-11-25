@@ -844,10 +844,7 @@ impl DistributedExecutor {
                     format!("{} {}", before, after)
                 };
 
-                log::debug!(
-                    "Removed ORDER BY _nature, new SQL: {}",
-                    empty_sql
-                );
+                log::debug!("Removed ORDER BY _nature, new SQL: {}", empty_sql);
             }
         }
 
@@ -1210,6 +1207,28 @@ impl DistributedExecutor {
         table_name: &str,
         info: crate::compute::optimizer::PureLimitInfo,
     ) -> CoreResult<QueryResult> {
+        // 🎯 区分有无 WHERE 条件
+        if info.has_where_filter {
+            // 有 WHERE：使用并行 segment 扫描（通过 DataFusion）
+            log::info!("🔀 [SerialLimit with WHERE] Using parallel segment scan");
+            return self
+                .execute_serial_limit_with_where(sql, table_name, &info)
+                .await;
+        }
+
+        // 无 WHERE：串行扫描 segments，提前终止
+        log::info!("➡️  [SerialLimit no WHERE] Using serial segment scan with early termination");
+        self.execute_serial_limit_no_where(table_name, &info).await
+    }
+
+    /// 执行串行 LIMIT（有 WHERE 条件）
+    /// Partition 串行，Segment 并行（通过 DataFusion）
+    async fn execute_serial_limit_with_where(
+        &self,
+        sql: &str,
+        table_name: &str,
+        info: &crate::compute::optimizer::PureLimitInfo,
+    ) -> CoreResult<QueryResult> {
         // 直接从 engine 获取所有 partition 列表
         let partition_names = self.engine.list_partitions(table_name).await;
 
@@ -1279,6 +1298,157 @@ impl DistributedExecutor {
             batch: final_batch,
             matched_docs,
         })
+    }
+
+    /// 执行串行 LIMIT（无 WHERE 条件）
+    /// Partition 串行，Segment 串行，直接读取原始数据
+    async fn execute_serial_limit_no_where(
+        &self,
+        table_name: &str,
+        info: &crate::compute::optimizer::PureLimitInfo,
+    ) -> CoreResult<QueryResult> {
+        let partition_names = self.engine.list_partitions(table_name).await;
+
+        let mut all_batches = Vec::new();
+        let mut collected_rows = 0;
+        let target_rows = info.offset.unwrap_or(0) + info.limit;
+
+        // 串行遍历 Partitions
+        'partition_loop: for partition_name in &partition_names {
+            let partition = self
+                .engine
+                .get_partition(table_name, partition_name)
+                .await
+                .ok_or_else(|| {
+                    CoreError::NotExisted(format!("Partition {} not found", partition_name))
+                })?;
+
+            let schema = partition.arrow_schema.clone();
+
+            // 串行遍历 Segments（current + frozen）
+            // 1. 先扫描 current segment
+            {
+                let segment = partition.get_current_segment();
+                if segment.doc_count() > 0 {
+                    let remaining = target_rows - collected_rows;
+                    if let Some(batch) = self.read_segment_data(&segment, &schema, remaining)? {
+                        collected_rows += batch.num_rows();
+                        all_batches.push(batch);
+
+                        if collected_rows >= target_rows {
+                            log::info!(
+                                "✅ Early termination at current segment: collected {} >= target {}",
+                                collected_rows,
+                                target_rows
+                            );
+                            break 'partition_loop;
+                        }
+                    }
+                }
+            }
+
+            // 2. 再扫描 frozen segments
+            {
+                let frozen_segments = partition.get_frozen_segments();
+                for (_seg_id, segment) in frozen_segments.iter() {
+                    if collected_rows >= target_rows {
+                        break 'partition_loop;
+                    }
+
+                    let remaining = target_rows - collected_rows;
+                    if let Some(batch) = self.read_segment_data(segment, &schema, remaining)? {
+                        collected_rows += batch.num_rows();
+                        all_batches.push(batch);
+
+                        if collected_rows >= target_rows {
+                            log::info!(
+                                "✅ Early termination at frozen segment: collected {} >= target {}",
+                                collected_rows,
+                                target_rows
+                            );
+                            break 'partition_loop;
+                        }
+                    }
+                }
+            }
+        }
+
+        let matched_docs = collected_rows;
+
+        // 应用 OFFSET
+        let final_batch = if all_batches.is_empty() {
+            // 创建空 batch
+            self.create_empty_batch_with_schema(
+                self.engine
+                    .get_partition(table_name, &partition_names[0])
+                    .await
+                    .ok_or_else(|| CoreError::NotExisted("No partitions".to_string()))?
+                    .arrow_schema
+                    .clone(),
+            )?
+        } else {
+            let merged = self.concat_batches(all_batches)?;
+            if let Some(offset) = info.offset {
+                if offset > 0 && merged.num_rows() > offset {
+                    merged.slice(offset, (merged.num_rows() - offset).min(info.limit))
+                } else if offset >= merged.num_rows() {
+                    self.create_empty_batch_with_schema(merged.schema())?
+                } else {
+                    merged.slice(0, info.limit.min(merged.num_rows()))
+                }
+            } else {
+                merged.slice(0, info.limit.min(merged.num_rows()))
+            }
+        };
+
+        Ok(QueryResult {
+            batch: final_batch,
+            matched_docs,
+        })
+    }
+
+    /// 从 segment 读取指定数量的原始数据（无过滤）
+    fn read_segment_data(
+        &self,
+        segment: &crate::segment::Segment,
+        schema: &Arc<datafusion::arrow::datatypes::Schema>,
+        limit: usize,
+    ) -> CoreResult<Option<RecordBatch>> {
+        use datafusion::arrow::array::ArrayRef;
+
+        let row_data = segment.get_row_data();
+        let deleted = segment.get_deleted();
+
+        // 计算有效文档
+        let mut valid_docs = roaring::RoaringBitmap::new();
+        valid_docs.insert_range(0..segment.doc_count());
+        valid_docs -= &deleted;
+
+        if valid_docs.is_empty() {
+            return Ok(None);
+        }
+
+        // 取前 limit 个有效文档
+        let doc_ids: Vec<u32> = valid_docs.iter().take(limit).collect();
+
+        if doc_ids.is_empty() {
+            return Ok(None);
+        }
+
+        // 读取原始数据
+        let mut columns: Vec<ArrayRef> = Vec::new();
+        for field in schema.fields() {
+            let field_name = field.name();
+            let array = row_data.get_column(field_name, &doc_ids).map_err(|e| {
+                CoreError::Internal(format!("Failed to read column {}: {}", field_name, e))
+            })?;
+            columns.push(array);
+        }
+
+        let batch = RecordBatch::try_new(schema.clone(), columns)
+            .map_err(|e| CoreError::Internal(format!("Failed to create RecordBatch: {}", e)))?;
+
+        Ok(Some(batch))
     }
 
     /// 执行自然顺序查询（ORDER BY _nature）

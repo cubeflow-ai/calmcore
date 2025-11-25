@@ -445,15 +445,8 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
 
         let mut stmts: HashMap<u32, _> = HashMap::new();
         while let Some((seq, packet)) = self.rw.next()? {
-            eprintln!(
-                "📥 [Protocol] Received command packet, seq={}, len={}",
-                seq,
-                packet.len()
-            );
             self.rw.set_seq(seq + 1);
-            eprintln!("📝 [Protocol] Set seq to {} for response", seq + 1);
             let cmd = commands::parse(&packet).unwrap().1;
-            eprintln!("🔍 [Protocol] Command type: {:?}", cmd);
             match cmd {
                 Command::Query(q) => {
                     if q.starts_with(b"SELECT @@") || q.starts_with(b"select @@") {
@@ -564,7 +557,6 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
                 }
             }
             self.rw.flush()?;
-            eprintln!("✅ [Protocol] Command completed and flushed\n");
         }
         Ok(())
     }

@@ -191,10 +191,7 @@ impl ResultMerger {
                     format!("{} {}", before, after)
                 };
 
-                log::debug!(
-                    "Removed ORDER BY _nature, new SQL: {}",
-                    empty_sql
-                );
+                log::debug!("Removed ORDER BY _nature, new SQL: {}", empty_sql);
             }
         }
 

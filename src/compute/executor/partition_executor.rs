@@ -1,7 +1,6 @@
 /// 单 Partition 执行器
 ///
 /// 负责在单个 partition 上执行查询
-
 use std::sync::Arc;
 
 use datafusion::arrow::record_batch::RecordBatch;
@@ -60,9 +59,7 @@ impl PartitionExecutor {
         // 🔧 使用带 hints 的 Provider（sort 和 limit 都是 Option，自动传递）
         let provider = Arc::new(
             crate::compute::PartitionTableProviderWithHints::new_with_hints(
-                partition,
-                sort_hints,
-                limit_hint,
+                partition, sort_hints, limit_hint,
             ),
         );
 

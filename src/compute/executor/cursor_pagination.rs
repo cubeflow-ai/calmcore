@@ -3,7 +3,6 @@
 /// 解决深度分页（Deep Pagination）问题
 /// 传统 OFFSET 分页：LIMIT 1000 OFFSET 10000 需要读取 11000 行
 /// 游标分页：WHERE id > last_id LIMIT 1000 只需要读取 1000 行
-
 use crate::utils::error::CoreResult;
 
 /// 游标信息
@@ -31,10 +30,7 @@ impl CursorPagination {
     /// -- 游标方式（快）
     /// SELECT * FROM t WHERE id > last_id ORDER BY id LIMIT 1000
     /// ```
-    pub fn convert_to_cursor_sql(
-        sql: &str,
-        cursor: Option<&CursorInfo>,
-    ) -> CoreResult<String> {
+    pub fn convert_to_cursor_sql(sql: &str, cursor: Option<&CursorInfo>) -> CoreResult<String> {
         // 如果没有游标，返回原 SQL
         let cursor = match cursor {
             Some(c) => c,
@@ -60,7 +56,10 @@ impl CursorPagination {
             };
 
             let operator = if cursor.ascending { ">" } else { "<" };
-            let cursor_condition = format!(" AND {} {} '{}'", cursor.field_name, operator, cursor.last_value);
+            let cursor_condition = format!(
+                " AND {} {} '{}'",
+                cursor.field_name, operator, cursor.last_value
+            );
 
             Ok(format!(
                 "{}{}{}{}",
@@ -82,7 +81,10 @@ impl CursorPagination {
                 let after_table = &after_from[table_name.len()..];
 
                 let operator = if cursor.ascending { ">" } else { "<" };
-                let cursor_condition = format!(" WHERE {} {} '{}'", cursor.field_name, operator, cursor.last_value);
+                let cursor_condition = format!(
+                    " WHERE {} {} '{}'",
+                    cursor.field_name, operator, cursor.last_value
+                );
 
                 Ok(format!(
                     "{}FROM {}{}{}",
@@ -115,7 +117,10 @@ impl CursorPagination {
 
         // 查找字段索引
         let schema = batch.schema();
-        let field_index = schema.fields().iter().position(|f| f.name() == field_name)?;
+        let field_index = schema
+            .fields()
+            .iter()
+            .position(|f| f.name() == field_name)?;
 
         // 获取最后一行的值
         let column = batch.column(field_index);

@@ -124,10 +124,7 @@ fn verify_mysql_native_password(password: &str, auth_response: &[u8], scramble: 
     }
 
     if auth_response.len() != 20 {
-        log::error!(
-            "Invalid auth_response length: {}",
-            auth_response.len()
-        );
+        log::error!("Invalid auth_response length: {}", auth_response.len());
         return false;
     }
 
@@ -1097,10 +1094,7 @@ fn write_query_result<W: io::Read + io::Write>(
 
             // 结束当前行
             if let Err(e) = row_writer.end_row() {
-                log::debug!(
-                    "Client disconnected at row {}: {}",
-                    rows_written, e
-                );
+                log::debug!("Client disconnected at row {}: {}", rows_written, e);
                 return Err(e);
             }
 
@@ -1111,10 +1105,7 @@ fn write_query_result<W: io::Read + io::Write>(
             if rows_written % FLUSH_INTERVAL == 0 {
                 // msql_srv 的 RowWriter 没有 flush 方法,但 end_row 会写入
                 // TCP socket 会自动实现背压
-                log::debug!(
-                    "Sent {} rows (may block if client is slow)",
-                    rows_written
-                );
+                log::debug!("Sent {} rows (may block if client is slow)", rows_written);
             }
         }
     }

@@ -158,6 +158,15 @@ pub struct PartitionStrategyInput {
     pub value_mapping: Option<String>,
 }
 
+/// 持久化策略配置
+#[derive(async_graphql::InputObject)]
+pub struct PersistPolicyInput {
+    /// 文档数阈值（达到此数量触发持久化，默认 100000）
+    pub max_docs_per_segment: Option<u32>,
+    /// 时间阈值（segment 存活超过此秒数触发持久化，默认 300 秒）
+    pub max_segment_age_secs: Option<u64>,
+}
+
 #[derive(async_graphql::InputObject)]
 pub struct CreateTableInput {
     pub name: String,
@@ -167,6 +176,10 @@ pub struct CreateTableInput {
     /// 分区数量（仅在未指定 partition_strategy 时使用，默认为 1）
     pub partition_count: Option<u64>,
     pub fields: Vec<FieldInput>,
+    /// 是否存储原始 JSON 数据（默认 true）
+    pub store_source: Option<bool>,
+    /// 持久化策略配置（可选）
+    pub persist_policy: Option<PersistPolicyInput>,
 }
 
 #[derive(async_graphql::InputObject)]
@@ -613,13 +626,25 @@ impl MutationRoot {
             fields.push(field);
         }
 
+        // 构建持久化策略
+        let persist_policy = if let Some(policy_input) = input.persist_policy {
+            PersistPolicy {
+                max_docs_per_segment: policy_input.max_docs_per_segment.unwrap_or(100_000),
+                max_segment_age: std::time::Duration::from_secs(
+                    policy_input.max_segment_age_secs.unwrap_or(300),
+                ),
+            }
+        } else {
+            PersistPolicy::default()
+        };
+
         // 创建 Schema
         let schema = CalmSchema {
             name: input.name.clone(),
             primary_key: input.primary_key.clone(),
-            store_source: true,
+            store_source: input.store_source.unwrap_or(true),
             fields: fields.clone(),
-            persist_policy: PersistPolicy::default(),
+            persist_policy,
         };
 
         // 构建分区策略
