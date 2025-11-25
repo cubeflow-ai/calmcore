@@ -1271,7 +1271,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
                 result
             }
             InvertedIndex::Memory(btree) => {
-                log::info!(
+                log::debug!(
                     "🔍 [InvertedIndex::Memory::range_query] btree.len()={}",
                     btree.len()
                 );
@@ -1326,7 +1326,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
                         matched_keys += 1;
                     }
                 }
-                log::info!(
+                log::debug!(
                     "🔍 [InvertedIndex::Memory::range_query] matched_keys={}, result.len()={}",
                     matched_keys,
                     result.len()

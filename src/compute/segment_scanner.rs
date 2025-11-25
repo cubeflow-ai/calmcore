@@ -1045,7 +1045,7 @@ impl SegmentScanner {
     ) -> Option<RoaringBitmap> {
         match self.index_readers.get(field_name) {
             Some(reader) => {
-                log::info!(
+                log::debug!(
                     "🔍 [SegmentScanner::query_range] field={}, trying range_union first",
                     field_name
                 );
@@ -1053,14 +1053,14 @@ impl SegmentScanner {
                 // 优先尝试 range_union() - 100-200x faster for large ranges
                 if let Some(bitmap) = reader.range_union(start, start_inclusive, end, end_inclusive)
                 {
-                    log::info!(
+                    log::debug!(
                         "🔍 [SegmentScanner::query_range] range_union returned {} docs",
                         bitmap.len()
                     );
                     return Some(bitmap);
                 }
 
-                log::info!("🔍 [SegmentScanner::query_range] range_union returned None, falling back to range()");
+                log::debug!("🔍 [SegmentScanner::query_range] range_union returned None, falling back to range()");
 
                 // 回退到普通 range() - 兼容不支持 range_union 的索引类型
                 let range_result = reader.range(start, start_inclusive, end, end_inclusive);
@@ -1074,7 +1074,7 @@ impl SegmentScanner {
                 Some(bitmap)
             }
             None => {
-                log::info!(
+                log::debug!(
                     "⚠️  [SegmentScanner::query_range] field '{}' has no index, returning None for full scan",
                     field_name
                 );

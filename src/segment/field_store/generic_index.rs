@@ -206,11 +206,11 @@ impl<K: IndexKey> GenericIndexedField<K> {
 
 impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
     fn write(&self, data: &RecordBatch, start_id: u32) -> CoreResult<()> {
-        log::info!(
+        log::debug!(
             "🔍 [GenericIndexedField::write] field={}, looking for column in RecordBatch",
             self.field.name()
         );
-        log::info!(
+        log::debug!(
             "🔍 [RecordBatch columns] available columns: {:?}",
             data.schema()
                 .fields()
@@ -220,14 +220,14 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
         );
 
         let Some(arr) = data.column_by_name(self.field.name()) else {
-            log::warn!(
+            log::debug!(
                 "⚠️  [GenericIndexedField::write] Column '{}' not found in RecordBatch, skipping indexing",
                 self.field.name()
             );
             return Ok(());
         };
 
-        log::info!(
+        log::debug!(
             "🔍 [GenericIndexedField::write] Found column '{}', arr.len()={}",
             self.field.name(),
             arr.len()
@@ -476,7 +476,7 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
         // 尝试使用底层 mem_btree 的 range_union() 优化
         // 如果不支持(内存索引)，返回 None 让调用方回退到 range()
 
-        log::info!("to run range_union(start_key:{:?}, start_inclusive:{:?}, end_key:{:?}, end_inclusive:{:?})", start_key, start_inclusive, end_key, end_inclusive);
+        log::debug!("to run range_union(start_key:{:?}, start_inclusive:{:?}, end_key:{:?}, end_inclusive:{:?})", start_key, start_inclusive, end_key, end_inclusive);
 
         indexs.range_union(
             start_key.as_ref(),
