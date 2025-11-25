@@ -36,7 +36,6 @@ tokio = { version = "1", features = [
     "macros",
     "net",
 ] }
-# msql-srv = "0.11"  # 原版本 - CLIENT_SECURE_CONNECTION 不支持
 msql-srv = { path = "libs/msql-srv-patched" } # Patched 版本 - 支持 CLIENT_SECURE_CONNECTION
 
 # Web framework - Poem

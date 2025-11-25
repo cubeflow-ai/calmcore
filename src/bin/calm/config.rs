@@ -363,8 +363,8 @@ impl Config {
     fn print_help() {
         println!("Calm Database - Multi-Protocol Database Server");
         println!(
-            "Version: {} ({})",
-            env!("CARGO_PKG_VERSION"),
+            "📦 Version: {} ({})",
+            version_macro::build_git_branch!(),
             version_macro::build_git_version!()
         );
         println!("Build time: {}", version_macro::build_time!());
