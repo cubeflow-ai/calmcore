@@ -391,29 +391,16 @@ impl SerialExecutor {
 
         for (batch_key, batch) in batches {
             if let Some(target_doc_ids) = batch_groups.get(&batch_key) {
-                // 找到 batch 中 internal_id 列的位置
-                let internal_id_idx = schema
-                    .fields()
-                    .iter()
-                    .position(|f| f.name() == "internal_id")
-                    .ok_or_else(|| {
-                        CoreError::Internal("internal_id column not found".to_string())
-                    })?;
-
-                let internal_id_column = batch.column(internal_id_idx);
-                let internal_id_array = internal_id_column
-                    .as_any()
-                    .downcast_ref::<datafusion::arrow::array::UInt64Array>()
-                    .ok_or_else(|| CoreError::Internal("internal_id is not UInt64".to_string()))?;
-
-                // 找出需要提取的行索引
+                // batch_key 是 batch 的起始 doc_id
+                // 将 doc_id 转换为 batch 内的相对索引
+                let batch_size = batch.num_rows() as u32;
+                
                 let mut indices = Vec::new();
-                for (idx, internal_id) in internal_id_array.iter().enumerate() {
-                    if let Some(id) = internal_id {
-                        let doc_id = (id - segment.start as u64) as u32;
-                        if target_doc_ids.contains(&doc_id) {
-                            indices.push(idx as u32);
-                        }
+                for &doc_id in target_doc_ids {
+                    let relative_idx = doc_id.saturating_sub(batch_key);
+                    // 边界检查
+                    if relative_idx < batch_size {
+                        indices.push(relative_idx);
                     }
                 }
 
