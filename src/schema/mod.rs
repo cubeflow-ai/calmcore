@@ -53,8 +53,30 @@ pub struct Schema {
 }
 
 impl Schema {
+    /// 创建新的 Schema，并自动规范化所有字段名为小写
+    pub fn new(
+        name: String,
+        primary_key: Option<String>,
+        store_source: bool,
+        mut fields: Vec<field::FieldOption>,
+        persist_policy: PersistPolicy,
+    ) -> Self {
+        // 规范化所有字段名为小写
+        for field in &mut fields {
+            field.normalize_name();
+        }
+        Schema {
+            name,
+            primary_key,
+            store_source,
+            fields,
+            persist_policy,
+        }
+    }
+
     #[allow(dead_code)]
-    pub(crate) fn add_field(&mut self, field: field::FieldOption) {
+    pub(crate) fn add_field(&mut self, mut field: field::FieldOption) {
+        field.normalize_name(); // 统一转换为小写
         self.fields.push(field);
     }
 

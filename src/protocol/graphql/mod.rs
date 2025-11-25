@@ -639,13 +639,13 @@ impl MutationRoot {
         };
 
         // 创建 Schema
-        let schema = CalmSchema {
-            name: input.name.clone(),
-            primary_key: input.primary_key.clone(),
-            store_source: input.store_source.unwrap_or(true),
-            fields: fields.clone(),
+        let schema = CalmSchema::new(
+            input.name.clone(),
+            input.primary_key.clone(),
+            input.store_source.unwrap_or(true),
+            fields.clone(),
             persist_policy,
-        };
+        );
 
         // 构建分区策略
         let (partition_strategy, num_partitions) =

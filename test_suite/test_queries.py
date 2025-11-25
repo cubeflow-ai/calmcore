@@ -28,7 +28,9 @@ def print_colored(color, text):
 def connect_db(host="127.0.0.1", port=3307):
     """连接数据库"""
     try:
-        conn = pymysql.connect(host=host, port=port, user="root", database="default")
+        conn = pymysql.connect(
+            host=host, port=port, user="root", passwd="calm", database="default"
+        )
         return conn
     except Exception as e:
         print_colored(Colors.RED, f"❌ Failed to connect: {e}")

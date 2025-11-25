@@ -1271,6 +1271,11 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
                 result
             }
             InvertedIndex::Memory(btree) => {
+                log::info!(
+                    "🔍 [InvertedIndex::Memory::range_query] btree.len()={}",
+                    btree.len()
+                );
+
                 // For memory index, use seek to efficiently position iterator at start
                 // This avoids scanning from the beginning of the tree
                 let mut iter = btree.iter();
@@ -1280,6 +1285,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
                     iter.seek(s);
                 }
 
+                let mut matched_keys = 0;
                 // Iterate through keys in range
                 while let Some(item) = iter.next() {
                     let (key, ids_lock, _ttl) = &*item;
@@ -1317,8 +1323,14 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
                     if start_ok {
                         let ids = ids_lock.read().unwrap();
                         result |= RoaringBitmap::from_sorted_iter(ids.iter().copied()).unwrap();
+                        matched_keys += 1;
                     }
                 }
+                log::info!(
+                    "🔍 [InvertedIndex::Memory::range_query] matched_keys={}, result.len()={}",
+                    matched_keys,
+                    result.len()
+                );
                 result
             }
         }

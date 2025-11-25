@@ -864,13 +864,13 @@ async fn handle_create_table(
     }
 
     // 创建 Schema
-    let schema = Schema {
-        name: table_name.clone(),
+    let schema = Schema::new(
+        table_name.clone(),
         primary_key,
-        store_source: true,
+        true,
         fields,
-        persist_policy: Default::default(),
-    };
+        Default::default(),
+    );
 
     // 创建表 (使用 Hash 分区策略)
     use crate::catalog::PartitionStrategy;

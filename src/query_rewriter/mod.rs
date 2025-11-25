@@ -162,12 +162,11 @@ mod tests {
     use crate::schema::Schema;
 
     fn create_test_schema() -> Schema {
-        Schema {
-            name: "test_table".to_string(),
-            primary_key: Some("id".to_string()),
-            store_source: true,
-            persist_policy: Default::default(),
-            fields: vec![
+        Schema::new(
+            "test_table".to_string(),
+            Some("id".to_string()),
+            true,
+            vec![
                 FieldOption::I64 {
                     name: "updateTime".to_string(),
                     index: true,
@@ -188,7 +187,8 @@ mod tests {
                     index: true,
                 },
             ],
-        }
+            Default::default(),
+        )
     }
 
     #[test]

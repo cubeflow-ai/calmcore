@@ -244,13 +244,13 @@ async fn create_index(
     }
 
     // 创建 Schema，使用 _id 作为主键
-    let schema = Schema {
-        name: index.clone(),
-        primary_key: Some("_id".to_string()),
-        store_source: true,
+    let schema = Schema::new(
+        index.clone(),
+        Some("_id".to_string()),
+        true,
         fields,
-        persist_policy: crate::schema::PersistPolicy::default(),
-    };
+        crate::schema::PersistPolicy::default(),
+    );
 
     // 创建表（索引）
     server

@@ -206,9 +206,32 @@ impl<K: IndexKey> GenericIndexedField<K> {
 
 impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
     fn write(&self, data: &RecordBatch, start_id: u32) -> CoreResult<()> {
+        log::info!(
+            "🔍 [GenericIndexedField::write] field={}, looking for column in RecordBatch",
+            self.field.name()
+        );
+        log::info!(
+            "🔍 [RecordBatch columns] available columns: {:?}",
+            data.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
+        );
+
         let Some(arr) = data.column_by_name(self.field.name()) else {
+            log::warn!(
+                "⚠️  [GenericIndexedField::write] Column '{}' not found in RecordBatch, skipping indexing",
+                self.field.name()
+            );
             return Ok(());
         };
+
+        log::info!(
+            "🔍 [GenericIndexedField::write] Found column '{}', arr.len()={}",
+            self.field.name(),
+            arr.len()
+        );
 
         let mut mtp: HashMap<K, Vec<u32>> = HashMap::new();
 

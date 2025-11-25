@@ -110,12 +110,15 @@ impl Executor {
                             )
                             .await
                     }
-                    QueryType::GeneralAggregation(_info) => {
-                        log::info!("📊 [Aggregation] General query");
-                        // TODO: 实现通用聚合查询
-                        Err(CoreError::Notsupport(
-                            "General aggregation query not implemented".to_string(),
-                        ))
+                    QueryType::GeneralAggregation(info) => {
+                        log::info!(
+                            "📊 [Aggregation] General query (COUNT={}, SUM={}, AVG={}, MAX={}, MIN={}, GROUP_BY={})",
+                            info.has_count, info.has_sum, info.has_avg, info.has_max, info.has_min, info.group_by_count
+                        );
+                        // 使用聚合执行器处理通用聚合查询
+                        self.aggregation_executor
+                            .execute_general_aggregation(&normalized_sql, &plan.table_name)
+                            .await
                     }
 
                     // ===== 串行扫描查询 =====

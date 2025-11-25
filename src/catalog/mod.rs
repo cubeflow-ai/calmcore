@@ -284,12 +284,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let catalog = Catalog::new(temp_dir.path().to_path_buf()).unwrap();
 
-        let schema = Schema {
-            name: "test_table".to_string(),
-            primary_key: Some("id".to_string()),
-            store_source: true,
-            persist_policy: Default::default(),
-            fields: vec![
+        let schema = Schema::new(
+            "test_table".to_string(),
+            Some("id".to_string()),
+            true,
+            vec![
                 FieldOption::U64 {
                     name: "id".to_string(),
                     index: true,
@@ -302,7 +301,8 @@ mod tests {
                     case_sensitive: true,
                 },
             ],
-        };
+            Default::default(),
+        );
 
         let meta = TableMeta::new(
             "test_table".to_string(),

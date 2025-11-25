@@ -1063,11 +1063,15 @@ impl SegmentScanner {
                 log::info!("🔍 [SegmentScanner::query_range] range_union returned None, falling back to range()");
 
                 // 回退到普通 range() - 兼容不支持 range_union 的索引类型
-                Some(
-                    reader
-                        .range(start, start_inclusive, end, end_inclusive)
-                        .unwrap_or_else(RoaringBitmap::new),
-                )
+                let range_result = reader.range(start, start_inclusive, end, end_inclusive);
+                let is_some = range_result.is_some();
+                let bitmap = range_result.unwrap_or_else(RoaringBitmap::new);
+                log::info!(
+                    "🔍 [SegmentScanner::query_range] range() returned {}, bitmap.len()={}",
+                    if is_some { "Some" } else { "None" },
+                    bitmap.len()
+                );
+                Some(bitmap)
             }
             None => {
                 log::info!(

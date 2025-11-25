@@ -136,6 +136,25 @@ impl FieldOption {
         }
     }
 
+    /// 将字段名规范化为小写（用于内部统一处理）
+    pub fn normalize_name(&mut self) {
+        match self {
+            FieldOption::Keyword { name, .. } => *name = name.to_lowercase(),
+            FieldOption::I8 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::I16 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::I32 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::I64 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::U8 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::U16 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::U32 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::U64 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::F32 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::F64 { name, .. } => *name = name.to_lowercase(),
+            FieldOption::Boolean { name, .. } => *name = name.to_lowercase(),
+            FieldOption::Timestamp { name, .. } => *name = name.to_lowercase(),
+        }
+    }
+
     pub fn is_index(&self) -> bool {
         match self {
             FieldOption::Keyword { index, .. } => *index,

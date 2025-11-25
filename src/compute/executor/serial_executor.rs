@@ -228,15 +228,13 @@ impl SerialExecutor {
                     CoreError::NotExisted(format!("Partition {} not found", partition_name))
                 })?;
 
-            let schema = partition.arrow_schema.clone();
-
             // 串行遍历 Segments（current + frozen）
             // 1. 先扫描 current segment
             {
                 let segment = partition.get_current_segment();
                 if segment.doc_count() > 0 {
                     let remaining = target_rows - collected_rows;
-                    if let Some(batch) = Self::read_segment_data(&segment, &schema, remaining)? {
+                    if let Some(batch) = Self::read_segment_data(&segment, remaining)? {
                         collected_rows += batch.num_rows();
                         all_batches.push(batch);
 
@@ -261,7 +259,7 @@ impl SerialExecutor {
                     }
 
                     let remaining = target_rows - collected_rows;
-                    if let Some(batch) = Self::read_segment_data(segment, &schema, remaining)? {
+                    if let Some(batch) = Self::read_segment_data(segment, remaining)? {
                         collected_rows += batch.num_rows();
                         all_batches.push(batch);
 
@@ -350,7 +348,6 @@ impl SerialExecutor {
     /// 从 segment 读取指定数量的原始数据（无过滤）
     fn read_segment_data(
         segment: &crate::segment::Segment,
-        schema: &Arc<datafusion::arrow::datatypes::Schema>,
         limit: usize,
     ) -> CoreResult<Option<RecordBatch>> {
         use datafusion::arrow::array::UInt32Array;
@@ -394,7 +391,7 @@ impl SerialExecutor {
                 // batch_key 是 batch 的起始 doc_id
                 // 将 doc_id 转换为 batch 内的相对索引
                 let batch_size = batch.num_rows() as u32;
-                
+
                 let mut indices = Vec::new();
                 for &doc_id in target_doc_ids {
                     let relative_idx = doc_id.saturating_sub(batch_key);
