@@ -1,11 +1,14 @@
 mod aggregation;
+mod aggregation_executor;
 mod cursor_pagination;
 mod distributed;
 mod natural_order_executor;
+mod parallel_executor;
 mod partition_executor;
 mod query_builder;
 mod result_merger;
 mod scan_executor;
+mod serial_executor;
 mod sql_utils;
 
 pub use cursor_pagination::{CursorInfo, CursorPagination};
