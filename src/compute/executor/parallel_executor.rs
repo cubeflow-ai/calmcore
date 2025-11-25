@@ -78,6 +78,11 @@ impl ParallelExecutor {
             match result {
                 Ok(batches) => all_batches.extend(batches),
                 Err(e) => {
+                    // SQL syntax errors should fail immediately
+                    if Self::is_sql_error(&e) {
+                        return Err(e);
+                    }
+                    // Data errors can be skipped
                     log::warn!("⚠️  Partition {} failed: {}", partition_names[idx], e);
                 }
             }
@@ -138,6 +143,11 @@ impl ParallelExecutor {
             match result {
                 Ok(batches) => all_batches.extend(batches),
                 Err(e) => {
+                    // SQL syntax errors should fail immediately
+                    if Self::is_sql_error(&e) {
+                        return Err(e);
+                    }
+                    // Data errors can be skipped
                     log::warn!("⚠️  Partition {} failed: {}", partition_names[idx], e);
                 }
             }
@@ -274,5 +284,20 @@ impl ParallelExecutor {
         let schema = batches[0].schema();
         concat_batches(&schema, &batches)
             .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
+    }
+
+    /// 判断是否是 SQL 语法错误（应该立即返回给客户端）
+    fn is_sql_error(error: &CoreError) -> bool {
+        match error {
+            CoreError::InvalidParam(msg) => {
+                // SQL 语法错误关键词
+                msg.contains("Schema error")
+                    || msg.contains("No field named")
+                    || msg.contains("Query parse error")
+                    || msg.contains("parse error")
+                    || msg.contains("SQL error")
+            }
+            _ => false,
+        }
     }
 }

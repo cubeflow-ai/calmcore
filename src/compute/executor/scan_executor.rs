@@ -7,7 +7,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 
 use crate::compute::optimizer::{ExecutionHints, PureLimitInfo};
 use crate::engine::Engine;
-use crate::utils::error::CoreResult;
+use crate::utils::error::{CoreError, CoreResult};
 
 use super::partition_executor::PartitionExecutor;
 use super::result_merger::ResultMerger;
@@ -134,6 +134,11 @@ impl ScanExecutor {
                     }
                 }
                 Err(e) => {
+                    // SQL syntax errors should fail immediately
+                    if Self::is_sql_error(&e) {
+                        return Err(e);
+                    }
+                    // Data errors can be skipped
                     log::warn!("⚠️  Partition {} failed: {}", partition_name, e);
                 }
             }
@@ -237,6 +242,11 @@ impl ScanExecutor {
             {
                 Ok(batches) => all_batches.extend(batches),
                 Err(e) => {
+                    // SQL syntax errors should fail immediately
+                    if Self::is_sql_error(&e) {
+                        return Err(e);
+                    }
+                    // Data errors can be skipped
                     log::warn!("⚠️  Partition {} failed: {}", partition_name, e);
                 }
             }
@@ -289,5 +299,20 @@ impl ScanExecutor {
 
         // 无 offset 和 limit
         Ok(batch)
+    }
+
+    /// 判断是否是 SQL 语法错误（应该立即返回给客户端）
+    fn is_sql_error(error: &CoreError) -> bool {
+        match error {
+            CoreError::InvalidParam(msg) => {
+                // SQL 语法错误关键词
+                msg.contains("Schema error")
+                    || msg.contains("No field named")
+                    || msg.contains("Query parse error")
+                    || msg.contains("parse error")
+                    || msg.contains("SQL error")
+            }
+            _ => false,
+        }
     }
 }
