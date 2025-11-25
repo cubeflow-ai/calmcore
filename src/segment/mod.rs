@@ -1464,7 +1464,8 @@ impl Segment {
         let mut readers = HashMap::new();
 
         for field_writer in fields.iter() {
-            let name = field_writer.name().to_string();
+            // 🔧 Convert to lowercase to match schema field names (which are also lowercase)
+            let name = field_writer.name().to_lowercase();
 
             // Downcast and clone the concrete type
             if let Some(keyword) = field_writer.as_any().downcast_ref::<KeywordField>() {
