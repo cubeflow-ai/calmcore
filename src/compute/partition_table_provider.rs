@@ -82,23 +82,15 @@ impl TableProvider for PartitionTableProvider {
         TableType::Base
     }
 
-    // 如果是聚合查询
-    //       查看是否有不支持的函数， 比如  age=birthday-2 这种的不支持。就算返回全量数据。
-    // 如果非聚合查询
-    //。     有 range 查询，但是range查询范围很大，此时反回全量数据 是
-    //。     有 limit 有order by 此时 可以利用倒排索引按照order by 命中id 重新组织后排序 是精确的
-    //。     有limit 没有 order 此时应该scan的时候值返回limit+ size 条数是不是就可以
-    //       没有limit 只有order 数据量肯定不大 返回全量数据即可吧。
-    // 所以这个函数是否返回全量是不好说的。我们可以在查询前有个预查询，或者其他方式来确定这个返回情况。你看看怎么做回更好呢？
-
+    // TODO： 优化过滤条件的推送下推策略
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
-        // 策略：返回 Exact，让 DataFusion 把 filters 传给 scan()
-        // 在 scan() 中，SegmentScanner 会根据完整的查询上下文（filters + limit + projection）
-        // 做智能决策，选择最优的执行策略
-        Ok(vec![TableProviderFilterPushDown::Exact; filters.len()])
+        // 策略：全部返回 Inexact,更保险
+        // 这样 DataFusion 不会过度优化(比如 COUNT 的空 projection)
+        // 同时我们在 scan() 中仍然可以充分利用索引
+        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 
     async fn scan(

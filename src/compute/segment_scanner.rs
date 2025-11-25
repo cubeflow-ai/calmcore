@@ -90,7 +90,21 @@ impl SegmentScanner {
         // 应用 filters，计算命中的文档
         let (result_bitmap, unsupported_filters) = self.apply_filters(filters);
 
-        let result_bitmap = result_bitmap?;
+        // 如果有不支持的过滤器(如 LIKE),即使 bitmap 为空也要创建执行计划
+        // 让 DataFusion 的 FilterExec 来应用这些过滤器
+        let result_bitmap = if let Some(bitmap) = result_bitmap {
+            bitmap
+        } else if !unsupported_filters.is_empty() {
+            // 有不支持的过滤器但 bitmap 为空 - 使用所有有效文档
+            log::info!(
+                "📋 [SegmentScanner] Bitmap filter returned None, but has {} unsupported filters, using all valid docs",
+                unsupported_filters.len()
+            );
+            self.valid_docs.clone()
+        } else {
+            // 既没有 bitmap 结果,也没有不支持的过滤器 - 返回 None
+            return None;
+        };
 
         log::info!(
             "🎯 [SegmentScanner] hit={}/{} ({:.1}%), limit={:?}, sort={:?}",
@@ -144,18 +158,31 @@ impl SegmentScanner {
     fn apply_filters(&self, filters: &[Expr]) -> (Option<RoaringBitmap>, Vec<Expr>) {
         let mut result_bitmap = self.valid_docs.clone();
         let mut unsupported_filters = Vec::new();
+        let mut has_supported_filter = false;
+
+        log::info!(
+            "🔍 [apply_filters] Processing {} filters, valid_docs={}",
+            filters.len(),
+            self.valid_docs.len()
+        );
 
         for filter in filters {
             match self.expr_to_bitmap(filter) {
                 Some(bitmap) => {
+                    log::info!(
+                        "✓ [apply_filters] Filter handled via index: {:?}, bitmap_size={}",
+                        filter,
+                        bitmap.len()
+                    );
                     result_bitmap &= bitmap;
+                    has_supported_filter = true;
                 }
                 None => {
                     // 遇到无法通过索引处理的条件(如 LIKE)
                     // 收集这些过滤器,稍后让 DataFusion 处理
                     unsupported_filters.push(filter.clone());
-                    log::debug!(
-                        "⚠️  [SegmentScanner] Cannot handle filter via index: {:?}, will use DataFusion filter",
+                    log::info!(
+                        "⚠️  [apply_filters] Cannot handle filter via index: {:?}, will use DataFusion filter",
                         filter
                     );
                 }
@@ -164,18 +191,46 @@ impl SegmentScanner {
 
         // 如果有无法处理的过滤器
         if !unsupported_filters.is_empty() {
-            log::debug!(
-                "🔍 [SegmentScanner] Has {} unsupported filters, returning {} docs for DataFusion filtering",
+            log::info!(
+                "🔍 [apply_filters] Has {} unsupported filters, current result_bitmap={} docs",
                 unsupported_filters.len(),
                 result_bitmap.len()
             );
         }
 
-        let bitmap = if result_bitmap.is_empty() {
-            None
+        // 决定是否返回 bitmap:
+        // 1. 如果有支持的过滤器且结果为空 -> 返回 None (真的没数据)
+        // 2. 如果只有不支持的过滤器 -> 返回所有有效文档 (让 DataFusion 过滤)
+        // 3. 如果有支持的过滤器且结果非空 -> 返回 bitmap
+        let bitmap = if has_supported_filter {
+            if result_bitmap.is_empty() {
+                log::info!(
+                    "📋 [apply_filters] Has supported filter but result empty, returning None"
+                );
+                None
+            } else {
+                log::info!(
+                    "📋 [apply_filters] Has supported filter with {} results, returning bitmap",
+                    result_bitmap.len()
+                );
+                Some(result_bitmap)
+            }
         } else {
-            Some(result_bitmap)
+            // 没有支持的过滤器,只有 LIKE 等不支持的过滤器
+            // 返回所有有效文档
+            log::info!(
+                "📋 [apply_filters] No supported filter, only {} unsupported filters, returning all {} valid docs",
+                unsupported_filters.len(),
+                self.valid_docs.len()
+            );
+            Some(self.valid_docs.clone())
         };
+
+        log::info!(
+            "✅ [apply_filters] Final result: bitmap={}, unsupported_filters={}",
+            if bitmap.is_some() { "Some" } else { "None" },
+            unsupported_filters.len()
+        );
 
         (bitmap, unsupported_filters)
     }
@@ -836,14 +891,33 @@ impl SegmentScanner {
         limit: Option<usize>,
         unsupported_filters: Vec<Expr>,
     ) -> Option<Arc<dyn ExecutionPlan>> {
-        let projected_schema = self.build_projected_schema(projection);
+        // 策略:直接使用原始的 projection
+        // 但如果有 LIKE 过滤器且 projection 为空,暂时忽略 projection
+        // 让 FilterExec 能访问完整数据,DataFusion 稍后会处理投影
+
+        let exec_projection = if !unsupported_filters.is_empty()
+            && projection.map_or(false, |p| p.is_empty())
+        {
+            // 对于空 projection + 不支持的过滤器:
+            // 暂时忽略空 projection,使用完整 schema
+            // DataFusion 会在 FilterExec 之后自动添加 ProjectionExec
+            log::info!(
+                "🔧 [build_exec_plan] Empty projection with {} unsupported filters, temporarily ignoring projection",
+                unsupported_filters.len()
+            );
+            None // 暂时返回完整数据
+        } else {
+            projection.map(|p| p.to_vec())
+        };
+
+        let projected_schema = self.build_projected_schema(exec_projection.as_ref());
 
         let exec = SegmentExec::new(
             self.raw_data.clone(),
             self.schema.clone(),
             projected_schema,
             result_bitmap,
-            projection.map(|p| p.to_vec()),
+            exec_projection,
             sort,
             limit,
         );
@@ -884,13 +958,17 @@ impl SegmentScanner {
         use datafusion::physical_plan::filter::FilterExec;
 
         log::info!(
-            "🔧 [SegmentScanner] Wrapping plan with FilterExec for {} unsupported filters",
+            "🔧 [wrap_with_filter] Creating FilterExec for {} unsupported filters",
             filters.len()
         );
+        log::info!("🔧 [wrap_with_filter] Input schema: {:?}", input.schema());
+        log::info!("🔧 [wrap_with_filter] Filters: {:?}", filters);
 
         // 创建临时 session context 用于表达式转换
         let session_ctx = SessionContext::new();
         let df_schema = input.schema().clone().to_dfschema().ok()?;
+
+        log::info!("🔧 [wrap_with_filter] DFSchema: {:?}", df_schema);
 
         // 将所有过滤器用 AND 连接
         let combined_filter = if filters.len() == 1 {
@@ -908,6 +986,11 @@ impl SegmentScanner {
             combined
         };
 
+        log::info!(
+            "🔧 [wrap_with_filter] Combined filter: {:?}",
+            combined_filter
+        );
+
         // 转换为物理表达式
         let physical_expr = create_physical_expr(
             &combined_filter,
@@ -916,8 +999,12 @@ impl SegmentScanner {
         )
         .ok()?;
 
+        log::info!("🔧 [wrap_with_filter] Physical expression created successfully");
+
         // 创建 FilterExec
         let filter_exec = FilterExec::try_new(physical_expr, input).ok()?;
+
+        log::info!("🔧 [wrap_with_filter] FilterExec created successfully");
 
         Some(Arc::new(filter_exec))
     }
@@ -1511,9 +1598,20 @@ impl SegmentStream {
         let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
         let is_empty_projection = self.projection.as_ref().is_some_and(|p| p.is_empty());
 
+        log::info!(
+            "🔧 [SegmentStream] projection={:?}, is_empty_projection={}",
+            self.projection,
+            is_empty_projection
+        );
+
         let source_batches = if is_empty_projection {
+            log::info!("🔧 [SegmentStream] Empty projection detected, skipping data read");
             HashMap::new()
         } else {
+            log::info!(
+                "🔧 [SegmentStream] Reading {} batches with projection",
+                batch_keys.len()
+            );
             let proj_to_use = self.projection.as_deref();
             self.raw_data
                 .get_batch_with_projection(&batch_keys, proj_to_use)

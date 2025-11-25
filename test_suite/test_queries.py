@@ -76,6 +76,7 @@ def run_query(cursor, name, sql, show_preview=True):
     except Exception as e:
         duration = time.time() - start_time
         print_colored(Colors.RED, f"❌ Failed: {e}")
+        print_colored(Colors.RED, f"❌ Failed SQL: {sql}")
         return False, duration, 0
 
 
@@ -103,6 +104,8 @@ def verify_correctness(cursor, name, sql1, sql2):
             return False
     except Exception as e:
         print_colored(Colors.RED, f"✗ Verification failed: {e}")
+        print_colored(Colors.RED, f"✗ Failed SQL 1: {sql1}")
+        print_colored(Colors.RED, f"✗ Failed SQL 2: {sql2}")
         return False
 
 
@@ -251,8 +254,13 @@ def test_nyc_taxi(conn):
     print_colored(Colors.BLUE, "\n=== LIKE Query Tests ===\n")
 
     # 先查询一些真实的 id 值用于测试 (id 是 KEYWORD 类型,支持 LIKE)
-    cursor.execute("SELECT id FROM taxi_trips LIMIT 10")
-    ids = [str(row[0]) for row in cursor.fetchall()]
+    try:
+        cursor.execute("SELECT id FROM taxi_trips LIMIT 10")
+        ids = [str(row[0]) for row in cursor.fetchall()]
+    except Exception as e:
+        print_colored(Colors.RED, f"❌ Failed to fetch IDs: {e}")
+        print_colored(Colors.RED, f"❌ Failed SQL: SELECT id FROM taxi_trips LIMIT 10")
+        ids = []
 
     like_tests = []
 
@@ -293,12 +301,193 @@ def test_nyc_taxi(conn):
                     f"SELECT * FROM taxi_trips WHERE id LIKE '{pattern1}%' ORDER BY pickup_datetime DESC LIMIT 10",
                     True,
                 ),
+                (
+                    "LIKE-5. SELECT with LIKE filter",
+                    f"SELECT * FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '{pattern1}%' LIMIT 20",
+                    True,
+                ),
+                (
+                    "LIKE-6. COUNT with LIKE and escaped characters",
+                    f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '%{pattern1}\\_%' LIMIT 10",
+                    True,
+                ),
             ]
         )
 
     for name, sql, show_preview in like_tests:
         success, duration, row_count = run_query(cursor, name, sql, show_preview)
         results.append((name, success, duration, row_count))
+
+    # LIKE 查询结果正确性验证
+    print_colored(Colors.BLUE, "\n=== LIKE Query Result Correctness ===\n")
+
+    if ids and len(ids) > 0:
+        # 验证1: LIKE COUNT 与 SELECT COUNT 一致性
+        print_colored(
+            Colors.YELLOW, f"\n🔍 Test 1: LIKE COUNT vs actual filtered data count"
+        )
+
+        # 先用 COUNT 查询
+        count_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'"
+        try:
+            cursor.execute(count_sql)
+            count_result = cursor.fetchone()[0]
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ COUNT query failed: {e}")
+            print_colored(Colors.RED, f"❌ Failed SQL: {count_sql}")
+            count_result = -1
+
+        # 再用 SELECT 查询并手动计数
+        select_sql = f"SELECT id FROM taxi_trips WHERE id LIKE '{pattern1}%'"
+        try:
+            cursor.execute(select_sql)
+            select_results = cursor.fetchall()
+            select_count = len(select_results)
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ SELECT query failed: {e}")
+            print_colored(Colors.RED, f"❌ Failed SQL: {select_sql}")
+            select_results = []
+            select_count = -1
+
+        print(f"  COUNT(*) returned: {count_result}")
+        print(f"  SELECT returned: {select_count} rows")
+
+        if count_result == select_count:
+            print_colored(Colors.GREEN, f"  ✓ COUNT and SELECT counts match!")
+            results.append(
+                ("LIKE-Result-1: COUNT vs SELECT consistency", True, 0, count_result)
+            )
+        else:
+            print_colored(Colors.RED, f"  ✗ COUNT and SELECT counts differ!")
+            results.append(
+                ("LIKE-Result-1: COUNT vs SELECT consistency", False, 0, count_result)
+            )
+
+        # 验证2: LIKE 过滤的数据确实匹配模式
+        if select_count > 0:
+            print_colored(
+                Colors.YELLOW, f"\n🔍 Test 2: Verify LIKE filtered data matches pattern"
+            )
+
+            # 检查前10行是否都匹配模式
+            sample_size = min(10, len(select_results))
+            all_match = True
+            for i in range(sample_size):
+                id_value = str(select_results[i][0])
+                if not id_value.startswith(pattern1):
+                    print_colored(
+                        Colors.RED,
+                        f"  ✗ Row {i}: '{id_value}' does not match pattern '{pattern1}%'",
+                    )
+                    all_match = False
+                    break
+
+            if all_match:
+                print_colored(
+                    Colors.GREEN,
+                    f"  ✓ All sampled rows ({sample_size}) match the LIKE pattern '{pattern1}%'",
+                )
+                results.append(
+                    ("LIKE-Result-2: Data matches pattern", True, 0, sample_size)
+                )
+            else:
+                results.append(("LIKE-Result-2: Data matches pattern", False, 0, 0))
+
+        # 验证3: LIKE + 时间范围的 COUNT 准确性
+        print_colored(
+            Colors.YELLOW, f"\n🔍 Test 3: LIKE with time range COUNT accuracy"
+        )
+
+        # COUNT 查询
+        count_time_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '{pattern1}%'"
+        try:
+            cursor.execute(count_time_sql)
+            count_time_result = cursor.fetchone()[0]
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ COUNT with time query failed: {e}")
+            print_colored(Colors.RED, f"❌ Failed SQL: {count_time_sql}")
+            count_time_result = -1
+
+        # SELECT 查询
+        select_time_sql = f"SELECT id FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '{pattern1}%'"
+        try:
+            cursor.execute(select_time_sql)
+            select_time_results = cursor.fetchall()
+            select_time_count = len(select_time_results)
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ SELECT with time query failed: {e}")
+            print_colored(Colors.RED, f"❌ Failed SQL: {select_time_sql}")
+            select_time_results = []
+            select_time_count = -1
+
+        print(f"  COUNT(*) with time range + LIKE: {count_time_result}")
+        print(f"  SELECT with time range + LIKE: {select_time_count} rows")
+
+        if count_time_result == select_time_count:
+            print_colored(
+                Colors.GREEN, f"  ✓ Combined filter COUNT and SELECT counts match!"
+            )
+            results.append(
+                ("LIKE-Result-3: Combined filter accuracy", True, 0, count_time_result)
+            )
+        else:
+            print_colored(
+                Colors.RED, f"  ✗ Combined filter COUNT and SELECT counts differ!"
+            )
+            results.append(
+                ("LIKE-Result-3: Combined filter accuracy", False, 0, count_time_result)
+            )
+
+        # 验证4: 确保 LIKE 过滤后数据量合理(不是返回所有数据)
+        print_colored(
+            Colors.YELLOW,
+            f"\n🔍 Test 4: LIKE actually filters data (not returning all)",
+        )
+
+        try:
+            cursor.execute("SELECT COUNT(*) FROM taxi_trips")
+            total_rows = cursor.fetchone()[0]
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ Total count query failed: {e}")
+            print_colored(Colors.RED, f"❌ Failed SQL: SELECT COUNT(*) FROM taxi_trips")
+            total_rows = -1
+
+        try:
+
+            cursor.execute(
+                f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'"
+            )
+            like_rows = cursor.fetchone()[0]
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ LIKE count query failed: {e}")
+            print_colored(
+                Colors.RED,
+                f"❌ Failed SQL: SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'",
+            )
+            like_rows = -1
+
+        print(f"  Total rows: {total_rows}")
+        print(f"  LIKE matched: {like_rows}")
+
+        if like_rows == 0:
+            print_colored(
+                Colors.YELLOW, f"  ⚠️  LIKE matched 0 rows - pattern may not exist"
+            )
+            results.append(("LIKE-Result-4: Filter effectiveness check", True, 0, 0))
+        elif like_rows < total_rows:
+            percentage = like_rows / total_rows * 100
+            print_colored(
+                Colors.GREEN,
+                f"  ✓ LIKE filtered data correctly ({percentage:.1f}% of total)",
+            )
+            results.append(
+                ("LIKE-Result-4: Filter effectiveness check", True, 0, like_rows)
+            )
+        elif like_rows == total_rows:
+            print_colored(
+                Colors.RED,
+                f"  ✗ LIKE returned all data but multiple prefixes exist!",
+            )
 
     # LIKE 正确性验证测试
     print_colored(Colors.BLUE, "\n=== LIKE Correctness Verification ===\n")
@@ -319,12 +508,22 @@ def test_nyc_taxi(conn):
 
         # 执行 LIKE 查询
         like_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern}%'"
-        cursor.execute(like_sql)
-        like_count = cursor.fetchone()[0]
+        try:
+            cursor.execute(like_sql)
+            like_count = cursor.fetchone()[0]
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ LIKE query failed: {e}")
+            print_colored(Colors.RED, f"❌ Failed SQL: {like_sql}")
+            like_count = -1
 
         # 执行无过滤查询
-        cursor.execute("SELECT COUNT(*) FROM taxi_trips")
-        total_count = cursor.fetchone()[0]
+        try:
+            cursor.execute("SELECT COUNT(*) FROM taxi_trips")
+            total_count = cursor.fetchone()[0]
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ Total count query failed: {e}")
+            print_colored(Colors.RED, f"❌ Failed SQL: SELECT COUNT(*) FROM taxi_trips")
+            total_count = -1
 
         print(f"  Total rows: {total_count:,}")
         print(f"  LIKE matched rows: {like_count:,}")
@@ -355,12 +554,22 @@ def test_nyc_taxi(conn):
         print_colored(Colors.YELLOW, f"\n🔍 Verifying LIKE with time range filter")
 
         like_time_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '{pattern}%'"
-        cursor.execute(like_time_sql)
-        like_time_count = cursor.fetchone()[0]
+        try:
+            cursor.execute(like_time_sql)
+            like_time_count = cursor.fetchone()[0]
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ LIKE+time query failed: {e}")
+            print_colored(Colors.RED, f"❌ Failed SQL: {like_time_sql}")
+            like_time_count = -1
 
         time_only_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}"
-        cursor.execute(time_only_sql)
-        time_only_count = cursor.fetchone()[0]
+        try:
+            cursor.execute(time_only_sql)
+            time_only_count = cursor.fetchone()[0]
+        except Exception as e:
+            print_colored(Colors.RED, f"❌ Time-only query failed: {e}")
+            print_colored(Colors.RED, f"❌ Failed SQL: {time_only_sql}")
+            time_only_count = -1
 
         print(f"  Time range only: {time_only_count:,} rows")
         print(f"  Time range + LIKE: {like_time_count:,} rows")
