@@ -1,10 +1,8 @@
-mod aggregation;
 mod aggregation_executor;
 mod cursor_pagination;
 mod natural_order_executor;
 mod parallel_executor;
 mod partition_executor;
-mod query_builder;
 mod result_merger;
 mod scan_executor;
 mod serial_executor;
@@ -45,10 +43,9 @@ pub struct QueryResult {
 ///
 /// 设计原则：
 /// - 扁平化路由，无嵌套分支
-/// - 单一职责，只做路由
+/// - 单一职责,只做路由
 /// - 执行逻辑由专门的 executor 负责
 pub struct Executor {
-    engine: Arc<Engine>,
     serial_executor: SerialExecutor,
     parallel_executor: ParallelExecutor,
     aggregation_executor: AggregationExecutor,
@@ -63,7 +60,6 @@ impl Executor {
             parallel_executor: ParallelExecutor::new(engine.clone()),
             aggregation_executor: AggregationExecutor::new(engine.clone()),
             natural_order_executor: NaturalOrderExecutor::new(engine.clone()),
-            engine,
         }
     }
 

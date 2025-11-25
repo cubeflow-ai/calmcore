@@ -157,24 +157,6 @@ impl SegmentScanner {
     ///
     /// 用于 `SELECT COUNT(*) FROM table WHERE ...` 查询的极速优化
     ///
-    /// # 性能优势
-    /// - 传统方式: apply_filters → 读取所有匹配行 → 计数
-    /// - 优化方式: apply_filters → bitmap.len() (零行读取)
-    /// - 提升倍数: 100-1000x
-    ///
-    /// # 参数
-    /// - `filters`: WHERE 条件表达式列表
-    ///
-    /// # 返回
-    /// - 匹配的文档数 (bitmap cardinality)
-    pub(crate) fn count_matches(&self, filters: &[Expr]) -> u64 {
-        if let Some(bitmap) = self.apply_filters(filters) {
-            bitmap.len()
-        } else {
-            0
-        }
-    }
-
     /// 带 skip 和 limit 的扫描（用于自然顺序查询）
     ///
     /// # 参数
