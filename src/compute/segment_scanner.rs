@@ -1004,10 +1004,10 @@ impl SegmentScanner {
     }
     /// 查询等值条件
     /// 返回 None 的情况：
-    /// 1. 字段没有索引（index_readers 中不存在）- 返回空 bitmap
+    /// 1. 字段没有索引（index_readers 中不存在）- 返回 None 让 DataFusion 全表扫描
     /// 2. IndexReader 无法处理这个查询（如 Keyword 类型查询数字）- 返回空 bitmap
     ///
-    /// 注意: 返回 None 会导致全表扫描,所以即使没有索引也应该返回空 bitmap
+    /// 注意: 返回 None 会让 AND/OR 逻辑将该条件视为"全表扫描"
     fn query_equal(
         &self,
         field_name: &str,
@@ -1019,16 +1019,22 @@ impl SegmentScanner {
                 // 如果查询失败(类型不匹配等),返回空 bitmap
                 Some(reader.query(value).unwrap_or_else(RoaringBitmap::new))
             }
-            None => Some(RoaringBitmap::new()),
+            None => {
+                log::info!(
+                    "⚠️  [SegmentScanner::query_equal] field '{}' has no index, returning None for full scan",
+                    field_name
+                );
+                None
+            }
         }
     }
 
     /// 查询范围条件
     /// 返回 None 的情况：
-    /// 1. 字段没有索引（index_readers 中不存在）- 返回空 bitmap
+    /// 1. 字段没有索引（index_readers 中不存在）- 返回 None 让 DataFusion 全表扫描
     /// 2. 字段类型不支持范围查询（如 Keyword）- 返回空 bitmap
     ///
-    /// 注意: 返回 None 会导致全表扫描,所以即使没有索引也应该返回空 bitmap
+    /// 注意: 返回 None 会让 AND/OR 逻辑将该条件视为"全表扫描"
     fn query_range(
         &self,
         field_name: &str,
@@ -1065,10 +1071,10 @@ impl SegmentScanner {
             }
             None => {
                 log::info!(
-                    "query range for field:[{:?}] not found so return ALL",
+                    "⚠️  [SegmentScanner::query_range] field '{}' has no index, returning None for full scan",
                     field_name
                 );
-                Some(RoaringBitmap::new())
+                None
             }
         }
     }
