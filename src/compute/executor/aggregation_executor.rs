@@ -11,7 +11,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray, UInt64Array};
+use datafusion::arrow::array::{
+    ArrayRef, Float64Array, Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::*;
@@ -360,16 +362,29 @@ impl AggregationExecutor {
         let group_column = batch.column(0);
         let count_column = batch.column(1);
 
-        let group_array = group_column
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| {
-                CoreError::Internal(format!("GROUP BY field '{}' is not a string", group_field))
-            })?;
-
-        // 不需要预先downcast，直接在循环中判断
+        // 支持多种数据类型的 GROUP BY 字段
         for i in 0..batch.num_rows() {
-            let group_value = group_array.value(i).to_string();
+            let group_value = if let Some(arr) = group_column.as_any().downcast_ref::<StringArray>()
+            {
+                arr.value(i).to_string()
+            } else if let Some(arr) = group_column.as_any().downcast_ref::<Int64Array>() {
+                arr.value(i).to_string()
+            } else if let Some(arr) = group_column.as_any().downcast_ref::<UInt64Array>() {
+                arr.value(i).to_string()
+            } else if let Some(arr) = group_column.as_any().downcast_ref::<Int32Array>() {
+                arr.value(i).to_string()
+            } else if let Some(arr) = group_column.as_any().downcast_ref::<UInt32Array>() {
+                arr.value(i).to_string()
+            } else if let Some(arr) = group_column.as_any().downcast_ref::<Float64Array>() {
+                arr.value(i).to_string()
+            } else {
+                return Err(CoreError::Internal(format!(
+                    "Unsupported GROUP BY field type for '{}': {:?}",
+                    group_field,
+                    group_column.data_type()
+                )));
+            };
+
             let count_value = if let Some(arr) = count_column.as_any().downcast_ref::<UInt64Array>()
             {
                 arr.value(i)

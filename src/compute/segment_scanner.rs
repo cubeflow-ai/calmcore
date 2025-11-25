@@ -10,6 +10,7 @@ use crate::segment::{IndexReader, RowDataStore};
 use datafusion::scalar::ScalarValue;
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
+    common::ToDFSchema,
     error::Result as DFResult,
     execution::SendableRecordBatchStream,
     logical_expr::Expr,
@@ -87,7 +88,9 @@ impl SegmentScanner {
         );
 
         // 应用 filters，计算命中的文档
-        let result_bitmap = self.apply_filters(filters)?;
+        let (result_bitmap, unsupported_filters) = self.apply_filters(filters);
+
+        let result_bitmap = result_bitmap?;
 
         log::info!(
             "🎯 [SegmentScanner] hit={}/{} ({:.1}%), limit={:?}, sort={:?}",
@@ -116,6 +119,10 @@ impl SegmentScanner {
                             field_name,
                             if *ascending { "ASC" } else { "DESC" }
                         );
+                        // 如果有未支持的过滤器,需要在有序扫描之上再加一层 FilterExec
+                        if !unsupported_filters.is_empty() {
+                            return self.wrap_with_filter(ordered_plan, unsupported_filters);
+                        }
                         return Some(ordered_plan);
                     }
                 } else {
@@ -130,24 +137,47 @@ impl SegmentScanner {
         }
 
         // 否则使用普通的 bitmap 扫描
-        self.build_exec_plan(result_bitmap, projection, sort, limit)
+        self.build_exec_plan(result_bitmap, projection, sort, limit, unsupported_filters)
     }
 
     /// 应用过滤条件，返回命中的文档bitmap
-    fn apply_filters(&self, filters: &[Expr]) -> Option<RoaringBitmap> {
+    fn apply_filters(&self, filters: &[Expr]) -> (Option<RoaringBitmap>, Vec<Expr>) {
         let mut result_bitmap = self.valid_docs.clone();
+        let mut unsupported_filters = Vec::new();
 
         for filter in filters {
-            if let Some(bitmap) = self.expr_to_bitmap(filter) {
-                result_bitmap &= bitmap;
+            match self.expr_to_bitmap(filter) {
+                Some(bitmap) => {
+                    result_bitmap &= bitmap;
+                }
+                None => {
+                    // 遇到无法通过索引处理的条件(如 LIKE)
+                    // 收集这些过滤器,稍后让 DataFusion 处理
+                    unsupported_filters.push(filter.clone());
+                    log::debug!(
+                        "⚠️  [SegmentScanner] Cannot handle filter via index: {:?}, will use DataFusion filter",
+                        filter
+                    );
+                }
             }
         }
 
-        if result_bitmap.is_empty() {
+        // 如果有无法处理的过滤器
+        if !unsupported_filters.is_empty() {
+            log::debug!(
+                "🔍 [SegmentScanner] Has {} unsupported filters, returning {} docs for DataFusion filtering",
+                unsupported_filters.len(),
+                result_bitmap.len()
+            );
+        }
+
+        let bitmap = if result_bitmap.is_empty() {
             None
         } else {
             Some(result_bitmap)
-        }
+        };
+
+        (bitmap, unsupported_filters)
     }
 
     /// 尝试对范围查询使用预分组优化
@@ -255,8 +285,8 @@ impl SegmentScanner {
         }
 
         // 应用 WHERE 过滤条件
-        let result_bitmap = self
-            .apply_filters(filters)
+        let (result_bitmap, _unsupported_filters) = self.apply_filters(filters);
+        let result_bitmap = result_bitmap
             .ok_or_else(|| CoreError::Internal("Failed to apply filters".to_string()))?;
 
         // 只保留在当前范围内且满足条件的行
@@ -804,6 +834,7 @@ impl SegmentScanner {
         projection: Option<&Vec<usize>>,
         sort: Option<(String, bool)>,
         limit: Option<usize>,
+        unsupported_filters: Vec<Expr>,
     ) -> Option<Arc<dyn ExecutionPlan>> {
         let projected_schema = self.build_projected_schema(projection);
 
@@ -817,7 +848,14 @@ impl SegmentScanner {
             limit,
         );
 
-        Some(Arc::new(exec))
+        let mut plan: Arc<dyn ExecutionPlan> = Arc::new(exec);
+
+        // 如果有无法通过索引处理的过滤器(如 LIKE),使用 FilterExec 包装
+        if !unsupported_filters.is_empty() {
+            plan = self.wrap_with_filter(plan, unsupported_filters)?;
+        }
+
+        Some(plan)
     }
 
     /// 构建投影后的schema
@@ -833,6 +871,55 @@ impl SegmentScanner {
             Some(_) => Arc::new(datafusion::arrow::datatypes::Schema::empty()),
             None => self.schema.clone(),
         }
+    }
+
+    /// 使用 FilterExec 包装执行计划以应用无法通过索引处理的过滤器
+    fn wrap_with_filter(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        filters: Vec<Expr>,
+    ) -> Option<Arc<dyn ExecutionPlan>> {
+        use datafusion::execution::context::SessionContext;
+        use datafusion::physical_expr::create_physical_expr;
+        use datafusion::physical_plan::filter::FilterExec;
+
+        log::info!(
+            "🔧 [SegmentScanner] Wrapping plan with FilterExec for {} unsupported filters",
+            filters.len()
+        );
+
+        // 创建临时 session context 用于表达式转换
+        let session_ctx = SessionContext::new();
+        let df_schema = input.schema().clone().to_dfschema().ok()?;
+
+        // 将所有过滤器用 AND 连接
+        let combined_filter = if filters.len() == 1 {
+            filters.into_iter().next()?
+        } else {
+            let mut iter = filters.into_iter();
+            let mut combined = iter.next()?;
+            for filter in iter {
+                combined = Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr {
+                    left: Box::new(combined),
+                    op: datafusion::logical_expr::Operator::And,
+                    right: Box::new(filter),
+                });
+            }
+            combined
+        };
+
+        // 转换为物理表达式
+        let physical_expr = create_physical_expr(
+            &combined_filter,
+            &df_schema,
+            session_ctx.state().execution_props(),
+        )
+        .ok()?;
+
+        // 创建 FilterExec
+        let filter_exec = FilterExec::try_new(physical_expr, input).ok()?;
+
+        Some(Arc::new(filter_exec))
     }
 
     fn expr_to_bitmap(&self, expr: &Expr) -> Option<RoaringBitmap> {
@@ -1318,9 +1405,11 @@ impl SegmentStream {
                 base_chunk_size
             };
 
-            eprintln!(
+            log::debug!(
                 "  [SegmentStream] target_chunk_size={}, remaining_rows={:?}, total_docs={}",
-                target_chunk_size, remaining_rows, self.total_docs
+                target_chunk_size,
+                remaining_rows,
+                self.total_docs
             );
 
             // 先收集一批 doc_ids
@@ -1338,7 +1427,7 @@ impl SegmentStream {
                 return Ok(Vec::new());
             }
 
-            eprintln!(
+            log::debug!(
                 "  [SegmentStream] Using batch lookup for {} doc_ids (total_docs={})",
                 doc_ids_to_process.len(),
                 self.total_docs
@@ -1389,9 +1478,10 @@ impl SegmentStream {
                 return Ok(Vec::new());
             }
 
-            eprintln!(
+            log::debug!(
                 "  [SegmentStream] Using incremental lookup for {} doc_ids (total_docs={})",
-                collected_rows, self.total_docs
+                collected_rows,
+                self.total_docs
             );
 
             batch_groups
@@ -1403,13 +1493,13 @@ impl SegmentStream {
 
         let _doc_count = batch_groups.values().map(|v| v.len()).sum::<usize>();
 
-        eprintln!(
+        log::debug!(
             "  [SegmentStream] batch_groups: {} groups, {} total doc_ids",
             batch_groups.len(),
             _doc_count
         );
         for (batch_start_id, doc_ids) in batch_groups.iter().take(3) {
-            eprintln!(
+            log::debug!(
                 "    batch_start_id={}: {} doc_ids (first few: {:?})",
                 batch_start_id,
                 doc_ids.len(),
@@ -1451,7 +1541,7 @@ impl SegmentStream {
 
             // 正常投影处理
             if let Some(source_batch) = source_batches.get(&batch_start_id) {
-                eprintln!("  [SegmentStream] Processing batch_start_id={}, source_batch has {} rows, {} doc_ids to process",
+                log::debug!("  [SegmentStream] Processing batch_start_id={}, source_batch has {} rows, {} doc_ids to process",
                     batch_start_id, source_batch.num_rows(), doc_ids_in_batch.len());
 
                 let mut row_indices: Vec<usize> = doc_ids_in_batch
@@ -1461,20 +1551,20 @@ impl SegmentStream {
                         if row_idx < source_batch.num_rows() {
                             Some(row_idx)
                         } else {
-                            eprintln!("  [SegmentStream] WARNING: doc_id={}, batch_start_id={}, row_idx={} >= num_rows={}",
+                            log::debug!("  [SegmentStream] WARNING: doc_id={}, batch_start_id={}, row_idx={} >= num_rows={}",
                                 doc_id, batch_start_id, row_idx, source_batch.num_rows());
                             None
                         }
                     })
                     .collect();
 
-                eprintln!(
+                log::debug!(
                     "  [SegmentStream] Extracted {} row indices",
                     row_indices.len()
                 );
 
                 if row_indices.is_empty() {
-                    eprintln!("  [SegmentStream] No valid row indices, skipping batch");
+                    log::debug!("  [SegmentStream] No valid row indices, skipping batch");
                     continue;
                 }
 
@@ -1489,30 +1579,30 @@ impl SegmentStream {
                     .filter_map(|col| take(col.as_ref(), &indices_array, None).ok())
                     .collect();
 
-                eprintln!(
+                log::debug!(
                     "  [SegmentStream] Created {} columns from take operation",
                     final_columns.len()
                 );
-                eprintln!(
+                log::debug!(
                     "  [SegmentStream] Expected schema fields: {}",
                     self.schema.fields().len()
                 );
-                eprintln!(
+                log::debug!(
                     "  [SegmentStream] Source batch columns: {}",
                     source_batch.num_columns()
                 );
 
                 match RecordBatch::try_new(self.schema.clone(), final_columns.clone()) {
                     Ok(batch) => {
-                        eprintln!(
+                        log::debug!(
                             "  [SegmentStream] Created result batch with {} rows",
                             batch.num_rows()
                         );
                         result_batches.push(batch);
                     }
                     Err(e) => {
-                        eprintln!("  [SegmentStream] Failed to create RecordBatch: {}", e);
-                        eprintln!(
+                        log::debug!("  [SegmentStream] Failed to create RecordBatch: {}", e);
+                        log::debug!(
                             "  [SegmentStream] Schema: {:?}",
                             self.schema
                                 .fields()
@@ -1520,7 +1610,7 @@ impl SegmentStream {
                                 .map(|f| (f.name(), f.data_type()))
                                 .collect::<Vec<_>>()
                         );
-                        eprintln!(
+                        log::debug!(
                             "  [SegmentStream] Column types: {:?}",
                             final_columns
                                 .iter()
@@ -1530,14 +1620,14 @@ impl SegmentStream {
                     }
                 }
             } else {
-                eprintln!(
+                log::debug!(
                     "  [SegmentStream] No source_batch found for batch_start_id={}",
                     batch_start_id
                 );
             }
         }
 
-        eprintln!(
+        log::debug!(
             "  [SegmentStream] Generated {} result batches",
             result_batches.len()
         );

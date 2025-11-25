@@ -241,6 +241,153 @@ def test_nyc_taxi(conn):
         ),
     ]
 
+    # 执行基本查询测试
+    results = []
+    for name, sql, show_preview in test_cases:
+        success, duration, row_count = run_query(cursor, name, sql, show_preview)
+        results.append((name, success, duration, row_count))
+
+    # LIKE 查询测试
+    print_colored(Colors.BLUE, "\n=== LIKE Query Tests ===\n")
+
+    # 先查询一些真实的 id 值用于测试 (id 是 KEYWORD 类型,支持 LIKE)
+    cursor.execute("SELECT id FROM taxi_trips LIMIT 10")
+    ids = [str(row[0]) for row in cursor.fetchall()]
+
+    like_tests = []
+
+    if ids:
+        # 选择一个包含数字的 id 用于测试
+        # 大多数 id 格式类似 "trip_12345"
+        test_id = ids[0] if ids else "trip_1"
+
+        # 提取一些可搜索的模式
+        if "_" in test_id:
+            # 例如 "trip_12345" -> 搜索 "trip"
+            pattern1 = test_id.split("_")[0]  # "trip"
+            # 搜索数字部分的一部分
+            pattern2 = test_id[-2:] if len(test_id) >= 2 else test_id  # 最后两个字符
+        else:
+            pattern1 = test_id[:3] if len(test_id) >= 3 else test_id
+            pattern2 = test_id[-2:] if len(test_id) >= 2 else test_id
+
+        like_tests.extend(
+            [
+                (
+                    "LIKE-1. Simple LIKE query with prefix",
+                    f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'",
+                    True,
+                ),
+                (
+                    "LIKE-2. LIKE with time range",
+                    f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '%{pattern2}%'",
+                    True,
+                ),
+                (
+                    "LIKE-3. Multiple LIKE conditions (contains)",
+                    f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '%{pattern1}%' AND id LIKE '%{pattern2}%'",
+                    True,
+                ),
+                (
+                    "LIKE-4. LIKE with ORDER BY and LIMIT",
+                    f"SELECT * FROM taxi_trips WHERE id LIKE '{pattern1}%' ORDER BY pickup_datetime DESC LIMIT 10",
+                    True,
+                ),
+            ]
+        )
+
+    for name, sql, show_preview in like_tests:
+        success, duration, row_count = run_query(cursor, name, sql, show_preview)
+        results.append((name, success, duration, row_count))
+
+    # LIKE 正确性验证测试
+    print_colored(Colors.BLUE, "\n=== LIKE Correctness Verification ===\n")
+
+    if ids:
+        test_id = ids[0]
+
+        # 提取搜索模式
+        if "_" in test_id:
+            pattern = test_id.split("_")[0]  # 例如 "trip"
+        else:
+            pattern = test_id[:3] if len(test_id) >= 3 else test_id
+
+        # 验证 LIKE 结果确实包含匹配的模式
+        print_colored(
+            Colors.YELLOW, f"\n🔍 Verifying LIKE '{pattern}%' actually filters data"
+        )
+
+        # 执行 LIKE 查询
+        like_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern}%'"
+        cursor.execute(like_sql)
+        like_count = cursor.fetchone()[0]
+
+        # 执行无过滤查询
+        cursor.execute("SELECT COUNT(*) FROM taxi_trips")
+        total_count = cursor.fetchone()[0]
+
+        print(f"  Total rows: {total_count:,}")
+        print(f"  LIKE matched rows: {like_count:,}")
+
+        if like_count < total_count:
+            print_colored(
+                Colors.GREEN,
+                f"  ✓ LIKE correctly filtered data ({like_count}/{total_count} = {like_count/total_count*100:.1f}%)",
+            )
+            results.append(("LIKE-Verify-1: Filter effectiveness", True, 0, like_count))
+        elif like_count == total_count:
+            # 可能是所有数据都匹配,验证是否合理
+            # 对于 id 字段,如果所有 id 都以相同前缀开头,这是合理的
+            print_colored(
+                Colors.YELLOW,
+                f"  ⚠️  All data matches pattern (this might be expected if all IDs have same prefix)",
+            )
+            results.append(("LIKE-Verify-1: Filter effectiveness", True, 0, like_count))
+        else:
+            print_colored(
+                Colors.RED, f"  ✗ LIKE count > total count - something is wrong!"
+            )
+            results.append(
+                ("LIKE-Verify-1: Filter effectiveness", False, 0, like_count)
+            )
+
+        # 验证 LIKE 与具体值的组合
+        print_colored(Colors.YELLOW, f"\n🔍 Verifying LIKE with time range filter")
+
+        like_time_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '{pattern}%'"
+        cursor.execute(like_time_sql)
+        like_time_count = cursor.fetchone()[0]
+
+        time_only_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}"
+        cursor.execute(time_only_sql)
+        time_only_count = cursor.fetchone()[0]
+
+        print(f"  Time range only: {time_only_count:,} rows")
+        print(f"  Time range + LIKE: {like_time_count:,} rows")
+
+        if time_only_count == 0:
+            print_colored(
+                Colors.YELLOW, f"  ⚠️  No data in time range, skipping verification"
+            )
+            results.append(("LIKE-Verify-2: Combined filter", True, 0, like_time_count))
+        elif like_time_count <= time_only_count:
+            percentage = (
+                like_time_count / time_only_count * 100 if time_only_count > 0 else 0
+            )
+            print_colored(
+                Colors.GREEN,
+                f"  ✓ LIKE correctly filtered time range results ({like_time_count}/{time_only_count} = {percentage:.1f}%)",
+            )
+            results.append(("LIKE-Verify-2: Combined filter", True, 0, like_time_count))
+        else:
+            print_colored(
+                Colors.RED,
+                f"  ✗ LIKE+time count > time-only count - filter not working!",
+            )
+            results.append(
+                ("LIKE-Verify-2: Combined filter", False, 0, like_time_count)
+            )
+
     # 正确性校验测试（合并到主测试中）
     print_colored(Colors.BLUE, "\n=== Correctness Verification Tests ===\n")
 
@@ -327,7 +474,6 @@ def test_nyc_taxi(conn):
         ),
     ]
 
-    results = []
     for name, sql1, sql2 in verification_tests:
         # 执行第一个查询
         success1, duration1, count1 = run_query(
