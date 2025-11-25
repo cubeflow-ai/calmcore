@@ -19,7 +19,7 @@ use datafusion::prelude::*;
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
-use super::distributed::QueryResult;
+use super::QueryResult;
 
 pub struct AggregationExecutor {
     engine: Arc<Engine>,
@@ -235,11 +235,15 @@ impl AggregationExecutor {
         // 带 WHERE 条件：需要通过 DataFusion 执行查询统计
         // 注意：这里不能直接访问 segment 内部的 bitmap，
         // 因为 WHERE 条件可能很复杂，需要完整的查询引擎
-        self.execute_count_on_partition(table_name, partition_name, &format!(
-            "SELECT COUNT(*) FROM {} {}",
+        self.execute_count_on_partition(
             table_name,
-            where_clause.unwrap_or("")
-        ))
+            partition_name,
+            &format!(
+                "SELECT COUNT(*) FROM {} {}",
+                table_name,
+                where_clause.unwrap_or("")
+            ),
+        )
         .await
     }
 

@@ -1068,7 +1068,7 @@ impl Engine {
 
     /// 执行 SQL 查询 (向后兼容方法)
     ///
-    /// **推荐**: 新代码请直接使用 `DistributedExecutor`
+    /// **推荐**: 新代码请直接使用 `Executor`
     ///
     /// # 参数
     /// - `sql`: SQL 查询语句
@@ -1077,8 +1077,8 @@ impl Engine {
     /// - `batches`: 查询结果的数据批次
     ///
     /// # 注意
-    /// 此方法现在委托给 `DistributedExecutor`，保持向后兼容。
-    /// 由于需要 Arc<Engine>，建议协议层直接使用 DistributedExecutor。
+    /// 此方法现在委托给 `Executor`，保持向后兼容。
+    /// 由于需要 Arc<Engine>，建议协议层直接使用 Executor。
     ///
     /// 如果协议层需要总行数（如 ES 分页），应该：
     /// 1. 先执行 COUNT 查询获取总数
@@ -1087,9 +1087,9 @@ impl Engine {
         self: &Arc<Self>,
         sql: &str,
     ) -> CoreResult<crate::compute::QueryResult> {
-        use crate::compute::DistributedExecutor;
+        use crate::compute::Executor;
 
-        let executor = DistributedExecutor::new(self.clone());
+        let executor = Executor::new(self.clone());
         executor.execute_sql(sql).await
     }
 

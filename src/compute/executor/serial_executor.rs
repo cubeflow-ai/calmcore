@@ -17,7 +17,7 @@ use datafusion::prelude::*;
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
-use super::distributed::QueryResult;
+use super::QueryResult;
 
 pub struct SerialExecutor {
     engine: Arc<Engine>,
@@ -343,8 +343,8 @@ impl SerialExecutor {
         schema: &Arc<datafusion::arrow::datatypes::Schema>,
         limit: usize,
     ) -> CoreResult<Option<RecordBatch>> {
-        use datafusion::arrow::compute::take;
         use datafusion::arrow::array::UInt32Array;
+        use datafusion::arrow::compute::take;
 
         let row_data = segment.get_row_data();
         let deleted = segment.get_deleted();
@@ -394,9 +394,7 @@ impl SerialExecutor {
                 let internal_id_array = internal_id_column
                     .as_any()
                     .downcast_ref::<datafusion::arrow::array::UInt64Array>()
-                    .ok_or_else(|| {
-                        CoreError::Internal("internal_id is not UInt64".to_string())
-                    })?;
+                    .ok_or_else(|| CoreError::Internal("internal_id is not UInt64".to_string()))?;
 
                 // 找出需要提取的行索引
                 let mut indices = Vec::new();
@@ -421,8 +419,8 @@ impl SerialExecutor {
                         new_columns.push(taken);
                     }
 
-                    let new_batch = RecordBatch::try_new(batch.schema(), new_columns)
-                        .map_err(|e| {
+                    let new_batch =
+                        RecordBatch::try_new(batch.schema(), new_columns).map_err(|e| {
                             CoreError::Internal(format!("Failed to create RecordBatch: {}", e))
                         })?;
 
@@ -441,9 +439,8 @@ impl SerialExecutor {
         } else {
             use datafusion::arrow::compute::concat_batches;
             let schema = result_batches[0].schema();
-            let merged = concat_batches(&schema, &result_batches).map_err(|e| {
-                CoreError::Internal(format!("Failed to concat batches: {}", e))
-            })?;
+            let merged = concat_batches(&schema, &result_batches)
+                .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))?;
             Ok(Some(merged))
         }
     }

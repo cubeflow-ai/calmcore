@@ -18,7 +18,7 @@ use crate::compute::TopKMerger;
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
-use super::distributed::QueryResult;
+use super::QueryResult;
 
 pub struct ParallelExecutor {
     engine: Arc<Engine>,
