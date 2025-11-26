@@ -1,3 +1,5 @@
+mod aggregation;
+
 use std::sync::Arc;
 
 use poem::{
@@ -17,6 +19,10 @@ use crate::{
     engine::Engine,
     schema::{field::FieldOption, Schema},
     utils::error::CoreError,
+};
+
+use aggregation::{
+    build_aggregation_sql, convert_aggregations_to_sql, format_aggregation_response, Aggregations,
 };
 
 // 错误辅助函数
@@ -127,6 +133,12 @@ struct SearchRequest {
     size: Option<usize>,
     from: Option<usize>,
     sort: Option<Value>,
+    /// 聚合查询
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aggregations: Option<Aggregations>,
+    /// 简写形式
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aggs: Option<Aggregations>,
 }
 
 #[allow(dead_code)]
@@ -715,9 +727,123 @@ async fn bulk_operation_impl(
 async fn search_documents(
     Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
+    poem::web::Query(params): poem::web::Query<std::collections::HashMap<String, String>>,
     Json(search_req): Json<SearchRequest>,
 ) -> Result<Response, poem::Error> {
-    search_impl(server.clone(), index, search_req).await
+    let typed_keys = params
+        .get("typed_keys")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    search_impl(server.clone(), index, search_req, typed_keys).await
+}
+
+/// 处理聚合查询
+async fn handle_aggregation_search(
+    server: Arc<ElasticsearchServer>,
+    index: String,
+    search_req: SearchRequest,
+    aggregations: Aggregations,
+    schema: Arc<Schema>,
+    typed_keys: bool,
+) -> Result<Response, poem::Error> {
+    let start_time = std::time::Instant::now();
+
+    // 转换聚合查询为 SQL
+    let agg_sql = convert_aggregations_to_sql(&aggregations, &schema)
+        .map_err(|e| bad_request(format!("Failed to convert aggregation: {}", e)))?;
+
+    // 构建 WHERE 子句
+    let mut where_clause = String::new();
+    if let Some(query) = &search_req.query {
+        if let Some(where_sql) = convert_es_query_to_sql(query, &schema) {
+            where_clause = format!(" WHERE {}", where_sql);
+        }
+    }
+
+    // 构建完整的聚合 SQL
+    let sql = build_aggregation_sql(&index, &where_clause, &agg_sql);
+
+    log::info!("🔍 [ES Agg] Generated SQL: {}", sql);
+
+    // 执行聚合查询
+    let result = server
+        .engine
+        .clone()
+        .execute_sql(&sql)
+        .await
+        .map_err(|e| internal_error(format!("Aggregation query failed: {}", e)))?;
+
+    // 先获取总计数
+    let count_sql = format!("SELECT COUNT(*) FROM {}{}", index, where_clause);
+    let total_count = match server.engine.clone().execute_sql(&count_sql).await {
+        Ok(result) if result.batch.num_rows() > 0 => {
+            use datafusion::arrow::array::*;
+            let batch = &result.batch;
+            if batch.num_columns() > 0 && batch.num_rows() > 0 {
+                let column = batch.column(0);
+                if let Some(int64_array) = column.as_any().downcast_ref::<Int64Array>() {
+                    int64_array.value(0) as usize
+                } else if let Some(uint64_array) = column.as_any().downcast_ref::<UInt64Array>() {
+                    uint64_array.value(0) as usize
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+
+    // 转换结果为 JSON
+    let records = crate::utils::arrow_utils::record_batch_to_json(&result.batch)
+        .map_err(|e| internal_error(format!("Failed to convert results: {}", e)))?;
+
+    // 转换为 Map 格式
+    let record_maps: Vec<serde_json::Map<String, Value>> = records
+        .into_iter()
+        .filter_map(|v| v.as_object().cloned())
+        .collect();
+
+    // 获取第一个聚合的名称
+    let agg_name = aggregations
+        .aggs
+        .keys()
+        .next()
+        .ok_or_else(|| bad_request("No aggregation name found"))?;
+
+    // 格式化为 ES 响应格式
+    let agg_result = format_aggregation_response(agg_name, record_maps, typed_keys);
+
+    let took = start_time.elapsed().as_millis() as u64;
+
+    // 构建响应
+    let response_body = json!({
+        "took": took,
+        "timed_out": false,
+        "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+        },
+        "hits": {
+            "total": {
+                "value": total_count,
+                "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []  // size=0 时不返回文档
+        },
+        "aggregations": agg_result
+    });
+
+    let json_string = serde_json::to_string(&response_body)
+        .map_err(|e| internal_error(format!("Failed to serialize response: {}", e)))?;
+
+    Ok(Response::builder()
+        .content_type("application/json")
+        .body(json_string))
 }
 
 /// 搜索文档（GET）
@@ -726,6 +852,7 @@ async fn search_documents(
 async fn search_documents_get(
     Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
+    poem::web::Query(params): poem::web::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, poem::Error> {
     // 默认搜索请求
     let search_req = SearchRequest {
@@ -733,8 +860,14 @@ async fn search_documents_get(
         size: Some(10),
         from: Some(0),
         sort: None,
+        aggregations: None,
+        aggs: None,
     };
-    search_impl(server.clone(), index, search_req).await
+    let typed_keys = params
+        .get("typed_keys")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    search_impl(server.clone(), index, search_req, typed_keys).await
 }
 
 /// 搜索实现
@@ -742,6 +875,7 @@ async fn search_impl(
     server: Arc<ElasticsearchServer>,
     index: String,
     search_req: SearchRequest,
+    typed_keys: bool,
 ) -> Result<Response, poem::Error> {
     let start_time = std::time::Instant::now();
 
@@ -750,6 +884,26 @@ async fn search_impl(
         .engine
         .get_table_meta(&index)
         .map_err(|_| not_found(format!("Index '{}' not found", index)))?;
+
+    // 🔧 检查是否是聚合查询
+    let aggs = search_req
+        .aggregations
+        .as_ref()
+        .or(search_req.aggs.as_ref());
+    if let Some(aggregations) = aggs {
+        log::info!("🔍 [ES Agg] Processing aggregation query");
+        let schema_arc = Arc::new(meta.schema.clone());
+        let aggregations_owned = aggregations.clone();
+        return handle_aggregation_search(
+            server,
+            index,
+            search_req,
+            aggregations_owned,
+            schema_arc,
+            typed_keys,
+        )
+        .await;
+    }
 
     // 构建 SQL 查询
     let mut sql = format!("SELECT * FROM {}", index);
