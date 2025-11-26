@@ -91,7 +91,10 @@ impl AggregationExecutor {
         sql: &str,
         table_name: &str,
     ) -> CoreResult<QueryResult> {
-        log::info!("🔍 [CountWithFilter] Executing: {}", sql);
+        // 🔧 修复: 移除 ORDER BY 和 LIMIT,因为对 COUNT(*) 聚合查询无意义
+        // 这些子句可能导致 DataFusion 优化错误,丢失 WHERE 条件
+        let cleaned_sql = Self::remove_order_by_and_limit(sql);
+        log::info!("🔍 [CountWithFilter] Executing: {}", cleaned_sql);
 
         let partition_names = self.engine.list_partitions(table_name).await;
 
@@ -101,7 +104,7 @@ impl AggregationExecutor {
             .map(|partition_name| {
                 let table_name = table_name.to_string();
                 let partition_name = partition_name.clone();
-                let sql = sql.to_string();
+                let sql = cleaned_sql.clone();
                 async move {
                     self.execute_count_on_partition(&table_name, &partition_name, &sql)
                         .await
@@ -307,6 +310,34 @@ impl AggregationExecutor {
         };
 
         Ok(count)
+    }
+
+    /// 移除 SQL 中的 ORDER BY 和 LIMIT 子句
+    ///
+    /// 对于聚合查询(如 COUNT),ORDER BY 和 LIMIT 是无意义的,
+    /// 因为聚合结果只有一行。这些子句可能导致 DataFusion 优化问题。
+    fn remove_order_by_and_limit(sql: &str) -> String {
+        let sql_upper = sql.to_uppercase();
+
+        // 找到 ORDER BY 的位置
+        let order_by_pos = sql_upper.find(" ORDER BY");
+
+        // 找到 LIMIT 的位置
+        let limit_pos = sql_upper.find(" LIMIT");
+
+        // 取最早出现的位置作为截断点
+        let cut_pos = match (order_by_pos, limit_pos) {
+            (Some(o), Some(l)) => Some(o.min(l)),
+            (Some(o), None) => Some(o),
+            (None, Some(l)) => Some(l),
+            (None, None) => None,
+        };
+
+        if let Some(pos) = cut_pos {
+            sql[..pos].to_string()
+        } else {
+            sql.to_string()
+        }
     }
 
     /// 在单个 partition 上执行 GROUP BY 查询

@@ -104,8 +104,9 @@ impl TableProvider for PartitionTableProvider {
         let mut segment_plans: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
 
         log::info!(
-            "🔍 [PartitionTableProvider::scan] Starting scan for partition {}, filters={:?}, limit={:?}",
+            "🔍 [PartitionTableProvider::scan] Starting scan for partition {}, projection={:?}, filters={:?}, limit={:?}",
             self.partition.name(),
+            projection,
             filters,
             limit
         );

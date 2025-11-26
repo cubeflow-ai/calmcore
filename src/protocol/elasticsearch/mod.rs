@@ -717,7 +717,6 @@ async fn search_documents(
     Path(index): Path<String>,
     Json(search_req): Json<SearchRequest>,
 ) -> Result<Response, poem::Error> {
-    println!("{:?}", search_req);
     search_impl(server.clone(), index, search_req).await
 }
 
@@ -1009,9 +1008,27 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
             if let Some(term_obj) = term.as_object() {
                 let conditions: Vec<String> = term_obj
                     .iter()
-                    .map(|(field, value)| {
+                    .filter_map(|(field, value)| {
+                        // term 查询支持两种格式:
+                        // 1. {"term": {"field": "value"}}
+                        // 2. {"term": {"field": {"value": "value", "boost": 1.0}}}
+                        let actual_value = if let Some(obj) = value.as_object() {
+                            // 对象格式: 提取 "value" 字段
+                            obj.get("value").unwrap_or(value)
+                        } else {
+                            // 简单格式: 直接使用值
+                            value
+                        };
+
+                        // 跳过空字符串(通常表示不过滤此字段)
+                        if let Some(s) = actual_value.as_str() {
+                            if s.is_empty() {
+                                return None;
+                            }
+                        }
+
                         // 使用改写器处理值
-                        let rewritten = rewriter.rewrite_value(field, value);
+                        let rewritten = rewriter.rewrite_value(field, actual_value);
                         let val_str = match &rewritten {
                             Value::String(s) => format!("'{}'", s.replace("'", "''")),
                             Value::Number(n) => n.to_string(),
@@ -1020,9 +1037,11 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
                         };
                         Some(format!("{} = {}", field, val_str))
                     })
-                    .collect::<Option<Vec<_>>>()?;
+                    .collect();
 
-                return Some(conditions.join(" AND "));
+                if !conditions.is_empty() {
+                    return Some(conditions.join(" AND "));
+                }
             }
         }
 
@@ -1031,9 +1050,26 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
             if let Some(match_obj) = match_query.as_object() {
                 let conditions: Vec<String> = match_obj
                     .iter()
-                    .map(|(field, value)| {
+                    .filter_map(|(field, value)| {
+                        // match 查询也支持对象格式: {"match": {"field": {"query": "value", "boost": 1.0}}}
+                        let actual_value = if let Some(obj) = value.as_object() {
+                            // 对象格式: 提取 "query" 或 "value" 字段
+                            obj.get("query")
+                                .or_else(|| obj.get("value"))
+                                .unwrap_or(value)
+                        } else {
+                            value
+                        };
+
+                        // 跳过空字符串
+                        if let Some(s) = actual_value.as_str() {
+                            if s.is_empty() {
+                                return None;
+                            }
+                        }
+
                         // 使用改写器处理值
-                        let rewritten = rewriter.rewrite_value(field, value);
+                        let rewritten = rewriter.rewrite_value(field, actual_value);
                         let val_str = match &rewritten {
                             Value::String(s) => format!("'{}'", s.replace("'", "''")),
                             Value::Number(n) => n.to_string(),
@@ -1042,9 +1078,11 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
                         };
                         Some(format!("{} = {}", field, val_str))
                     })
-                    .collect::<Option<Vec<_>>>()?;
+                    .collect();
 
-                return Some(conditions.join(" AND "));
+                if !conditions.is_empty() {
+                    return Some(conditions.join(" AND "));
+                }
             }
         }
 

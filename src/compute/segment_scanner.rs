@@ -90,20 +90,22 @@ impl SegmentScanner {
         // 应用 filters，计算命中的文档
         let (result_bitmap, unsupported_filters) = self.apply_filters(filters);
 
-        // 如果有不支持的过滤器(如 LIKE),即使 bitmap 为空也要创建执行计划
-        // 让 DataFusion 的 FilterExec 来应用这些过滤器
-        let result_bitmap = if let Some(bitmap) = result_bitmap {
-            bitmap
-        } else if !unsupported_filters.is_empty() {
-            // 有不支持的过滤器但 bitmap 为空 - 使用所有有效文档
-            log::debug!(
-                "📋 [SegmentScanner] Bitmap filter returned None, but has {} unsupported filters, using all valid docs",
-                unsupported_filters.len()
-            );
-            self.valid_docs.clone()
-        } else {
-            // 既没有 bitmap 结果,也没有不支持的过滤器 - 返回 None
-            return None;
+        // 🔧 修复: 正确处理 bitmap 为 None 的情况
+        // 1. 如果 bitmap 为 Some 且有数据 -> 使用 bitmap
+        // 2. 如果 bitmap 为 None 但只有 unsupported_filters(没有支持的过滤器) -> 使用所有文档,让 DataFusion 过滤
+        // 3. 如果 bitmap 为 None 且有支持的过滤器(已返回空) -> 直接返回 None,因为支持的过滤器已经确定没数据
+        let result_bitmap = match result_bitmap {
+            Some(bitmap) => bitmap,
+            None => {
+                // bitmap 为 None 有两种情况:
+                // A) 支持的过滤器返回空结果 -> 应该返回 None
+                // B) 只有不支持的过滤器,没有支持的过滤器 -> 使用所有文档
+                // 我们无法从这里区分,但 apply_filters 已经做了处理
+                // 如果有不支持的过滤器,apply_filters 应该返回 Some(valid_docs)
+                // 所以 None 意味着真的没数据
+                log::debug!("📋 [SegmentScanner] Bitmap filter returned None, no documents match");
+                return None;
+            }
         };
 
         log::info!(
@@ -891,23 +893,22 @@ impl SegmentScanner {
         limit: Option<usize>,
         unsupported_filters: Vec<Expr>,
     ) -> Option<Arc<dyn ExecutionPlan>> {
-        // 策略:直接使用原始的 projection
-        // 但如果有 LIKE 过滤器且 projection 为空,暂时忽略 projection
-        // 让 FilterExec 能访问完整数据,DataFusion 稍后会处理投影
+        // 🔧 策略调整: 如果有不支持的过滤器(如 LIKE),需要特殊处理投影
+        // 1. 先用完整 schema 创建 SegmentExec
+        // 2. 然后添加 FilterExec 进行过滤
+        // 3. 最后添加 ProjectionExec 应用投影
+        // 这样 FilterExec 可以访问所有字段来进行过滤
 
-        let exec_projection = if !unsupported_filters.is_empty()
-            && projection.map_or(false, |p| p.is_empty())
-        {
-            // 对于空 projection + 不支持的过滤器:
-            // 暂时忽略空 projection,使用完整 schema
-            // DataFusion 会在 FilterExec 之后自动添加 ProjectionExec
+        let (exec_projection, need_projection_after_filter) = if !unsupported_filters.is_empty() {
+            // 有不支持的过滤器: 先不应用投影,在 FilterExec 之后再投影
             log::debug!(
-                "🔧 [build_exec_plan] Empty projection with {} unsupported filters, temporarily ignoring projection",
+                "🔧 [build_exec_plan] Deferring projection due to {} unsupported filters",
                 unsupported_filters.len()
             );
-            None // 暂时返回完整数据
+            (None, projection.map(|p| p.to_vec()))
         } else {
-            projection.map(|p| p.to_vec())
+            // 没有不支持的过滤器: 直接应用投影
+            (projection.map(|p| p.to_vec()), None)
         };
 
         let projected_schema = self.build_projected_schema(exec_projection.as_ref());
@@ -927,8 +928,35 @@ impl SegmentScanner {
         // 如果有无法通过索引处理的过滤器(如 LIKE),使用 FilterExec 包装
         if !unsupported_filters.is_empty() {
             plan = self.wrap_with_filter(plan, unsupported_filters)?;
-        }
 
+            // 🔧 如果之前延迟了投影,现在在 FilterExec 之后应用
+            if let Some(proj_indices) = need_projection_after_filter {
+                if !proj_indices.is_empty() {
+                    use datafusion::physical_plan::projection::ProjectionExec;
+
+                    log::debug!(
+                        "🔧 [build_exec_plan] Adding ProjectionExec after FilterExec with {} columns",
+                        proj_indices.len()
+                    );
+
+                    let schema = plan.schema();
+                    // 构建投影表达式: (物理表达式, 列名)
+                    let projection_exprs: Vec<_> = proj_indices
+                        .iter()
+                        .map(|&i| {
+                            use datafusion::physical_expr::expressions::Column;
+                            let field = schema.field(i);
+                            (
+                                Arc::new(Column::new(field.name(), i)) as _,
+                                field.name().to_string(),
+                            )
+                        })
+                        .collect();
+
+                    plan = Arc::new(ProjectionExec::try_new(projection_exprs, plan).ok()?);
+                }
+            }
+        }
         Some(plan)
     }
 

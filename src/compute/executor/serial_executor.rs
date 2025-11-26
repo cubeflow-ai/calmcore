@@ -37,18 +37,14 @@ impl SerialExecutor {
         offset: Option<usize>,
         has_where: bool,
     ) -> CoreResult<QueryResult> {
-        if has_where {
-            // 有 WHERE：Partition 串行，Segment 并行（通过 DataFusion）
-            log::info!("🔀 [SerialLimit with WHERE] Using parallel segment scan");
-            self.execute_with_where(sql, table_name, limit, offset)
-                .await
-        } else {
-            // 无 WHERE：Partition 串行，Segment 串行，直接读取原始数据
-            log::info!(
-                "➡️  [SerialLimit no WHERE] Using serial segment scan with early termination"
-            );
-            self.execute_no_where(table_name, limit, offset).await
-        }
+        // 🔧 修复: 始终使用 DataFusion 路径以保证投影正确应用
+        // 之前的优化路径(execute_no_where)绕过了 DataFusion,导致投影丢失
+        log::info!(
+            "🔀 [SerialLimit] Using DataFusion path (has_where={})",
+            has_where
+        );
+        self.execute_with_where(sql, table_name, limit, offset)
+            .await
     }
 
     /// 执行串行全表扫描（无 ORDER BY，无 LIMIT）
