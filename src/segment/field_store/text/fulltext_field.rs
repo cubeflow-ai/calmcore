@@ -129,13 +129,13 @@ impl FullTextField {
 
         // Load posting lists from Parquet
         let posting_lists = if std::path::Path::new(&posting_path).exists() {
-            eprintln!(
+            log::debug!(
                 "📂 [FullTextField] Loading posting lists from {}",
                 posting_path
             );
 
             let rows = read_posting_lists(&posting_path)?;
-            eprintln!("✅ [FullTextField] Loaded {} terms", rows.len());
+            log::debug!("✅ [FullTextField] Loaded {} terms", rows.len());
 
             // Convert rows to BTree
             let mut btree = BTree::new(128);
@@ -146,7 +146,7 @@ impl FullTextField {
 
             Arc::new(RwLock::new(btree))
         } else {
-            eprintln!(
+            log::debug!(
                 "⚠️  [FullTextField] No posting lists found at {}, creating empty index",
                 posting_path
             );
@@ -155,7 +155,7 @@ impl FullTextField {
 
         // Load field statistics
         let field_stats = if std::path::Path::new(&stats_path).exists() {
-            eprintln!("📂 [FullTextField] Loading field stats from {}", stats_path);
+            log::debug!("📂 [FullTextField] Loading field stats from {}", stats_path);
             let stats_json = fs::read_to_string(&stats_path)
                 .map_err(|e| CoreError::Internal(format!("Failed to read field stats: {}", e)))?;
             let stats: FieldStats = serde_json::from_str(&stats_json).map_err(|e| {
@@ -163,7 +163,7 @@ impl FullTextField {
             })?;
             Arc::new(RwLock::new(stats))
         } else {
-            eprintln!(
+            log::warn!(
                 "⚠️  [FullTextField] No field stats found at {}, using defaults",
                 stats_path
             );
@@ -205,7 +205,7 @@ impl FullTextField {
             // Write posting lists to Parquet
             let posting_path = format!("{}/posting_lists.parquet", path);
             write_posting_lists(&rows, &posting_path)?;
-            eprintln!(
+            log::debug!(
                 "✅ [FullTextField] Persisted {} terms to {}",
                 rows.len(),
                 posting_path
@@ -220,7 +220,7 @@ impl FullTextField {
         fs::write(&stats_path, stats_json)
             .map_err(|e| CoreError::Internal(format!("Failed to write field stats: {}", e)))?;
 
-        eprintln!("✅ [FullTextField] Persisted field stats to {}", stats_path);
+        log::debug!("✅ [FullTextField] Persisted field stats to {}", stats_path);
 
         Ok(Self {
             field: self.field.clone(),

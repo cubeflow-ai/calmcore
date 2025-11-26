@@ -297,7 +297,7 @@ impl Config {
                     std::process::exit(0);
                 }
                 _ => {
-                    eprintln!("Unknown argument: {}", args[i]);
+                    log::error!("Unknown argument: {}", args[i]);
                     Self::print_help();
                     return Err(format!("Unknown argument: {}", args[i]).into());
                 }

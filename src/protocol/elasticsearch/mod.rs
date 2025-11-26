@@ -758,13 +758,13 @@ async fn search_impl(
 
     // 转换 ES DSL 查询为 SQL WHERE 条件
     if let Some(query) = &search_req.query {
-        eprintln!("🔍 [ES Search] Input query: {:?}", query);
+        log::info!("🔍 [ES Search] Input query: {:?}", query);
         if let Some(where_sql) = convert_es_query_to_sql(query, &meta.schema) {
             where_clause = format!(" WHERE {}", where_sql);
             sql.push_str(&where_clause);
-            eprintln!("✅ [ES Search] Generated WHERE clause: {}", where_clause);
+            log::debug!("✅ [ES Search] Generated WHERE clause: {}", where_clause);
         } else {
-            eprintln!("⚠️  [ES Search] convert_es_query_to_sql returned None");
+            log::warn!("⚠️  [ES Search] convert_es_query_to_sql returned None");
         }
     }
 
@@ -773,7 +773,7 @@ async fn search_impl(
         if let Some(order_by) = convert_es_sort_to_sql(sort) {
             if !order_by.is_empty() {
                 sql.push_str(&format!(" ORDER BY {}", order_by));
-                eprintln!("🔍 [ES Search] Added ORDER BY: {}", order_by);
+                log::debug!("🔍 [ES Search] Added ORDER BY: {}", order_by);
             }
         }
     }
@@ -787,7 +787,7 @@ async fn search_impl(
         sql.push_str(&format!(" LIMIT {}", size));
     }
 
-    eprintln!("🔍 [ES Search] Generated SQL: {}", sql);
+    log::debug!("🔍 [ES Search] Generated SQL: {}", sql);
 
     // 先执行 COUNT 查询获取总数
     let count_sql = format!("SELECT COUNT(*) FROM {}{}", index, where_clause);
@@ -816,7 +816,7 @@ async fn search_impl(
         Ok(result) => result,
         Err(e) => {
             let msg = format!("Query execution failed: {}", e);
-            eprintln!("❌ [ES Search] Error: {}", msg);
+            log::error!("❌ [ES Search] Error: {}", msg);
             return Err(internal_error(msg).into());
         }
     };
@@ -845,7 +845,7 @@ async fn search_impl(
     };
 
     if !sort_fields.is_empty() {
-        eprintln!("🔍 [ES Sort] Extracted sort fields: {:?}", sort_fields);
+        log::debug!("🔍 [ES Sort] Extracted sort fields: {:?}", sort_fields);
     }
 
     // 注意: LIMIT 和 OFFSET 已经在 SQL 中处理了,这里不需要再分页
@@ -875,9 +875,10 @@ async fn search_impl(
                 .collect();
 
             if !sort_values.is_empty() {
-                eprintln!(
+                log::debug!(
                     "🔍 [ES Sort] Document id={}, sort values={:?}",
-                    id, sort_values
+                    id,
+                    sort_values
                 );
             }
 
@@ -1050,11 +1051,6 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
         // wildcard 查询 - 通配符匹配
         if let Some(wildcard) = query_obj.get("wildcard") {
             if let Some(wildcard_obj) = wildcard.as_object() {
-                eprintln!(
-                    "🔍 [ES Wildcard] Processing wildcard query: {:?}",
-                    wildcard_obj
-                );
-
                 let conditions: Vec<String> = wildcard_obj
                     .iter()
                     .filter_map(|(field, value)| {
@@ -1086,18 +1082,12 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
                             .replace("?", "_") // ES ? -> SQL _
                             .replace("'", "''"); // 转义单引号
 
-                        eprintln!(
-                            "🔍 [ES Wildcard] Field: {}, Pattern: {} -> SQL LIKE: {}",
-                            field, pattern, sql_pattern
-                        );
-
                         Some(format!("{} LIKE '{}'", field, sql_pattern))
                     })
                     .collect();
 
                 if !conditions.is_empty() {
                     let result = conditions.join(" AND ");
-                    eprintln!("✅ [ES Wildcard] Generated WHERE: {}", result);
                     return Some(result);
                 }
             }
@@ -1106,8 +1096,6 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
         // prefix 查询 - 前缀匹配
         if let Some(prefix) = query_obj.get("prefix") {
             if let Some(prefix_obj) = prefix.as_object() {
-                eprintln!("🔍 [ES Prefix] Processing prefix query: {:?}", prefix_obj);
-
                 let conditions: Vec<String> = prefix_obj
                     .iter()
                     .filter_map(|(field, value)| {
@@ -1127,11 +1115,6 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
                             .replace("_", "\\_")
                             .replace("'", "''");
 
-                        eprintln!(
-                            "🔍 [ES Prefix] Field: {}, Prefix: {} -> SQL LIKE: {}%",
-                            field, prefix_val, sql_prefix
-                        );
-
                         // 前缀匹配转换为 LIKE 'prefix%'
                         Some(format!("{} LIKE '{}%'", field, sql_prefix))
                     })
@@ -1139,7 +1122,6 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
 
                 if !conditions.is_empty() {
                     let result = conditions.join(" AND ");
-                    eprintln!("✅ [ES Prefix] Generated WHERE: {}", result);
                     return Some(result);
                 }
             }
@@ -1283,22 +1265,12 @@ fn convert_es_query_to_sql(query: &Value, schema: &crate::schema::Schema) -> Opt
 fn convert_es_sort_to_sql(sort: &Value) -> Option<String> {
     let mut order_clauses = Vec::new();
 
-    eprintln!("🔍 [convert_es_sort_to_sql] Input sort: {:?}", sort);
-
     // sort 可以是数组或对象
     if let Some(sort_array) = sort.as_array() {
-        eprintln!(
-            "🔍 [convert_es_sort_to_sql] Processing array with {} items",
-            sort_array.len()
-        );
         for sort_item in sort_array {
             if let Some(field_name) = sort_item.as_str() {
                 // 简单格式: ["field1", "field2"]
                 order_clauses.push(format!("{} ASC", field_name));
-                eprintln!(
-                    "🔍 [convert_es_sort_to_sql] Added simple field: {} ASC",
-                    field_name
-                );
             } else if let Some(sort_obj) = sort_item.as_object() {
                 // 对象格式: [{"field": {"order": "desc"}}]
                 for (field, order_spec) in sort_obj {
@@ -1314,19 +1286,11 @@ fn convert_es_sort_to_sql(sort: &Value) -> Option<String> {
                     let order_upper = order.to_uppercase();
                     if order_upper == "ASC" || order_upper == "DESC" {
                         order_clauses.push(format!("{} {}", field, order_upper));
-                        eprintln!(
-                            "🔍 [convert_es_sort_to_sql] Added field: {} {}",
-                            field, order_upper
-                        );
                     }
                 }
             }
         }
     } else if let Some(sort_obj) = sort.as_object() {
-        eprintln!(
-            "🔍 [convert_es_sort_to_sql] Processing object with {} fields",
-            sort_obj.len()
-        );
         // 单个对象格式: {"field": "asc"} 或 {"field": {"order": "desc"}}
         for (field, order_spec) in sort_obj {
             let order = if let Some(spec_obj) = order_spec.as_object() {
@@ -1341,25 +1305,16 @@ fn convert_es_sort_to_sql(sort: &Value) -> Option<String> {
             let order_upper = order.to_uppercase();
             if order_upper == "ASC" || order_upper == "DESC" {
                 order_clauses.push(format!("{} {}", field, order_upper));
-                eprintln!(
-                    "🔍 [convert_es_sort_to_sql] Added field: {} {}",
-                    field, order_upper
-                );
             }
         }
     } else {
-        eprintln!("⚠️  [convert_es_sort_to_sql] Sort is neither array nor object");
+        log::error!("⚠️  [convert_es_sort_to_sql] Sort is neither array nor object");
     }
 
     let result = if order_clauses.is_empty() {
-        eprintln!("⚠️  [convert_es_sort_to_sql] No order clauses generated");
         None
     } else {
         let result_str = order_clauses.join(", ");
-        eprintln!(
-            "✅ [convert_es_sort_to_sql] Generated ORDER BY: {}",
-            result_str
-        );
         Some(result_str)
     };
 

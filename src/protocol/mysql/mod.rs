@@ -270,6 +270,28 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             || query_lower == "begin"
             || query_lower.starts_with("start transaction")
         {
+            // 特殊处理: SET TRACING 命令
+            if query_lower.starts_with("set tracing") {
+                use crate::utils::tracing::{disable_tracing, enable_tracing, toggle_tracing};
+
+                if query_lower.contains("on")
+                    || query_lower.contains("= 1")
+                    || query_lower.contains("=1")
+                {
+                    enable_tracing();
+                    return results.completed(0, 0);
+                } else if query_lower.contains("off")
+                    || query_lower.contains("= 0")
+                    || query_lower.contains("=0")
+                {
+                    disable_tracing();
+                    return results.completed(0, 0);
+                } else if query_lower == "set tracing" || query_lower == "set tracing;" {
+                    toggle_tracing();
+                    return results.completed(0, 0);
+                }
+            }
+
             // 返回空结果或默认值
             if query_lower.starts_with("select @@")
                 || query_lower.starts_with("select version()")
@@ -711,12 +733,33 @@ async fn execute_query<W: io::Read + io::Write>(
     query: &str,
     results: QueryResultWriter<'_, W>,
 ) -> io::Result<()> {
-    let result = match engine.clone().execute_sql(query).await {
-        Ok(result) => result,
-        Err(e) => {
-            let msg = format!("SQL execution failed: {}", e);
-            log::error!("SQL Error: {}", msg);
-            return results.error(ErrorKind::ER_PARSE_ERROR, msg.as_bytes());
+    use crate::utils::tracing::{is_tracing_enabled, TraceContext};
+
+    // 创建追踪上下文
+    let trace_ctx = if is_tracing_enabled() {
+        Some(TraceContext::new(format!(
+            "query-{}",
+            query.chars().take(50).collect::<String>()
+        )))
+    } else {
+        None
+    };
+
+    // SQL 解析和执行
+    let result = {
+        let _span = trace_ctx.as_ref().map(|ctx| {
+            let guard = ctx.span("SQL Execution");
+            guard.metadata("query", query);
+            guard
+        });
+
+        match engine.clone().execute_sql(query).await {
+            Ok(result) => result,
+            Err(e) => {
+                let msg = format!("SQL execution failed: {}", e);
+                log::error!("SQL Error: {}", msg);
+                return results.error(ErrorKind::ER_PARSE_ERROR, msg.as_bytes());
+            }
         }
     };
 
@@ -735,9 +778,25 @@ async fn execute_query<W: io::Read + io::Write>(
         result.matched_docs
     );
 
-    // 返回结果集 - write_query_result 内部会实现背压
+    // 序列化结果
     let schema = result.batch.schema();
-    write_query_result(results, &schema, &[result.batch])
+    let write_result = {
+        let _span = trace_ctx.as_ref().map(|ctx| {
+            let guard = ctx.span("Write Result");
+            guard.metadata("rows", result.batch.num_rows().to_string());
+            guard.metadata("columns", result.batch.num_columns().to_string());
+            guard
+        });
+
+        write_query_result(results, &schema, &[result.batch])
+    };
+
+    // 打印追踪报告
+    if let Some(ctx) = trace_ctx {
+        ctx.report();
+    }
+
+    write_result
 }
 
 /// CREATE TABLE 处理

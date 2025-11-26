@@ -63,14 +63,14 @@ impl<'a> QueryRewriter<'a> {
                 if datetime_utils::looks_like_date(s) {
                     match datetime_utils::parse_date_to_timestamp_millis(s) {
                         Ok(timestamp) => {
-                            eprintln!(
+                            log::debug!(
                                 "🔄 [QueryRewriter] Converted field '{}' from date string '{}' to timestamp {}",
                                 field_name, s, timestamp
                             );
                             Value::Number(timestamp.into())
                         }
                         Err(e) => {
-                            eprintln!(
+                            log::warn!(
                                 "⚠️  [QueryRewriter] Failed to convert date '{}' for field '{}': {}",
                                 s, field_name, e
                             );
@@ -113,14 +113,16 @@ impl<'a> QueryRewriter<'a> {
                 if datetime_utils::looks_like_date(trimmed) {
                     match datetime_utils::parse_date_to_timestamp_millis(trimmed) {
                         Ok(timestamp) => {
-                            eprintln!(
+                            log::debug!(
                                 "🔄 [QueryRewriter] SQL: Converted field '{}' from '{}' to {}",
-                                field_name, trimmed, timestamp
+                                field_name,
+                                trimmed,
+                                timestamp
                             );
                             timestamp.to_string()
                         }
                         Err(e) => {
-                            eprintln!(
+                            log::warn!(
                                 "⚠️  [QueryRewriter] SQL: Failed to convert '{}' for field '{}': {}",
                                 trimmed, field_name, e
                             );

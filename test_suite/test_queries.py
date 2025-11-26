@@ -485,6 +485,10 @@ def test_nyc_taxi(conn):
             )
         elif like_rows == total_rows:
             print_colored(
+                Colors.YELLOW,
+                f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'",
+            )
+            print_colored(
                 Colors.RED,
                 f"  ✗ LIKE returned all data but multiple prefixes exist!",
             )

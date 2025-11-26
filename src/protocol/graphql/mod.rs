@@ -434,18 +434,8 @@ impl QueryRoot {
 
         for partition_id in partition_ids {
             if let Some(partition) = engine.get_partition(&name, &partition_id).await {
-                eprintln!(
-                    "🔍 [table_detail] Partition name: {}, address: {:p}",
-                    partition.name(),
-                    &*partition
-                );
-
                 // 获取 frozen segments
                 let frozen_segments = partition.get_frozen_segments();
-                eprintln!(
-                    "🔍 [table_detail] frozen_segments count: {}",
-                    frozen_segments.len()
-                );
                 let mut segments = Vec::new();
 
                 // 收集 frozen segments 信息

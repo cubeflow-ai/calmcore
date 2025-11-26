@@ -132,7 +132,7 @@ impl<K: IndexKey> GenericIndexedField<K> {
             InvertedIndex::new_disk(field_path, K::new_serializer(zstd_level))?
         } else {
             // 目录不存在，创建空索引（可能是新添加的字段）
-            eprintln!(
+            log::warn!(
                 "⚠️  [GenericIndexedField] Field directory not found: {}, creating empty index",
                 field_path
             );
@@ -367,7 +367,7 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
         end: &datafusion::scalar::ScalarValue,
         end_inclusive: bool,
     ) -> Option<RoaringBitmap> {
-        log::warn!(
+        log::debug!(
             "🔍 [GenericIndexedField::range] field={}, start={:?}, end={:?}",
             self.field.name(),
             start,
@@ -375,7 +375,7 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
         );
 
         if !K::supports_range() {
-            log::warn!(
+            log::debug!(
                 "⚠️  [GenericIndexedField::range] field={} does not support range queries",
                 self.field.name()
             );
@@ -384,10 +384,10 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
 
         // 处理 NULL 作为无界的情况
         let start_key = if matches!(start, datafusion::scalar::ScalarValue::Null) {
-            log::warn!("🔍 [range] start is NULL -> unbounded");
+            log::debug!("🔍 [range] start is NULL -> unbounded");
             None
         } else {
-            log::warn!("🔍 [range] converting start: {:?}", start);
+            log::debug!("🔍 [range] converting start: {:?}", start);
             let converted = K::from_scalar(start);
             if converted.is_none() {
                 log::error!(
@@ -401,10 +401,10 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
         };
 
         let end_key = if matches!(end, datafusion::scalar::ScalarValue::Null) {
-            log::warn!("🔍 [range] end is NULL -> unbounded");
+            log::debug!("🔍 [range] end is NULL -> unbounded");
             None
         } else {
-            log::warn!("🔍 [range] converting end: {:?}", end);
+            log::debug!("🔍 [range] converting end: {:?}", end);
             let converted = K::from_scalar(end);
             if converted.is_none() {
                 log::error!(
@@ -434,7 +434,7 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
         end: &datafusion::scalar::ScalarValue,
         end_inclusive: bool,
     ) -> Option<RoaringBitmap> {
-        log::warn!(
+        log::debug!(
             "🔍 [GenericIndexedField::range_union] field={}, start={:?}, end={:?}",
             self.field.name(),
             start,
@@ -447,10 +447,10 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
 
         // 处理 NULL 作为无界的情况
         let start_key = if matches!(start, datafusion::scalar::ScalarValue::Null) {
-            log::warn!("🔍 [range_union] start is NULL -> unbounded");
+            log::debug!("🔍 [range_union] start is NULL -> unbounded");
             None
         } else {
-            log::warn!("🔍 [range_union] converting start: {:?}", start);
+            log::debug!("🔍 [range_union] converting start: {:?}", start);
             let converted = K::from_scalar(start);
             if converted.is_none() {
                 log::error!("❌ [range_union] FAILED to convert start={:?}", start);
@@ -460,10 +460,10 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
         };
 
         let end_key = if matches!(end, datafusion::scalar::ScalarValue::Null) {
-            log::warn!("🔍 [range_union] end is NULL -> unbounded");
+            log::debug!("🔍 [range_union] end is NULL -> unbounded");
             None
         } else {
-            log::warn!("🔍 [range_union] converting end: {:?}", end);
+            log::debug!("🔍 [range_union] converting end: {:?}", end);
             let converted = K::from_scalar(end);
             if converted.is_none() {
                 log::error!("❌ [range_union] FAILED to convert end={:?}", end);

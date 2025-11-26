@@ -366,7 +366,7 @@ impl Segment {
                 }
             }
             if let Err(e) = f.write(&new_data, start_id) {
-                eprintln!("index write field {:?} failed: {:?}", f.name(), e);
+                log::error!("index write field {:?} failed: {:?}", f.name(), e);
             }
         }
 
@@ -974,7 +974,7 @@ impl Segment {
                     let disk_field = timestamp.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else {
-                    eprintln!(
+                    log::error!(
                         "⚠️ Warning: Field '{}' has unsupported type for persist, skipping",
                         field_name
                     );
@@ -1129,13 +1129,14 @@ impl Segment {
                 // Replace (overwrite) the target deleted file
                 if let Err(e) = std::fs::rename(&source_path, &target_path) {
                     // Log error but continue with other files
-                    eprintln!(
+                    log::error!(
                         "Warning: Failed to replace deleted file for segment {}-{}: {}",
-                        hist_start, hist_end, e
+                        hist_start,
+                        hist_end,
+                        e
                     );
-                    eprintln!("  File will be retried on next startup");
                 } else {
-                    println!("    Replaced segment-{}-{}/deleted ✓", hist_start, hist_end);
+                    log::info!("    Replaced segment-{}-{}/deleted ✓", hist_start, hist_end);
                 }
             }
         }
@@ -1174,13 +1175,14 @@ impl Segment {
         end_id: u64,
         schema: Arc<Schema>,
     ) -> CoreResult<Self> {
-        eprintln!("🔍 [DEBUG load_frozen] base_dir: {}", base_dir);
-        eprintln!(
-            "🔍 [DEBUG load_frozen] start_id: {}, end_id: {}",
-            start_id, end_id
+        log::debug!(
+            "🔍 [DEBUG load_frozen] base_dir: {} start_id: {}, end_id: {}",
+            base_dir,
+            start_id,
+            end_id
         );
         let segment_path = format!("{}/segment-{}-{}", base_dir, start_id, end_id);
-        eprintln!("🔍 [DEBUG load_frozen] segment_path: {}", segment_path);
+        log::debug!("🔍 [DEBUG load_frozen] segment_path: {}", segment_path);
 
         if !std::path::Path::new(&segment_path).exists() {
             return Err(CoreError::NotExisted(format!(
@@ -1189,7 +1191,7 @@ impl Segment {
             )));
         }
 
-        println!("Loading frozen segment from: {}", segment_path);
+        log::info!("Loading frozen segment from: {}", segment_path);
 
         // 1. Load fields
         let start = std::time::Instant::now();
@@ -1343,13 +1345,13 @@ impl Segment {
         } else {
             let row_data_path = format!("{}/rowdata", segment_path);
             let parquet_path = format!("{}/rowdata.parquet", row_data_path);
-            eprintln!("  🔍 [DEBUG] Checking Parquet path: {}", parquet_path);
-            eprintln!(
-                "  🔍 [DEBUG] Path exists: {}",
+            log::debug!(
+                "  🔍 [DEBUG] Checking Parquet path: {} Path exists: {}",
+                parquet_path,
                 std::path::Path::new(&parquet_path).exists()
             );
             if std::path::Path::new(&parquet_path).exists() {
-                println!("  Loading row_data from Parquet: {}", parquet_path);
+                log::info!("  Loading row_data from Parquet: {}", parquet_path);
                 (
                     RowDataStore::new_parquet(&parquet_path)?,
                     Some(segment_path.clone()),

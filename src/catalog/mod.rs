@@ -251,7 +251,7 @@ impl Catalog {
                             tables.insert(table_name, Arc::new(meta));
                         }
                         Err(e) => {
-                            eprintln!("⚠️  Failed to load table from {:?}: {}", path, e);
+                            log::error!("⚠️  Failed to load table from {:?}: {}", path, e);
                         }
                     }
                 }

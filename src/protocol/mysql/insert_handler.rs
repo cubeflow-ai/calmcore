@@ -1,5 +1,4 @@
 /// 高性能 INSERT 语句处理器 - 使用字节级优化解析
-
 use crate::catalog::TableMeta;
 use crate::engine::Engine;
 use crate::schema::field::FieldOption;
@@ -16,35 +15,33 @@ pub async fn handle_insert<W: io::Read + io::Write>(
     results: QueryResultWriter<'_, W>,
 ) -> io::Result<()> {
     let start_time = std::time::Instant::now();
-    eprintln!("⏱️  [INSERT] Starting, SQL length: {} bytes", query.len());
+    log::info!("⏱️  [INSERT] Starting, SQL length: {} bytes", query.len());
 
     let parse_start = std::time::Instant::now();
-    
+
     // 快速解析 INSERT 语句
     let (table_name, columns, all_rows) = parse_insert_fast(query)?;
-    
-    eprintln!(
+
+    log::info!(
         "⏱️  [INSERT] Parsed {} rows in {:?}",
         all_rows.len(),
         parse_start.elapsed()
     );
 
     // 获取表元数据
-    let meta = engine.get_table_meta(&table_name).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Table not found: {}", e),
-        )
-    })?;
+    let meta = engine
+        .get_table_meta(&table_name)
+        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("Table not found: {}", e)))?;
 
     // 按 partition 分组数据
     let route_start = std::time::Instant::now();
     use std::collections::HashMap;
     let mut partition_data: HashMap<String, Vec<Vec<String>>> = HashMap::new();
 
-    let pk_field = meta.schema.primary_key.as_ref().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "Table has no primary key")
-    })?;
+    let pk_field =
+        meta.schema.primary_key.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Table has no primary key")
+        })?;
 
     let pk_idx = columns
         .iter()
@@ -61,7 +58,7 @@ pub async fn handle_insert<W: io::Read + io::Write>(
         partition_data.entry(partition_id).or_default().push(row);
     }
 
-    eprintln!(
+    log::info!(
         "⏱️  [INSERT] Routed to {} partitions in {:?}",
         partition_data.len(),
         route_start.elapsed()
@@ -74,7 +71,7 @@ pub async fn handle_insert<W: io::Read + io::Write>(
     for (partition_id, rows) in partition_data {
         let batch_build_start = std::time::Instant::now();
         let batch = build_record_batch(&meta, &columns, &rows)?;
-        eprintln!(
+        log::debug!(
             "⏱️  [INSERT] Built RecordBatch for partition {} ({} rows) in {:?}",
             partition_id,
             rows.len(),
@@ -86,7 +83,7 @@ pub async fn handle_insert<W: io::Read + io::Write>(
             .get_partition(&table_name, &partition_id)
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Partition not found"))?;
-        eprintln!(
+        log::debug!(
             "⏱️  [INSERT] Got partition {} in {:?}",
             partition_id,
             partition_get_start.elapsed()
@@ -96,7 +93,7 @@ pub async fn handle_insert<W: io::Read + io::Write>(
         partition
             .upsert(batch)
             .map_err(|e| io::Error::other(format!("Insert failed: {}", e)))?;
-        eprintln!(
+        log::debug!(
             "⏱️  [INSERT] Upserted {} rows to partition {} in {:?}",
             rows.len(),
             partition_id,
@@ -106,13 +103,13 @@ pub async fn handle_insert<W: io::Read + io::Write>(
         total_inserted += rows.len() as u64;
     }
 
-    eprintln!(
+    log::info!(
         "⏱️  [INSERT] Total insert time: {:?}, {} rows, {:.0} rows/sec",
         insert_start.elapsed(),
         total_inserted,
         total_inserted as f64 / insert_start.elapsed().as_secs_f64()
     );
-    eprintln!("⏱️  [INSERT] Overall time: {:?}\n", start_time.elapsed());
+    log::info!("⏱️  [INSERT] Overall time: {:?}\n", start_time.elapsed());
 
     results.completed(total_inserted, 0)
 }
@@ -121,7 +118,7 @@ pub async fn handle_insert<W: io::Read + io::Write>(
 fn parse_insert_fast(query: &str) -> io::Result<(String, Vec<String>, Vec<Vec<String>>)> {
     let query_bytes = query.as_bytes();
     let len = query_bytes.len();
-    
+
     // 1. 找到表名 - 跳过 "INSERT INTO "
     let mut pos = 0;
     while pos < len - 6 {
@@ -131,31 +128,33 @@ fn parse_insert_fast(query: &str) -> io::Result<(String, Vec<String>, Vec<Vec<St
         }
         pos += 1;
     }
-    
+
     while pos < len && query_bytes[pos].is_ascii_whitespace() {
         pos += 1;
     }
-    
+
     if pos + 4 <= len && query_bytes[pos..pos + 4].eq_ignore_ascii_case(b"INTO") {
         pos += 4;
     }
-    
+
     while pos < len && query_bytes[pos].is_ascii_whitespace() {
         pos += 1;
     }
-    
+
     let table_start = pos;
     while pos < len && query_bytes[pos] != b'(' && !query_bytes[pos].is_ascii_whitespace() {
         pos += 1;
     }
-    let table_name = String::from_utf8_lossy(&query_bytes[table_start..pos]).trim().to_string();
-    
+    let table_name = String::from_utf8_lossy(&query_bytes[table_start..pos])
+        .trim()
+        .to_string();
+
     // 2. 找到列名
     while pos < len && query_bytes[pos] != b'(' {
         pos += 1;
     }
     pos += 1; // 跳过 '('
-    
+
     let cols_start = pos;
     let mut depth = 1;
     while pos < len && depth > 0 {
@@ -168,15 +167,12 @@ fn parse_insert_fast(query: &str) -> io::Result<(String, Vec<String>, Vec<Vec<St
             pos += 1;
         }
     }
-    
+
     let cols_str = String::from_utf8_lossy(&query_bytes[cols_start..pos]);
-    let columns: Vec<String> = cols_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-    
+    let columns: Vec<String> = cols_str.split(',').map(|s| s.trim().to_string()).collect();
+
     pos += 1; // 跳过 ')'
-    
+
     // 3. 找到 VALUES
     while pos < len - 6 {
         if query_bytes[pos..pos + 6].eq_ignore_ascii_case(b"VALUES") {
@@ -185,31 +181,31 @@ fn parse_insert_fast(query: &str) -> io::Result<(String, Vec<String>, Vec<Vec<St
         }
         pos += 1;
     }
-    
+
     while pos < len && query_bytes[pos].is_ascii_whitespace() {
         pos += 1;
     }
-    
+
     // 4. 解析所有行 (优化：使用字节切片)
     let mut all_rows = Vec::new();
-    
+
     while pos < len {
         // 跳过空白和逗号
         while pos < len && (query_bytes[pos].is_ascii_whitespace() || query_bytes[pos] == b',') {
             pos += 1;
         }
-        
+
         if pos >= len || query_bytes[pos] == b';' {
             break;
         }
-        
+
         if query_bytes[pos] != b'(' {
             break;
         }
         pos += 1;
-        
+
         let row_start = pos;
-        
+
         // 找到对应的 ')' - 处理引号
         let mut depth = 1;
         while pos < len && depth > 0 {
@@ -237,10 +233,10 @@ fn parse_insert_fast(query: &str) -> io::Result<(String, Vec<String>, Vec<Vec<St
                 pos += 1;
             }
         }
-        
+
         let row_str = String::from_utf8_lossy(&query_bytes[row_start..pos]);
         let row_values = parse_row_values(&row_str)?;
-        
+
         if row_values.len() != columns.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -251,18 +247,18 @@ fn parse_insert_fast(query: &str) -> io::Result<(String, Vec<String>, Vec<Vec<St
                 ),
             ));
         }
-        
+
         all_rows.push(row_values);
         pos += 1;
     }
-    
+
     if all_rows.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "No values found in INSERT",
         ));
     }
-    
+
     Ok((table_name, columns, all_rows))
 }
 
@@ -273,16 +269,16 @@ fn parse_row_values(row_str: &str) -> io::Result<Vec<String>> {
     let len = bytes.len();
     let mut pos = 0;
     let mut current = Vec::new();
-    
+
     while pos < len {
         while pos < len && bytes[pos].is_ascii_whitespace() {
             pos += 1;
         }
-        
+
         if pos >= len {
             break;
         }
-        
+
         if bytes[pos] == b'\'' || bytes[pos] == b'"' {
             let quote = bytes[pos];
             pos += 1;
@@ -306,10 +302,10 @@ fn parse_row_values(row_str: &str) -> io::Result<Vec<String>> {
                 pos += 1;
             }
         }
-        
+
         values.push(String::from_utf8_lossy(&current).trim().to_string());
         current.clear();
-        
+
         while pos < len && (bytes[pos] == b',' || bytes[pos].is_ascii_whitespace()) {
             if bytes[pos] == b',' {
                 pos += 1;
@@ -318,7 +314,7 @@ fn parse_row_values(row_str: &str) -> io::Result<Vec<String>> {
             pos += 1;
         }
     }
-    
+
     Ok(values)
 }
 
