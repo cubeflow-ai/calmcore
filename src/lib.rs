@@ -9,4 +9,5 @@ pub mod segment_loader;
 #[macro_use]
 pub mod utils;
 // pub mod analyzer;  // Temporarily disabled due to missing dependencies
+mod cluster;
 pub mod protocol;

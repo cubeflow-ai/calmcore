@@ -55,8 +55,8 @@ impl MysqlServer {
                                 }
 
                                 // 设置读写超时，避免无响应连接长时间占用资源（跨平台）
-                                // 30秒超时适用于正常查询，对于长时间运行的查询客户端会保持活动
-                                let timeout = std::time::Duration::from_secs(30);
+                                // 增加到 8 小时，避免交互式客户端频繁断开
+                                let timeout = std::time::Duration::from_secs(300);
                                 if let Err(e) = std_stream.set_read_timeout(Some(timeout)) {
                                     log::warn!("Failed to set read timeout: {}", e);
                                 }

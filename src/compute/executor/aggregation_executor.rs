@@ -533,6 +533,8 @@ impl AggregationExecutor {
             // 例如: SELECT MIN(col1), MAX(col2) FROM temp_results
             // 其中 col1 是 "min(taxi_trips.fare_amount)"
             let mut agg_exprs = Vec::new();
+            let mut group_keys = Vec::new();
+
             for field_name in &field_names {
                 let lower = field_name.to_lowercase();
                 if lower.contains("min(") {
@@ -550,10 +552,14 @@ impl AggregationExecutor {
                 } else {
                     // 普通列,用于GROUP BY
                     agg_exprs.push(field_name.clone());
+                    group_keys.push(field_name.clone());
                 }
             }
 
-            let re_agg_sql = format!("SELECT {} FROM temp_results", agg_exprs.join(", "));
+            let mut re_agg_sql = format!("SELECT {} FROM temp_results", agg_exprs.join(", "));
+            if !group_keys.is_empty() {
+                re_agg_sql.push_str(&format!(" GROUP BY {}", group_keys.join(", ")));
+            }
             log::info!("🔄 [Re-aggregation SQL] {}", re_agg_sql);
 
             let ctx = SessionContext::new();
