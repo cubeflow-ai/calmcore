@@ -79,7 +79,7 @@ impl SegmentScanner {
         limit: Option<usize>,
         sort: Option<(String, bool)>,
     ) -> Option<Arc<dyn ExecutionPlan>> {
-        log::info!(
+        log::debug!(
             "🔍 [SegmentScanner::create_plan] filters={:?}, projection={:?}, limit={:?}, sort={:?}",
             filters,
             projection,
@@ -108,7 +108,7 @@ impl SegmentScanner {
             }
         };
 
-        log::info!(
+        log::debug!(
             "🎯 [SegmentScanner] hit={}/{} ({:.1}%), limit={:?}, sort={:?}",
             result_bitmap.len(),
             self.valid_docs.len(),

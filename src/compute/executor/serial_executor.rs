@@ -64,8 +64,21 @@ impl SerialExecutor {
         };
 
         let mut all_batches = Vec::new();
+        let mut total_rows = 0;
 
         for partition_name in &partition_names {
+            // 🚀 提前终止优化：如果已经收集到足够的数据，停止扫描后续 partition
+            if let Some(target) = fetch_limit {
+                if total_rows >= target {
+                    log::debug!(
+                        "✂️ [SerialFullScan] Early termination: collected {} rows >= target {}, skipping remaining partitions",
+                        total_rows,
+                        target
+                    );
+                    break;
+                }
+            }
+
             match self
                 .execute_on_partition_via_datafusion(
                     table_name,
@@ -76,7 +89,12 @@ impl SerialExecutor {
                 )
                 .await
             {
-                Ok(batches) => all_batches.extend(batches),
+                Ok(batches) => {
+                    for batch in batches {
+                        total_rows += batch.num_rows();
+                        all_batches.push(batch);
+                    }
+                }
                 Err(e) => {
                     // SQL syntax errors (field not found, parse error) should fail immediately
                     if Self::is_sql_error(&e) {
