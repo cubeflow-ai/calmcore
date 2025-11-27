@@ -456,6 +456,14 @@ impl SerialExecutor {
     /// 创建空 RecordBatch
     async fn create_empty_batch(&self, table_name: &str) -> CoreResult<RecordBatch> {
         let partition_names = self.engine.list_partitions(table_name).await;
+
+        if partition_names.is_empty() {
+            return Err(CoreError::NotExisted(format!(
+                "No partitions found for table '{}'",
+                table_name
+            )));
+        }
+
         let schema = self
             .engine
             .get_partition(table_name, &partition_names[0])

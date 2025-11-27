@@ -225,6 +225,9 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
     fn on_query(&mut self, query: &str, results: QueryResultWriter<W>) -> io::Result<()> {
         let query_trimmed = query.trim();
 
+        // 🔍 记录所有查询用于调试
+        log::info!("📨 [MySQL] Received query: {}", query_trimmed);
+
         // 去除 MySQL 注释 (/* ... */)
         let query_without_comment = if query_trimmed.starts_with("/*") {
             if let Some(end_pos) = query_trimmed.find("*/") {
@@ -293,15 +296,32 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             }
 
             // 返回空结果或默认值
+            log::info!(
+                "🔍 [MySQL] Checking query_lower: starts_with('select @@')={}",
+                query_lower.starts_with("select @@")
+            );
             if query_lower.starts_with("select @@")
                 || query_lower.starts_with("select version()")
                 || query_lower.starts_with("select database()")
             {
                 // 处理多列的 @@variable 查询 (JDBC 初始化查询)
+                log::info!(
+                    "🔧 [MySQL] Handling @@variable query via handle_session_variables_query"
+                );
+                log::info!("📝 [MySQL] Full query: {}", query_without_comment);
                 return self.handle_session_variables_query(query_without_comment, results);
             }
+
+            // 处理 SHOW VARIABLES 查询
+            if query_lower.starts_with("show variables") {
+                log::info!("🔧 [MySQL] Handling SHOW VARIABLES query");
+                log::info!("📝 [MySQL] Full query: {}", query_without_comment);
+                return self.handle_show_variables(query_without_comment, results);
+            }
+
             // select $$ 和其他初始化命令直接返回成功
             // 避免发送复杂的结果集导致协议问题
+            log::info!("🔧 [MySQL] Ignoring query (completed 0,0): {}", query_lower);
             return results.completed(0, 0);
         }
 
@@ -624,6 +644,13 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
         // SELECT 查询
         if query_lower.starts_with("select") {
+            // 🔧 特殊处理: SELECT @@variable 查询应该走 handle_session_variables_query
+            // 不要走普通的 execute_query,因为 DataFusion 不支持 @@ 语法
+            if query_without_comment.trim().to_lowercase().contains("@@") {
+                log::info!("🔧 [MySQL] Redirecting @@variable query to session handler");
+                return self.handle_session_variables_query(query_without_comment, results);
+            }
+
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(execute_query(
                     self.engine.clone(),
@@ -677,18 +704,39 @@ impl CalmBackend {
         for column_def in columns_str.split(',') {
             let column_def = column_def.trim();
 
-            // 提取别名 (AS alias 或最后一个词)
-            let alias = if let Some(as_pos) = column_def.to_uppercase().rfind(" AS ") {
-                column_def[as_pos + 4..].trim()
+            // 提取变量名和别名
+            // 格式: @@session.variable_name AS alias 或 @@variable_name
+            let (var_expr, alias) = if let Some(as_pos) = column_def.to_uppercase().rfind(" AS ") {
+                let var_part = column_def[..as_pos].trim();
+                let alias_part = column_def[as_pos + 4..].trim();
+                (var_part, alias_part)
             } else {
-                // 没有 AS,使用整个定义作为列名
-                column_def.split_whitespace().last().unwrap_or("value")
+                // 没有 AS,使用整个定义
+                (
+                    column_def,
+                    column_def.split_whitespace().last().unwrap_or("value"),
+                )
             };
 
-            fields.push(Field::new(alias, DataType::Utf8, true));
+            // 从变量表达式中提取变量名 (去除 @@ 前缀和 @@session./@@global. 前缀)
+            let var_name = var_expr
+                .trim_start_matches("@@")
+                .trim_start_matches("session.")
+                .trim_start_matches("global.")
+                .to_lowercase();
 
-            // 返回合理的默认值
-            let default_value = match alias.to_lowercase().as_str() {
+            // 使用别名作为字段名
+            fields.push(Field::new(alias, DataType::Utf8, false));
+
+            log::debug!(
+                "📊 [Session Var] '{}' -> var_name: '{}', alias: '{}'",
+                column_def,
+                var_name,
+                alias
+            );
+
+            // 根据变量名(不是别名)返回值
+            let default_value = match var_name.as_str() {
                 "auto_increment_increment" => "1",
                 "character_set_client"
                 | "character_set_connection"
@@ -708,12 +756,32 @@ impl CalmBackend {
                 "sql_mode" => "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION",
                 "system_time_zone" => "UTC",
                 "time_zone" => "SYSTEM",
-                "transaction_isolation" | "tx_isolation" => "REPEATABLE-READ",
-                _ => "calm-0.1.0",
+                "transaction_isolation" | "tx_isolation" | "transaction_read_only" => {
+                    if var_name == "tx_isolation" {
+                        log::warn!("⚠️  Deprecated variable 'tx_isolation' requested, returning compatible value");
+                    }
+                    "REPEATABLE-READ"
+                }
+                "version" | "version_comment" => "8.0.32-calm",
+                "autocommit" => "1",
+                "auto_commit" => "1",
+                _ => {
+                    log::warn!(
+                        "⚠️  Unknown session variable: '{}', returning default",
+                        var_name
+                    );
+                    "0"
+                }
             };
 
             values.push(default_value);
         }
+
+        log::info!(
+            "📊 [Session Var Result] Returning {} fields, {} values",
+            fields.len(),
+            values.len()
+        );
 
         let schema = Arc::new(ArrowSchema::new(fields));
         let columns: Vec<ArrayRef> = values
@@ -722,6 +790,92 @@ impl CalmBackend {
             .collect();
 
         let batch = RecordBatch::try_new(schema.clone(), columns).map_err(io::Error::other)?;
+
+        log::info!(
+            "📊 [Session Var Result] RecordBatch: {} rows, {} columns",
+            batch.num_rows(),
+            batch.num_columns()
+        );
+
+        write_query_result(results, &schema, &[batch])
+    }
+
+    /// 处理 SHOW VARIABLES 查询
+    /// 格式: SHOW VARIABLES LIKE 'pattern' 或 SHOW VARIABLES
+    fn handle_show_variables<W: io::Read + io::Write>(
+        &self,
+        query: &str,
+        results: QueryResultWriter<'_, W>,
+    ) -> io::Result<()> {
+        let query_upper = query.to_uppercase();
+
+        // 提取 LIKE 子句中的模式
+        let pattern = if let Some(like_pos) = query_upper.find(" LIKE ") {
+            let pattern_part = &query[like_pos + 6..].trim();
+            // 去除引号
+            pattern_part
+                .trim_matches('\'')
+                .trim_matches('"')
+                .to_lowercase()
+        } else {
+            // 没有 LIKE,返回所有变量
+            "*".to_string()
+        };
+
+        log::debug!("📊 [SHOW VARIABLES] Pattern: '{}'", pattern);
+
+        // 创建结果字段: Variable_name, Value
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("Variable_name", DataType::Utf8, false),
+            Field::new("Value", DataType::Utf8, false),
+        ]));
+
+        let mut names: Vec<String> = Vec::new();
+        let mut values: Vec<String> = Vec::new();
+
+        // 根据模式匹配变量
+        let mut add_var = |n: &str, v: &str| {
+            if pattern == "*" || n.contains(&pattern) {
+                names.push(n.to_string());
+                values.push(v.to_string());
+            }
+        };
+
+        // 添加所有支持的变量
+        add_var("auto_increment_increment", "1");
+        add_var("character_set_client", "utf8mb4");
+        add_var("character_set_connection", "utf8mb4");
+        add_var("character_set_results", "utf8mb4");
+        add_var("character_set_server", "utf8mb4");
+        add_var("collation_server", "utf8mb4_general_ci");
+        add_var("collation_connection", "utf8mb4_general_ci");
+        add_var("init_connect", "");
+        add_var("interactive_timeout", "28800");
+        add_var("language", "/usr/share/mysql/english/");
+        add_var("license", "MIT");
+        add_var("lower_case_table_names", "0");
+        add_var("max_allowed_packet", "67108864");
+        add_var("net_write_timeout", "60");
+        add_var("performance_schema", "0");
+        add_var("query_cache_size", "0");
+        add_var("query_cache_type", "OFF");
+        add_var("sql_mode", "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION");
+        add_var("system_time_zone", "UTC");
+        add_var("time_zone", "SYSTEM");
+        add_var("transaction_isolation", "REPEATABLE-READ");
+        add_var("transaction_read_only", "OFF");
+        add_var("wait_timeout", "28800");
+        add_var("version", "8.0.32-calm");
+        add_var("version_comment", "Calm Database");
+        add_var("autocommit", "1");
+
+        log::info!("📊 [SHOW VARIABLES] Returning {} variables", names.len());
+
+        let name_array = Arc::new(StringArray::from(names)) as ArrayRef;
+        let value_array = Arc::new(StringArray::from(values)) as ArrayRef;
+
+        let batch = RecordBatch::try_new(schema.clone(), vec![name_array, value_array])
+            .map_err(io::Error::other)?;
 
         write_query_result(results, &schema, &[batch])
     }

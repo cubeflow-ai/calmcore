@@ -8,12 +8,9 @@
 /// 核心优化：
 /// - Bitmap 索引加速 COUNT
 /// - 并行聚合 + 结果合并
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{
-    ArrayRef, Float64Array, Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array,
-};
+use datafusion::arrow::array::{ArrayRef, Int64Array, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::*;
@@ -154,12 +151,42 @@ impl AggregationExecutor {
         group_field: &str,
     ) -> CoreResult<QueryResult> {
         log::info!(
-            "📊 [CountWithGroupBy] GROUP BY '{}', SQL: {}",
+            "📊 [CountWithGroupBy] GROUP BY '{}', Original SQL: {}",
             group_field,
             sql
         );
 
+        // 🔧 提取 ORDER BY 和 LIMIT 子句,稍后在合并后应用
+        let (order_by_clause, limit_clause) = Self::extract_order_and_limit(sql);
+
+        // 🔧 移除 ORDER BY 和 LIMIT,让各 partition 做完整的 GROUP BY
+        let mut partition_sql = Self::remove_order_by_and_limit(sql);
+
+        // 改写 SQL: 确保 SELECT 列表包含 GROUP BY 字段和 COUNT(*)
+        // 将 "SELECT count(*)" 改为 "SELECT group_field, count(*)"
+        if !partition_sql
+            .to_lowercase()
+            .contains(&format!("select {}", group_field.to_lowercase()))
+        {
+            // 需要添加 GROUP BY 字段到 SELECT 列表
+            let sql_lower = partition_sql.to_lowercase();
+            if let Some(select_pos) = sql_lower.find("select") {
+                let before = &partition_sql[..select_pos + 6]; // "SELECT"
+                let after = &partition_sql[select_pos + 6..];
+                partition_sql = format!("{} {}, {}", before.trim(), group_field, after.trim());
+            }
+        }
+
+        if order_by_clause.is_some() || limit_clause.is_some() {
+            log::info!(
+                "🔧 [CountWithGroupBy] Removed ORDER BY/LIMIT from partition queries, will apply after merge"
+            );
+        }
+
+        log::info!("📊 [CountWithGroupBy] Partition SQL: {}", partition_sql);
+
         let partition_names = self.engine.list_partitions(table_name).await;
+        let mut all_batches = Vec::new();
 
         // 🚀 并行执行所有 partition
         let futures: Vec<_> = partition_names
@@ -167,7 +194,7 @@ impl AggregationExecutor {
             .map(|partition_name| {
                 let table_name = table_name.to_string();
                 let partition_name = partition_name.clone();
-                let sql = sql.to_string();
+                let sql = partition_sql.clone();
                 async move {
                     self.execute_group_by_on_partition(&table_name, &partition_name, &sql)
                         .await
@@ -177,14 +204,16 @@ impl AggregationExecutor {
 
         let results = futures::future::join_all(futures).await;
 
-        // 合并所有 partition 的结果
-        let mut merged_counts: HashMap<String, u64> = HashMap::new();
+        // 收集所有 partition 的结果
         for (idx, result) in results.into_iter().enumerate() {
             match result {
                 Ok(batches) => {
-                    for batch in batches {
-                        self.merge_group_counts(&batch, group_field, &mut merged_counts)?;
-                    }
+                    log::info!(
+                        "📦 Partition {} returned {} batches",
+                        partition_names[idx],
+                        batches.len()
+                    );
+                    all_batches.extend(batches);
                 }
                 Err(e) => {
                     log::warn!(
@@ -196,19 +225,120 @@ impl AggregationExecutor {
             }
         }
 
-        let matched_docs: u64 = merged_counts.values().sum();
-        log::info!(
-            "✅ [CountWithGroupBy] Total groups: {}, total docs: {}",
-            merged_counts.len(),
-            matched_docs
-        );
+        // 合并并重新聚合
+        let batch = if all_batches.is_empty() {
+            // 空结果
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(group_field, DataType::Utf8, true),
+                Field::new("COUNT(*)", DataType::UInt64, false),
+            ]));
+            RecordBatch::new_empty(schema)
+        } else if all_batches.len() == 1 {
+            // 单个 partition,无需重新聚合
+            all_batches[0].clone()
+        } else {
+            // 多个 partition,需要重新聚合
+            use datafusion::arrow::compute::concat_batches;
+            let schema = all_batches[0].schema();
+            let combined = concat_batches(&schema, &all_batches)
+                .map_err(|e| CoreError::Internal(format!("Merge failed: {}", e)))?;
 
-        // 构造结果 RecordBatch
-        let batch = self.build_group_by_result(group_field, merged_counts)?;
+            // 从 schema 中获取实际的 COUNT 列名 (可能是 "count(*)" 或 "COUNT(*)")
+            let count_field_name = schema
+                .fields()
+                .iter()
+                .find(|f| {
+                    let name_lower = f.name().to_lowercase();
+                    name_lower == "count(*)" || name_lower == "cnt" || name_lower.contains("count")
+                })
+                .map(|f| f.name().clone())
+                .unwrap_or_else(|| "count(*)".to_string());
+
+            log::info!(
+                "🔍 [Re-agg] Detected count field name: '{}'",
+                count_field_name
+            );
+
+            // 构建重新聚合的 SQL: SELECT group_field, SUM(count_field) AS original_name FROM temp_results GROUP BY group_field
+            let mut re_agg_sql = format!(
+                "SELECT \"{}\", SUM(\"{}\") AS \"{}\" FROM temp_results GROUP BY \"{}\"",
+                group_field, count_field_name, count_field_name, group_field
+            );
+
+            // 🔧 在重新聚合后应用原始的 ORDER BY 和 LIMIT
+            // 需要将 ORDER BY 中的 COUNT(*) 替换为列名(不带引号,因为 DataFusion 会自动处理)
+            if let Some(mut order_by) = order_by_clause {
+                // 将 COUNT(*) 或 count(*) 替换为列名
+                let order_by_upper = order_by.to_uppercase();
+                if order_by_upper.contains("COUNT(*)") {
+                    // 直接替换为列名,不添加引号(DataFusion 会自动处理小写列名)
+                    order_by = order_by
+                        .replace("COUNT(*)", &count_field_name)
+                        .replace("count(*)", &count_field_name);
+                    log::info!("🔧 [Re-agg] Rewrote ORDER BY: {}", order_by);
+                }
+                re_agg_sql.push_str(&order_by);
+            }
+            if let Some(limit) = &limit_clause {
+                re_agg_sql.push_str(limit);
+            }
+
+            log::info!("🔄 [Re-aggregation SQL] {}", re_agg_sql);
+
+            // 用 DataFusion 重新聚合
+            let ctx = SessionContext::new();
+            let provider =
+                datafusion::datasource::MemTable::try_new(schema.clone(), vec![vec![combined]])
+                    .map_err(|e| CoreError::Internal(format!("MemTable failed: {}", e)))?;
+
+            ctx.register_table("temp_results", Arc::new(provider))
+                .map_err(|e| CoreError::Internal(format!("Register failed: {}", e)))?;
+
+            let df = ctx
+                .sql(&re_agg_sql)
+                .await
+                .map_err(|e| CoreError::Internal(format!("Re-agg failed: {}", e)))?;
+
+            let final_batches = df
+                .collect()
+                .await
+                .map_err(|e| CoreError::Internal(format!("Final collect failed: {}", e)))?;
+
+            if final_batches.is_empty() {
+                RecordBatch::new_empty(schema)
+            } else {
+                final_batches[0].clone()
+            }
+        };
+
+        let matched_docs = batch.num_rows();
+        log::info!("✅ [CountWithGroupBy] Total rows: {}", matched_docs);
+
+        // 🔧 检查原始 SQL 是否在 SELECT 中包含 GROUP BY 字段
+        let include_group_field = sql
+            .to_lowercase()
+            .contains(&format!("select {}", group_field.to_lowercase()))
+            || sql.to_lowercase().contains("select *");
+
+        // 🔧 如果用户没有请求 GROUP BY 字段,移除它
+        let batch = if !include_group_field {
+            // 只保留 COUNT(*) 列
+            log::info!("🔧 [Projection] Removing group field from result");
+            let count_col = batch.column(1);
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "COUNT(*)",
+                DataType::UInt64,
+                false,
+            )]));
+            RecordBatch::try_new(schema, vec![count_col.clone()])
+                .map_err(|e| CoreError::Internal(format!("Failed to create RecordBatch: {}", e)))?
+        } else {
+            batch
+        };
 
         Ok(QueryResult {
             batch,
-            matched_docs: matched_docs as usize,
+            matched_docs,
         })
     }
 
@@ -401,95 +531,6 @@ impl AggregationExecutor {
             .map_err(|e| CoreError::Internal(format!("Query execution error: {}", e)))?;
 
         Ok(batches)
-    }
-
-    /// 合并 GROUP BY 结果
-    fn merge_group_counts(
-        &self,
-        batch: &RecordBatch,
-        group_field: &str,
-        merged: &mut HashMap<String, u64>,
-    ) -> CoreResult<()> {
-        if batch.num_rows() == 0 {
-            return Ok(());
-        }
-
-        // 检查列数,避免索引越界
-        if batch.num_columns() < 2 {
-            log::warn!(
-                "⚠️  RecordBatch has only {} column(s), expected 2 (GROUP BY field + COUNT)",
-                batch.num_columns()
-            );
-            return Ok(());
-        }
-
-        // 假设第一列是 GROUP BY 字段，第二列是 COUNT(*)
-        let group_column = batch.column(0);
-        let count_column = batch.column(1);
-
-        // 支持多种数据类型的 GROUP BY 字段
-        for i in 0..batch.num_rows() {
-            let group_value = if let Some(arr) = group_column.as_any().downcast_ref::<StringArray>()
-            {
-                arr.value(i).to_string()
-            } else if let Some(arr) = group_column.as_any().downcast_ref::<Int64Array>() {
-                arr.value(i).to_string()
-            } else if let Some(arr) = group_column.as_any().downcast_ref::<UInt64Array>() {
-                arr.value(i).to_string()
-            } else if let Some(arr) = group_column.as_any().downcast_ref::<Int32Array>() {
-                arr.value(i).to_string()
-            } else if let Some(arr) = group_column.as_any().downcast_ref::<UInt32Array>() {
-                arr.value(i).to_string()
-            } else if let Some(arr) = group_column.as_any().downcast_ref::<Float64Array>() {
-                arr.value(i).to_string()
-            } else {
-                return Err(CoreError::Internal(format!(
-                    "Unsupported GROUP BY field type for '{}': {:?}",
-                    group_field,
-                    group_column.data_type()
-                )));
-            };
-
-            let count_value = if let Some(arr) = count_column.as_any().downcast_ref::<UInt64Array>()
-            {
-                arr.value(i)
-            } else if let Some(arr) = count_column.as_any().downcast_ref::<Int64Array>() {
-                arr.value(i) as u64
-            } else {
-                return Err(CoreError::Internal("Invalid count type".to_string()));
-            };
-
-            *merged.entry(group_value).or_insert(0) += count_value;
-        }
-
-        Ok(())
-    }
-
-    /// 构造 GROUP BY 查询结果
-    fn build_group_by_result(
-        &self,
-        group_field: &str,
-        counts: HashMap<String, u64>,
-    ) -> CoreResult<RecordBatch> {
-        let mut groups: Vec<_> = counts.into_iter().collect();
-        groups.sort_by(|a, b| b.1.cmp(&a.1)); // 按 count 降序
-
-        let group_values: Vec<String> = groups.iter().map(|(k, _)| k.clone()).collect();
-        let count_values: Vec<u64> = groups.iter().map(|(_, v)| *v).collect();
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(group_field, DataType::Utf8, false),
-            Field::new("COUNT(*)", DataType::UInt64, false),
-        ]));
-
-        let group_array = StringArray::from(group_values);
-        let count_array = UInt64Array::from(count_values);
-
-        RecordBatch::try_new(
-            schema,
-            vec![Arc::new(group_array) as ArrayRef, Arc::new(count_array)],
-        )
-        .map_err(|e| CoreError::Internal(format!("Failed to create RecordBatch: {}", e)))
     }
 
     /// 执行通用聚合查询(MIN, MAX, SUM, AVG, etc.)
