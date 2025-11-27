@@ -414,6 +414,15 @@ impl AggregationExecutor {
             return Ok(());
         }
 
+        // 检查列数,避免索引越界
+        if batch.num_columns() < 2 {
+            log::warn!(
+                "⚠️  RecordBatch has only {} column(s), expected 2 (GROUP BY field + COUNT)",
+                batch.num_columns()
+            );
+            return Ok(());
+        }
+
         // 假设第一列是 GROUP BY 字段，第二列是 COUNT(*)
         let group_column = batch.column(0);
         let count_column = batch.column(1);
