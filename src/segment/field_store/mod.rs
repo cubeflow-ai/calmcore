@@ -1195,7 +1195,10 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
         match self {
             InvertedIndex::Disk(r) => r.get(k),
             InvertedIndex::Memory(btree) => btree.get(k).map(|v| {
-                RoaringBitmap::from_sorted_iter(v.read().unwrap().iter().copied()).unwrap()
+                // 🔧 修复: 不能假设 Vec 是排序的,使用通用的 from_iter
+                // 并发写入时 extend() 可能导致 Vec 无序
+                let ids = v.read().unwrap();
+                RoaringBitmap::from_iter(ids.iter().copied())
             }),
         }
     }
@@ -1322,7 +1325,8 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
 
                     if start_ok {
                         let ids = ids_lock.read().unwrap();
-                        result |= RoaringBitmap::from_sorted_iter(ids.iter().copied()).unwrap();
+                        // 🔧 修复: 不能假设 Vec 是排序的,使用通用的 from_iter
+                        result |= RoaringBitmap::from_iter(ids.iter().copied());
                         matched_keys += 1;
                     }
                 }

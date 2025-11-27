@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-测试真实数据集的 SQL 查询
+对比测试 Calm 和原生 MySQL 的查询结果
 
 使用方法：
     python3 test_queries.py nyc-taxi
@@ -18,6 +18,8 @@ class Colors:
     GREEN = "\033[0;32m"
     YELLOW = "\033[1;33m"
     RED = "\033[0;31m"
+    CYAN = "\033[0;36m"
+    MAGENTA = "\033[0;35m"
     NC = "\033[0m"
 
 
@@ -25,755 +27,281 @@ def print_colored(color, text):
     print(f"{color}{text}{Colors.NC}")
 
 
-def connect_db(host="127.0.0.1", port=3307):
-    """连接数据库"""
+def connect_calm(host="127.0.0.1", port=3307):
+    """连接 Calm 数据库"""
     try:
         conn = pymysql.connect(
             host=host, port=port, user="root", passwd="calm", database="default"
         )
         return conn
     except Exception as e:
-        print_colored(Colors.RED, f"❌ Failed to connect: {e}")
+        print_colored(Colors.RED, f"❌ Failed to connect to Calm: {e}")
         sys.exit(1)
 
 
-def run_query(cursor, name, sql, show_preview=True):
-    """执行单个查询"""
-    print_colored(Colors.YELLOW, f"\n📊 {name}")
-    print(f"SQL: {sql}")
-
-    start_time = time.time()
-
+def connect_mysql(host="127.0.0.1", port=3306, database="calm_test"):
+    """连接原生 MySQL 数据库"""
     try:
-        cursor.execute(sql)
-        results = cursor.fetchall()
-
-        duration = time.time() - start_time
-        row_count = len(results)
-
-        print_colored(Colors.GREEN, f"✓ Success: {row_count:,} rows in {duration:.3f}s")
-
-        # 显示预览
-        if show_preview and results:
-            preview_count = min(3, len(results))
-            print(f"Preview (first {preview_count} rows):")
-            for i, row in enumerate(results[:preview_count]):
-                # 格式化时间戳
-                formatted_row = []
-                for val in row:
-                    if isinstance(val, int) and val > 1000000000000:  # 可能是毫秒时间戳
-                        try:
-                            dt = datetime.fromtimestamp(val / 1000)
-                            formatted_row.append(dt.strftime("%Y-%m-%d %H:%M:%S"))
-                        except:
-                            formatted_row.append(val)
-                    else:
-                        formatted_row.append(val)
-                print(f"  Row {i}: {formatted_row}")
-
-        return True, duration, row_count
-
+        conn = pymysql.connect(
+            host=host, port=port, user="root", passwd="ansjsun", database=database
+        )
+        return conn
     except Exception as e:
-        duration = time.time() - start_time
-        print_colored(Colors.RED, f"❌ Failed: {e}")
-        print_colored(Colors.RED, f"❌ Failed SQL: {sql}")
-        return False, duration, 0
+        print_colored(Colors.RED, f"❌ Failed to connect to MySQL: {e}")
+        sys.exit(1)
 
 
-def verify_correctness(cursor, name, sql1, sql2):
-    """验证两个查询返回相同的结果"""
-    print_colored(Colors.YELLOW, f"\n🔍 Correctness Check: {name}")
+def format_value(val):
+    """格式化值用于显示"""
+    if isinstance(val, int) and val > 1000000000000:  # 可能是毫秒时间戳
+        try:
+            dt = datetime.fromtimestamp(val / 1000)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            return val
+    elif isinstance(val, float):
+        return f"{val:.2f}"
+    return val
 
-    try:
-        cursor.execute(sql1)
-        result1 = cursor.fetchall()
 
-        cursor.execute(sql2)
-        result2 = cursor.fetchall()
+def normalize_results(results):
+    """标准化查询结果用于对比（处理浮点数精度）"""
+    normalized = []
+    for row in results:
+        normalized_row = []
+        for val in row:
+            if isinstance(val, float):
+                # 四舍五入到小数点后2位
+                normalized_row.append(round(val, 2))
+            else:
+                normalized_row.append(val)
+        normalized.append(tuple(normalized_row))
+    return normalized
 
-        if result1 == result2:
-            print_colored(Colors.GREEN, f"✓ Results match ({len(result1)} rows)")
-            return True
-        else:
-            print_colored(
-                Colors.RED, f"✗ Results differ: {len(result1)} vs {len(result2)} rows"
-            )
-            if len(result1) <= 5 and len(result2) <= 5:
-                print(f"  Query 1 result: {result1}")
-                print(f"  Query 2 result: {result2}")
-            return False
-    except Exception as e:
-        print_colored(Colors.RED, f"✗ Verification failed: {e}")
-        print_colored(Colors.RED, f"✗ Failed SQL 1: {sql1}")
-        print_colored(Colors.RED, f"✗ Failed SQL 2: {sql2}")
+
+def compare_results(calm_results, mysql_results, name):
+    """对比两个数据库的查询结果"""
+    calm_normalized = normalize_results(calm_results)
+    mysql_normalized = normalize_results(mysql_results)
+    
+    if len(calm_normalized) != len(mysql_normalized):
+        print_colored(Colors.RED, f"    ❌ Row count mismatch: Calm={len(calm_results)}, MySQL={len(mysql_results)}")
+        return False
+    
+    # 对于聚合查询，结果顺序可能不同，需要排序后对比
+    calm_sorted = sorted(calm_normalized)
+    mysql_sorted = sorted(mysql_normalized)
+    
+    if calm_sorted == mysql_sorted:
+        print_colored(Colors.GREEN, f"    ✓ Results match ({len(calm_results)} rows)")
+        return True
+    else:
+        print_colored(Colors.RED, f"    ❌ Results differ!")
+        
+        # 显示前几行差异
+        max_show = 5
+        print_colored(Colors.YELLOW, f"    First {max_show} rows from each:")
+        print_colored(Colors.CYAN, "    Calm:")
+        for i, row in enumerate(calm_results[:max_show]):
+            formatted = [format_value(v) for v in row]
+            print(f"      [{i}] {formatted}")
+        print_colored(Colors.MAGENTA, "    MySQL:")
+        for i, row in enumerate(mysql_results[:max_show]):
+            formatted = [format_value(v) for v in row]
+            print(f"      [{i}] {formatted}")
+        
         return False
 
 
-def test_nyc_taxi(conn):
+def run_comparison_query(calm_cursor, mysql_cursor, name, sql):
+    """在两个数据库上执行相同的查询并对比结果"""
+    print_colored(Colors.YELLOW, f"\n{'='*80}")
+    print_colored(Colors.YELLOW, f"📊 {name}")
+    print(f"SQL: {sql}")
+    print()
+    
+    # 执行 Calm 查询
+    calm_success = False
+    calm_duration = 0
+    calm_results = []
+    
+    print_colored(Colors.CYAN, "  [Calm] Executing...")
+    start_time = time.time()
+    try:
+        calm_cursor.execute(sql)
+        calm_results = calm_cursor.fetchall()
+        calm_duration = time.time() - start_time
+        calm_success = True
+        print_colored(Colors.GREEN, f"  [Calm] ✓ {len(calm_results):,} rows in {calm_duration:.3f}s")
+    except Exception as e:
+        calm_duration = time.time() - start_time
+        print_colored(Colors.RED, f"  [Calm] ❌ Failed: {e}")
+    
+    # 执行 MySQL 查询
+    mysql_success = False
+    mysql_duration = 0
+    mysql_results = []
+    
+    print_colored(Colors.MAGENTA, "  [MySQL] Executing...")
+    start_time = time.time()
+    try:
+        mysql_cursor.execute(sql)
+        mysql_results = mysql_cursor.fetchall()
+        mysql_duration = time.time() - start_time
+        mysql_success = True
+        print_colored(Colors.GREEN, f"  [MySQL] ✓ {len(mysql_results):,} rows in {mysql_duration:.3f}s")
+    except Exception as e:
+        mysql_duration = time.time() - start_time
+        print_colored(Colors.RED, f"  [MySQL] ❌ Failed: {e}")
+    
+    # 对比结果
+    print()
+    if calm_success and mysql_success:
+        match = compare_results(calm_results, mysql_results, name)
+        
+        # 性能对比
+        if calm_duration > 0 and mysql_duration > 0:
+            speedup = mysql_duration / calm_duration
+            if speedup > 1:
+                print_colored(Colors.GREEN, f"    ⚡ Calm is {speedup:.2f}x faster")
+            else:
+                print_colored(Colors.YELLOW, f"    ⚡ MySQL is {1/speedup:.2f}x faster")
+        
+        return match
+    elif calm_success:
+        print_colored(Colors.YELLOW, "    ⚠️  Only Calm succeeded")
+        return False
+    elif mysql_success:
+        print_colored(Colors.YELLOW, "    ⚠️  Only MySQL succeeded")
+        return False
+    else:
+        print_colored(Colors.RED, "    ❌ Both queries failed")
+        return False
+
+
+def test_nyc_taxi(calm_conn, mysql_conn):
     """测试 NYC Taxi 数据集的查询"""
-    print_colored(Colors.BLUE, "\n=== NYC Taxi Dataset Queries ===\n")
+    print_colored(Colors.BLUE, "\n" + "="*80)
+    print_colored(Colors.BLUE, "=== NYC Taxi Dataset - Calm vs MySQL Comparison ===")
+    print_colored(Colors.BLUE, "="*80)
 
-    cursor = conn.cursor()
+    calm_cursor = calm_conn.cursor()
+    mysql_cursor = mysql_conn.cursor()
 
-    # 2024-01-01 00:00:00 的毫秒时间戳
+    # 2024-01-01 时间戳
     jan_1_2024 = 1704067200000
     jan_2_2024 = 1704153600000
     jan_8_2024 = 1704672000000
 
     test_cases = [
-        ("1. Simple SELECT with LIMIT", "SELECT * FROM taxi_trips LIMIT 10", True),
-        ("2. COUNT total trips", "SELECT COUNT(*) FROM taxi_trips", True),
-        (
-            "3. Time range query (Jan 1, 2024)",
-            f"SELECT * FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} LIMIT 100",
-            True,
-        ),
-        (
-            "4. Time range with ORDER BY DESC",
-            f"SELECT * FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} ORDER BY pickup_datetime DESC LIMIT 10",
-            True,
-        ),
-        (
-            "5. Filter by passenger count",
-            "SELECT * FROM taxi_trips WHERE passenger_count = 2 LIMIT 50",
-            True,
-        ),
-        (
-            "6. COUNT by passenger count",
-            "SELECT passenger_count, COUNT(*) as count FROM taxi_trips GROUP BY passenger_count ORDER BY passenger_count",
-            True,
-        ),
-        (
-            "7. Average fare by payment type",
-            "SELECT payment_type, AVG(fare_amount) as avg_fare FROM taxi_trips GROUP BY payment_type ORDER BY payment_type",
-            True,
-        ),
-        (
-            "8. Complex filter (time + passenger + distance)",
-            f"SELECT * FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_8_2024} AND passenger_count >= 2 AND trip_distance > 5.0 LIMIT 20",
-            True,
-        ),
-        (
-            "9. Top 10 most expensive trips",
-            "SELECT * FROM taxi_trips ORDER BY total_amount DESC LIMIT 10",
-            True,
-        ),
-        (
-            "10. Trips with high tips",
-            "SELECT * FROM taxi_trips WHERE tip_amount > 10.0 ORDER BY tip_amount DESC LIMIT 20",
-            True,
-        ),
-        (
-            "11. COUNT trips by pickup location",
-            "SELECT pickup_location_id, COUNT(*) as count FROM taxi_trips GROUP BY pickup_location_id ORDER BY count DESC LIMIT 10",
-            True,
-        ),
-        (
-            "12. Average trip distance",
-            "SELECT AVG(trip_distance) as avg_distance FROM taxi_trips",
-            True,
-        ),
-        # 新增：边界条件测试
-        (
-            "13. Query with zero passengers",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 0",
-            True,
-        ),
-        (
-            "14. Very long trips (>50 miles)",
-            "SELECT * FROM taxi_trips WHERE trip_distance > 50.0 ORDER BY trip_distance DESC LIMIT 10",
-            True,
-        ),
-        (
-            "15. Zero fare trips",
-            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount = 0",
-            True,
-        ),
-        # 新增：多字段聚合
-        (
-            "16. MIN/MAX/AVG statistics",
-            "SELECT MIN(fare_amount) as min_fare, MAX(fare_amount) as max_fare, AVG(fare_amount) as avg_fare, MIN(trip_distance) as min_dist, MAX(trip_distance) as max_dist FROM taxi_trips",
-            True,
-        ),
-        (
-            "17. SUM total revenue by payment type",
-            "SELECT payment_type, SUM(total_amount) as total_revenue, COUNT(*) as trip_count FROM taxi_trips GROUP BY payment_type ORDER BY total_revenue DESC",
-            True,
-        ),
-        # 新增：HAVING 子句
-        (
-            "18. Locations with >1000 pickups",
-            "SELECT pickup_location_id, COUNT(*) as count FROM taxi_trips GROUP BY pickup_location_id HAVING COUNT(*) > 1000 ORDER BY count DESC",
-            True,
-        ),
-        # 新增：多时间段对比
-        (
-            "19. Time range with ORDER BY ASC",
-            f"SELECT * FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} ORDER BY pickup_datetime ASC LIMIT 10",
-            True,
-        ),
-        # 新增：IN 操作符
-        (
-            "20. Filter by multiple passenger counts",
-            "SELECT passenger_count, COUNT(*) as count FROM taxi_trips WHERE passenger_count IN (1, 2, 3) GROUP BY passenger_count ORDER BY passenger_count",
-            True,
-        ),
-        # 新增：范围查询组合
-        (
-            "21. Mid-range fare trips ($10-$30)",
-            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount >= 10.0 AND fare_amount <= 30.0",
-            True,
-        ),
-        # 新增：复杂排序
-        (
-            "22. Top trips by tip percentage",
-            "SELECT fare_amount, tip_amount, (tip_amount / fare_amount * 100) as tip_pct FROM taxi_trips WHERE fare_amount > 0 ORDER BY tip_pct DESC LIMIT 10",
-            True,
-        ),
-        # 新增：多字段 ORDER BY
-        (
-            "23. Order by multiple fields",
-            "SELECT passenger_count, payment_type, COUNT(*) as count FROM taxi_trips GROUP BY passenger_count, payment_type ORDER BY passenger_count, payment_type LIMIT 20",
-            True,
-        ),
-        # 新增：DISTINCT
-        (
-            "24. Distinct pickup locations count",
-            "SELECT COUNT(DISTINCT pickup_location_id) as unique_locations FROM taxi_trips",
-            True,
-        ),
+        ("1. Simple COUNT", "SELECT COUNT(*) FROM taxi_trips"),
+        
+        ("2. Simple SELECT with LIMIT", "SELECT * FROM taxi_trips LIMIT 10"),
+        
+        ("3. Time range query (Jan 1, 2024)",
+         f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}"),
+        
+        ("4. Filter by passenger count",
+         "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 2"),
+        
+        ("5. COUNT by passenger count",
+         "SELECT passenger_count, COUNT(*) as count FROM taxi_trips GROUP BY passenger_count ORDER BY passenger_count"),
+        
+        ("6. Average fare by payment type",
+         "SELECT payment_type, AVG(fare_amount) as avg_fare, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type ORDER BY payment_type"),
+        
+        ("7. SUM by payment type",
+         "SELECT payment_type, SUM(total_amount) as total FROM taxi_trips GROUP BY payment_type ORDER BY payment_type"),
+        
+        ("8. MIN/MAX statistics",
+         "SELECT MIN(fare_amount) as min_fare, MAX(fare_amount) as max_fare FROM taxi_trips"),
+        
+        ("9. COUNT by pickup location (Top 10)",
+         "SELECT pickup_location_id, COUNT(*) as count FROM taxi_trips GROUP BY pickup_location_id ORDER BY count DESC LIMIT 10"),
+        
+        ("10. Complex filter (time + passenger + distance)",
+         f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_8_2024} AND passenger_count >= 2 AND trip_distance > 5.0"),
+        
+        ("11. High tip trips",
+         "SELECT COUNT(*) FROM taxi_trips WHERE tip_amount > 10.0"),
+        
+        ("12. Zero fare trips",
+         "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount = 0"),
+        
+        ("13. Long distance trips",
+         "SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 50.0"),
+        
+        ("14. Multiple GROUP BY fields",
+         "SELECT pickup_location_id, dropoff_location_id, COUNT(*) as cnt FROM taxi_trips GROUP BY pickup_location_id, dropoff_location_id ORDER BY cnt DESC LIMIT 10"),
+        
+        ("15. HAVING clause",
+         "SELECT payment_type, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type HAVING cnt > 1000 ORDER BY payment_type"),
     ]
 
-    # 执行基本查询测试
-    results = []
-    for name, sql, show_preview in test_cases:
-        success, duration, row_count = run_query(cursor, name, sql, show_preview)
-        results.append((name, success, duration, row_count))
+    passed = 0
+    failed = 0
 
-    # LIKE 查询测试
-    print_colored(Colors.BLUE, "\n=== LIKE Query Tests ===\n")
-
-    # 先查询一些真实的 id 值用于测试 (id 是 KEYWORD 类型,支持 LIKE)
-    try:
-        cursor.execute("SELECT id FROM taxi_trips LIMIT 10")
-        ids = [str(row[0]) for row in cursor.fetchall()]
-    except Exception as e:
-        print_colored(Colors.RED, f"❌ Failed to fetch IDs: {e}")
-        print_colored(Colors.RED, f"❌ Failed SQL: SELECT id FROM taxi_trips LIMIT 10")
-        ids = []
-
-    like_tests = []
-
-    if ids:
-        # 选择一个包含数字的 id 用于测试
-        # 大多数 id 格式类似 "trip_12345"
-        test_id = ids[0] if ids else "trip_1"
-
-        # 提取一些可搜索的模式
-        if "_" in test_id:
-            # 例如 "trip_12345" -> 搜索 "trip"
-            pattern1 = test_id.split("_")[0]  # "trip"
-            # 搜索数字部分的一部分
-            pattern2 = test_id[-2:] if len(test_id) >= 2 else test_id  # 最后两个字符
-        else:
-            pattern1 = test_id[:3] if len(test_id) >= 3 else test_id
-            pattern2 = test_id[-2:] if len(test_id) >= 2 else test_id
-
-        like_tests.extend(
-            [
-                (
-                    "LIKE-1. Simple LIKE query with prefix",
-                    f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'",
-                    True,
-                ),
-                (
-                    "LIKE-2. LIKE with time range",
-                    f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '%{pattern2}%'",
-                    True,
-                ),
-                (
-                    "LIKE-3. Multiple LIKE conditions (contains)",
-                    f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '%{pattern1}%' AND id LIKE '%{pattern2}%'",
-                    True,
-                ),
-                (
-                    "LIKE-4. LIKE with ORDER BY and LIMIT",
-                    f"SELECT * FROM taxi_trips WHERE id LIKE '{pattern1}%' ORDER BY pickup_datetime DESC LIMIT 10",
-                    True,
-                ),
-                (
-                    "LIKE-5. SELECT with LIKE filter",
-                    f"SELECT * FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '{pattern1}%' LIMIT 20",
-                    True,
-                ),
-                (
-                    "LIKE-6. COUNT with LIKE and escaped characters",
-                    f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '%{pattern1}\\_%' LIMIT 10",
-                    True,
-                ),
-            ]
-        )
-
-    for name, sql, show_preview in like_tests:
-        success, duration, row_count = run_query(cursor, name, sql, show_preview)
-        results.append((name, success, duration, row_count))
-
-    # LIKE 查询结果正确性验证
-    print_colored(Colors.BLUE, "\n=== LIKE Query Result Correctness ===\n")
-
-    if ids and len(ids) > 0:
-        # 验证1: LIKE COUNT 与 SELECT COUNT 一致性
-        print_colored(
-            Colors.YELLOW, f"\n🔍 Test 1: LIKE COUNT vs actual filtered data count"
-        )
-
-        # 先用 COUNT 查询
-        count_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'"
+    for name, sql in test_cases:
         try:
-            cursor.execute(count_sql)
-            count_result = cursor.fetchone()[0]
-        except Exception as e:
-            print_colored(Colors.RED, f"❌ COUNT query failed: {e}")
-            print_colored(Colors.RED, f"❌ Failed SQL: {count_sql}")
-            count_result = -1
-
-        # 再用 SELECT 查询并手动计数
-        select_sql = f"SELECT id FROM taxi_trips WHERE id LIKE '{pattern1}%'"
-        try:
-            cursor.execute(select_sql)
-            select_results = cursor.fetchall()
-            select_count = len(select_results)
-        except Exception as e:
-            print_colored(Colors.RED, f"❌ SELECT query failed: {e}")
-            print_colored(Colors.RED, f"❌ Failed SQL: {select_sql}")
-            select_results = []
-            select_count = -1
-
-        print(f"  COUNT(*) returned: {count_result}")
-        print(f"  SELECT returned: {select_count} rows")
-
-        if count_result == select_count:
-            print_colored(Colors.GREEN, f"  ✓ COUNT and SELECT counts match!")
-            results.append(
-                ("LIKE-Result-1: COUNT vs SELECT consistency", True, 0, count_result)
-            )
-        else:
-            print_colored(Colors.RED, f"  ✗ COUNT and SELECT counts differ!")
-            results.append(
-                ("LIKE-Result-1: COUNT vs SELECT consistency", False, 0, count_result)
-            )
-
-        # 验证2: LIKE 过滤的数据确实匹配模式
-        if select_count > 0:
-            print_colored(
-                Colors.YELLOW, f"\n🔍 Test 2: Verify LIKE filtered data matches pattern"
-            )
-
-            # 检查前10行是否都匹配模式
-            sample_size = min(10, len(select_results))
-            all_match = True
-            for i in range(sample_size):
-                id_value = str(select_results[i][0])
-                if not id_value.startswith(pattern1):
-                    print_colored(
-                        Colors.RED,
-                        f"  ✗ Row {i}: '{id_value}' does not match pattern '{pattern1}%'",
-                    )
-                    all_match = False
-                    break
-
-            if all_match:
-                print_colored(
-                    Colors.GREEN,
-                    f"  ✓ All sampled rows ({sample_size}) match the LIKE pattern '{pattern1}%'",
-                )
-                results.append(
-                    ("LIKE-Result-2: Data matches pattern", True, 0, sample_size)
-                )
+            if run_comparison_query(calm_cursor, mysql_cursor, name, sql):
+                passed += 1
             else:
-                results.append(("LIKE-Result-2: Data matches pattern", False, 0, 0))
-
-        # 验证3: LIKE + 时间范围的 COUNT 准确性
-        print_colored(
-            Colors.YELLOW, f"\n🔍 Test 3: LIKE with time range COUNT accuracy"
-        )
-
-        # COUNT 查询
-        count_time_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '{pattern1}%'"
-        try:
-            cursor.execute(count_time_sql)
-            count_time_result = cursor.fetchone()[0]
+                failed += 1
         except Exception as e:
-            print_colored(Colors.RED, f"❌ COUNT with time query failed: {e}")
-            print_colored(Colors.RED, f"❌ Failed SQL: {count_time_sql}")
-            count_time_result = -1
+            print_colored(Colors.RED, f"❌ Test failed with exception: {e}")
+            failed += 1
+        
+        time.sleep(0.1)  # 短暂暂停，避免过快
 
-        # SELECT 查询
-        select_time_sql = f"SELECT id FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '{pattern1}%'"
-        try:
-            cursor.execute(select_time_sql)
-            select_time_results = cursor.fetchall()
-            select_time_count = len(select_time_results)
-        except Exception as e:
-            print_colored(Colors.RED, f"❌ SELECT with time query failed: {e}")
-            print_colored(Colors.RED, f"❌ Failed SQL: {select_time_sql}")
-            select_time_results = []
-            select_time_count = -1
+    # 总结
+    print_colored(Colors.BLUE, f"\n{'='*80}")
+    print_colored(Colors.BLUE, "=== Test Summary ===")
+    print_colored(Colors.BLUE, f"{'='*80}")
+    total = passed + failed
+    print(f"Total tests: {total}")
+    print_colored(Colors.GREEN, f"Passed: {passed}")
+    print_colored(Colors.RED, f"Failed: {failed}")
+    
+    if failed == 0:
+        print_colored(Colors.GREEN, "\n🎉 All tests passed! Calm and MySQL results match perfectly!")
+    else:
+        print_colored(Colors.YELLOW, f"\n⚠️  {failed} test(s) failed. Please investigate differences.")
 
-        print(f"  COUNT(*) with time range + LIKE: {count_time_result}")
-        print(f"  SELECT with time range + LIKE: {select_time_count} rows")
-
-        if count_time_result == select_time_count:
-            print_colored(
-                Colors.GREEN, f"  ✓ Combined filter COUNT and SELECT counts match!"
-            )
-            results.append(
-                ("LIKE-Result-3: Combined filter accuracy", True, 0, count_time_result)
-            )
-        else:
-            print_colored(
-                Colors.RED, f"  ✗ Combined filter COUNT and SELECT counts differ!"
-            )
-            results.append(
-                ("LIKE-Result-3: Combined filter accuracy", False, 0, count_time_result)
-            )
-
-        # 验证4: 确保 LIKE 过滤后数据量合理(不是返回所有数据)
-        print_colored(
-            Colors.YELLOW,
-            f"\n🔍 Test 4: LIKE actually filters data (not returning all)",
-        )
-
-        try:
-            cursor.execute("SELECT COUNT(*) FROM taxi_trips")
-            total_rows = cursor.fetchone()[0]
-        except Exception as e:
-            print_colored(Colors.RED, f"❌ Total count query failed: {e}")
-            print_colored(Colors.RED, f"❌ Failed SQL: SELECT COUNT(*) FROM taxi_trips")
-            total_rows = -1
-
-        try:
-
-            cursor.execute(
-                f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'"
-            )
-            like_rows = cursor.fetchone()[0]
-        except Exception as e:
-            print_colored(Colors.RED, f"❌ LIKE count query failed: {e}")
-            print_colored(
-                Colors.RED,
-                f"❌ Failed SQL: SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'",
-            )
-            like_rows = -1
-
-        print(f"  Total rows: {total_rows}")
-        print(f"  LIKE matched: {like_rows}")
-
-        if like_rows == 0:
-            print_colored(
-                Colors.YELLOW, f"  ⚠️  LIKE matched 0 rows - pattern may not exist"
-            )
-            results.append(("LIKE-Result-4: Filter effectiveness check", True, 0, 0))
-        elif like_rows < total_rows:
-            percentage = like_rows / total_rows * 100
-            print_colored(
-                Colors.GREEN,
-                f"  ✓ LIKE filtered data correctly ({percentage:.1f}% of total)",
-            )
-            results.append(
-                ("LIKE-Result-4: Filter effectiveness check", True, 0, like_rows)
-            )
-        elif like_rows == total_rows:
-            print_colored(
-                Colors.YELLOW,
-                f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern1}%'",
-            )
-            print_colored(
-                Colors.RED,
-                f"  ✗ LIKE returned all data but multiple prefixes exist!",
-            )
-
-    # LIKE 正确性验证测试
-    print_colored(Colors.BLUE, "\n=== LIKE Correctness Verification ===\n")
-
-    if ids:
-        test_id = ids[0]
-
-        # 提取搜索模式
-        if "_" in test_id:
-            pattern = test_id.split("_")[0]  # 例如 "trip"
-        else:
-            pattern = test_id[:3] if len(test_id) >= 3 else test_id
-
-        # 验证 LIKE 结果确实包含匹配的模式
-        print_colored(
-            Colors.YELLOW, f"\n🔍 Verifying LIKE '{pattern}%' actually filters data"
-        )
-
-        # 执行 LIKE 查询
-        like_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE id LIKE '{pattern}%'"
-        try:
-            cursor.execute(like_sql)
-            like_count = cursor.fetchone()[0]
-        except Exception as e:
-            print_colored(Colors.RED, f"❌ LIKE query failed: {e}")
-            print_colored(Colors.RED, f"❌ Failed SQL: {like_sql}")
-            like_count = -1
-
-        # 执行无过滤查询
-        try:
-            cursor.execute("SELECT COUNT(*) FROM taxi_trips")
-            total_count = cursor.fetchone()[0]
-        except Exception as e:
-            print_colored(Colors.RED, f"❌ Total count query failed: {e}")
-            print_colored(Colors.RED, f"❌ Failed SQL: SELECT COUNT(*) FROM taxi_trips")
-            total_count = -1
-
-        print(f"  Total rows: {total_count:,}")
-        print(f"  LIKE matched rows: {like_count:,}")
-
-        if like_count < total_count:
-            print_colored(
-                Colors.GREEN,
-                f"  ✓ LIKE correctly filtered data ({like_count}/{total_count} = {like_count/total_count*100:.1f}%)",
-            )
-            results.append(("LIKE-Verify-1: Filter effectiveness", True, 0, like_count))
-        elif like_count == total_count:
-            # 可能是所有数据都匹配,验证是否合理
-            # 对于 id 字段,如果所有 id 都以相同前缀开头,这是合理的
-            print_colored(
-                Colors.YELLOW,
-                f"  ⚠️  All data matches pattern (this might be expected if all IDs have same prefix)",
-            )
-            results.append(("LIKE-Verify-1: Filter effectiveness", True, 0, like_count))
-        else:
-            print_colored(
-                Colors.RED, f"  ✗ LIKE count > total count - something is wrong!"
-            )
-            results.append(
-                ("LIKE-Verify-1: Filter effectiveness", False, 0, like_count)
-            )
-
-        # 验证 LIKE 与具体值的组合
-        print_colored(Colors.YELLOW, f"\n🔍 Verifying LIKE with time range filter")
-
-        like_time_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '{pattern}%'"
-        try:
-            cursor.execute(like_time_sql)
-            like_time_count = cursor.fetchone()[0]
-        except Exception as e:
-            print_colored(Colors.RED, f"❌ LIKE+time query failed: {e}")
-            print_colored(Colors.RED, f"❌ Failed SQL: {like_time_sql}")
-            like_time_count = -1
-
-        time_only_sql = f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}"
-        try:
-            cursor.execute(time_only_sql)
-            time_only_count = cursor.fetchone()[0]
-        except Exception as e:
-            print_colored(Colors.RED, f"❌ Time-only query failed: {e}")
-            print_colored(Colors.RED, f"❌ Failed SQL: {time_only_sql}")
-            time_only_count = -1
-
-        print(f"  Time range only: {time_only_count:,} rows")
-        print(f"  Time range + LIKE: {like_time_count:,} rows")
-
-        if time_only_count == 0:
-            print_colored(
-                Colors.YELLOW, f"  ⚠️  No data in time range, skipping verification"
-            )
-            results.append(("LIKE-Verify-2: Combined filter", True, 0, like_time_count))
-        elif like_time_count <= time_only_count:
-            percentage = (
-                like_time_count / time_only_count * 100 if time_only_count > 0 else 0
-            )
-            print_colored(
-                Colors.GREEN,
-                f"  ✓ LIKE correctly filtered time range results ({like_time_count}/{time_only_count} = {percentage:.1f}%)",
-            )
-            results.append(("LIKE-Verify-2: Combined filter", True, 0, like_time_count))
-        else:
-            print_colored(
-                Colors.RED,
-                f"  ✗ LIKE+time count > time-only count - filter not working!",
-            )
-            results.append(
-                ("LIKE-Verify-2: Combined filter", False, 0, like_time_count)
-            )
-
-    # 正确性校验测试（合并到主测试中）
-    print_colored(Colors.BLUE, "\n=== Correctness Verification Tests ===\n")
-
-    verification_tests = [
-        (
-            "25. COUNT consistency (equality vs range)",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 2",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count >= 2 AND passenger_count <= 2",
-        ),
-        (
-            "26. Range query idempotence",
-            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}",
-            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}",
-        ),
-        (
-            "27. LIMIT with ORDER BY consistency",
-            "SELECT id FROM taxi_trips ORDER BY id LIMIT 5",
-            "SELECT id FROM taxi_trips ORDER BY id ASC LIMIT 5",
-        ),
-        (
-            "28. COUNT(*) vs COUNT(column)",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count > 0",
-            "SELECT COUNT(id) FROM taxi_trips WHERE passenger_count > 0",
-        ),
-        (
-            "29. MIN/MAX with/without NULL filter",
-            "SELECT MIN(fare_amount), MAX(fare_amount) FROM taxi_trips",
-            "SELECT MIN(fare_amount), MAX(fare_amount) FROM taxi_trips WHERE fare_amount IS NOT NULL",
-        ),
-        (
-            "30. WHERE filter ordering independence",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 1 AND payment_type = 2",
-            "SELECT COUNT(*) FROM taxi_trips WHERE payment_type = 2 AND passenger_count = 1",
-        ),
-        (
-            "31. Time range boundary test",
-            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024}",
-            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime > {jan_1_2024 - 1}",
-        ),
-        (
-            "32. OR vs IN equivalence",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 1 OR passenger_count = 2",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count IN (1, 2)",
-        ),
-        (
-            "33. Constant false returns zero",
-            "SELECT COUNT(*) FROM taxi_trips WHERE 2=4",
-            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount > 999999",
-        ),
-        (
-            "34. Constant true with filter",
-            "SELECT COUNT(*) FROM taxi_trips WHERE 1=1 AND passenger_count = 2",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 2",
-        ),
-        (
-            "35. Constant comparison (10 > 5)",
-            "SELECT COUNT(*) FROM taxi_trips WHERE 10 > 5",
-            "SELECT COUNT(*) FROM taxi_trips WHERE 1=1",
-        ),
-        (
-            "36. Constant false with AND",
-            "SELECT COUNT(*) FROM taxi_trips WHERE 2=4 AND passenger_count = 1",
-            "SELECT COUNT(*) FROM taxi_trips WHERE 1=2",
-        ),
-        (
-            "37. NOT IN equivalence",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count NOT IN (1, 2)",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count != 1 AND passenger_count != 2",
-        ),
-        (
-            "38. IN with 3 values vs multiple OR",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count IN (1, 2, 3)",
-            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 1 OR passenger_count = 2 OR passenger_count = 3",
-        ),
-        (
-            "39. Mixed constant and range",
-            "SELECT COUNT(*) FROM taxi_trips WHERE 1=1 AND fare_amount > 20.0",
-            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount > 20.0",
-        ),
-        (
-            "40. Negative value comparison",
-            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount < 0",
-            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount < 0.0",
-        ),
-    ]
-
-    for name, sql1, sql2 in verification_tests:
-        # 执行第一个查询
-        success1, duration1, count1 = run_query(
-            cursor, name + " [Query 1]", sql1, False
-        )
-        # 执行第二个查询
-        success2, duration2, count2 = run_query(
-            cursor, name + " [Query 2]", sql2, False
-        )
-
-        # 验证结果是否一致
-        if success1 and success2:
-            verified = count1 == count2
-            if verified:
-                print_colored(Colors.GREEN, f"  ✓ Results match: {count1} rows")
-            else:
-                print_colored(
-                    Colors.RED, f"  ✗ Results differ: {count1} vs {count2} rows"
-                )
-            results.append(
-                (
-                    name,
-                    verified and success1 and success2,
-                    duration1 + duration2,
-                    count1,
-                )
-            )
-        else:
-            print_colored(Colors.RED, f"  ✗ One or both queries failed")
-            results.append((name, False, duration1 + duration2, 0))
-
-    cursor.close()
-
-    # 打印总结
-    print_colored(Colors.BLUE, "\n=== Test Summary ===\n")
-
-    passed = sum(1 for _, success, _, _ in results if success)
-    failed = len(results) - passed
-    total_time = sum(duration for _, _, duration, _ in results)
-
-    print(f"Total tests: {len(results)}")
-    print_colored(Colors.GREEN, f"  Passed: {passed}")
-    if failed > 0:
-        print_colored(Colors.RED, f"  Failed: {failed}")
-
-    print(f"\nTotal time: {total_time:.3f}s")
-    print()
-
-    # 性能统计
-    print_colored(Colors.BLUE, "Performance breakdown:")
-    for name, success, duration, row_count in results:
-        status = "✓" if success else "✗"
-        print(f"  {status} {name}: {duration:.3f}s ({row_count:,} rows)")
-
-    return failed == 0
+    calm_cursor.close()
+    mysql_cursor.close()
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 test_queries.py [nyc-taxi]")
-        return 1
+        print("Usage: python3 test_queries.py nyc-taxi")
+        sys.exit(1)
 
     dataset = sys.argv[1]
 
-    print_colored(Colors.BLUE, "=== Query Test Suite ===\n")
-    print(f"Dataset: {dataset}")
-    print("Connecting to database...\n")
-
-    conn = connect_db()
-    print_colored(Colors.GREEN, "✓ Connected\n")
-
-    success = False
-
-    if dataset == "nyc-taxi":
-        success = test_nyc_taxi(conn)
-    else:
+    if dataset != "nyc-taxi":
         print_colored(Colors.RED, f"Unknown dataset: {dataset}")
-        return 1
+        print("Supported datasets: nyc-taxi")
+        sys.exit(1)
 
-    conn.close()
+    print_colored(Colors.BLUE, "=== Database Connection Test ===\n")
+    
+    print("Connecting to Calm (127.0.0.1:3307)...")
+    calm_conn = connect_calm()
+    print_colored(Colors.GREEN, "✓ Connected to Calm\n")
 
-    if success:
-        print_colored(Colors.GREEN, "\n🎉 All tests passed!")
-        return 0
-    else:
-        print_colored(Colors.RED, "\n❌ Some tests failed")
-        return 1
+    print("Connecting to MySQL (127.0.0.1:3306, database: calm_test)...")
+    mysql_conn = connect_mysql()
+    print_colored(Colors.GREEN, "✓ Connected to MySQL\n")
+
+    try:
+        if dataset == "nyc-taxi":
+            test_nyc_taxi(calm_conn, mysql_conn)
+    finally:
+        calm_conn.close()
+        mysql_conn.close()
+        print_colored(Colors.BLUE, "\n✓ Connections closed")
+
+    return 0
 
 
 if __name__ == "__main__":

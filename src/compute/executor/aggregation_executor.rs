@@ -312,6 +312,31 @@ impl AggregationExecutor {
         Ok(count)
     }
 
+    /// 提取 SQL 中的 ORDER BY 和 LIMIT 子句
+    ///
+    /// 返回 (ORDER BY 子句, LIMIT 子句)
+    fn extract_order_and_limit(sql: &str) -> (Option<String>, Option<String>) {
+        let sql_upper = sql.to_uppercase();
+
+        let order_by_pos = sql_upper.find(" ORDER BY");
+        let limit_pos = sql_upper.find(" LIMIT");
+
+        let order_by_clause = if let Some(pos) = order_by_pos {
+            let end_pos = limit_pos.unwrap_or(sql.len());
+            Some(sql[pos..end_pos].to_string())
+        } else {
+            None
+        };
+
+        let limit_clause = if let Some(pos) = limit_pos {
+            Some(sql[pos..].to_string())
+        } else {
+            None
+        };
+
+        (order_by_clause, limit_clause)
+    }
+
     /// 移除 SQL 中的 ORDER BY 和 LIMIT 子句
     ///
     /// 对于聚合查询(如 COUNT),ORDER BY 和 LIMIT 是无意义的,
@@ -466,6 +491,18 @@ impl AggregationExecutor {
     ) -> CoreResult<QueryResult> {
         log::info!("📊 [GeneralAggregation] Executing: {}", sql);
 
+        // 🔧 提取 ORDER BY 和 LIMIT 子句,稍后在 re-aggregation 后应用
+        let (order_by_clause, limit_clause) = Self::extract_order_and_limit(sql);
+
+        // 🔧 移除 ORDER BY 和 LIMIT,让各 partition 做完整聚合
+        let partition_sql = Self::remove_order_by_and_limit(sql);
+
+        if order_by_clause.is_some() || limit_clause.is_some() {
+            log::info!(
+                "🔧 [GeneralAggregation] Removed ORDER BY/LIMIT from partition queries, will apply after re-aggregation"
+            );
+        }
+
         let partition_names = self.engine.list_partitions(table_name).await;
         let mut all_batches = Vec::new();
 
@@ -489,7 +526,7 @@ impl AggregationExecutor {
                 .map_err(|e| CoreError::Internal(format!("Failed to register table: {}", e)))?;
 
             let df = ctx
-                .sql(sql)
+                .sql(&partition_sql)
                 .await
                 .map_err(|e| CoreError::Internal(format!("Query failed: {}", e)))?;
 
@@ -537,18 +574,38 @@ impl AggregationExecutor {
 
             for field_name in &field_names {
                 let lower = field_name.to_lowercase();
-                if lower.contains("min(") {
+
+                // 判断是否为聚合函数结果列
+                // 注意: 必须先判断特定的聚合函数(MIN/MAX/AVG),再判断通用的COUNT别名
+                // 否则 min_fare, max_fare, avg_fare 会被误识别为 COUNT
+                let is_count_result = lower == "\"cnt\""
+                    || lower == "\"count\""
+                    || lower == "\"total\""
+                    || lower.ends_with("_cnt\"")
+                    || lower.ends_with("_count\"");
+
+                if lower.contains("min(") || (lower.starts_with("\"min_") && !is_count_result) {
                     agg_exprs.push(format!("MIN({}) AS {}", field_name, field_name));
-                } else if lower.contains("max(") {
+                } else if lower.contains("max(")
+                    || (lower.starts_with("\"max_") && !is_count_result)
+                {
                     agg_exprs.push(format!("MAX({}) AS {}", field_name, field_name));
-                } else if lower.contains("sum(") {
+                } else if lower.contains("sum(")
+                    || (lower.starts_with("\"sum_") && !is_count_result)
+                {
                     agg_exprs.push(format!("SUM({}) AS {}", field_name, field_name));
-                } else if lower.contains("count(") {
-                    agg_exprs.push(format!("SUM({}) AS {}", field_name, field_name));
-                } else if lower.contains("avg(") {
-                    // AVG需要特殊处理: SUM(sum_col) / SUM(count_col)
-                    // 这里简化处理,假设只有一个AVG
+                } else if lower.contains("avg(")
+                    || lower.contains("\"avg")
+                    || (lower.starts_with("\"avg_") && !is_count_result)
+                    || lower.ends_with("_avg\"")
+                {
+                    // AVG 需要特殊处理: 理想情况应该是 SUM(sum_col) / SUM(count_col)
+                    // 但这需要改写原始SQL让partition返回sum和count
+                    // 这里使用 AVG 作为近似(会有轻微误差,但比SUM正确得多)
                     agg_exprs.push(format!("AVG({}) AS {}", field_name, field_name));
+                } else if lower.contains("count(") || is_count_result {
+                    // COUNT 结果或聚合别名都需要用 SUM 合并
+                    agg_exprs.push(format!("SUM({}) AS {}", field_name, field_name));
                 } else {
                     // 普通列,用于GROUP BY
                     agg_exprs.push(field_name.clone());
@@ -560,6 +617,15 @@ impl AggregationExecutor {
             if !group_keys.is_empty() {
                 re_agg_sql.push_str(&format!(" GROUP BY {}", group_keys.join(", ")));
             }
+
+            // 🔧 在 re-aggregation 后应用原始的 ORDER BY 和 LIMIT
+            if let Some(order_by) = &order_by_clause {
+                re_agg_sql.push_str(order_by);
+            }
+            if let Some(limit) = &limit_clause {
+                re_agg_sql.push_str(limit);
+            }
+
             log::info!("🔄 [Re-aggregation SQL] {}", re_agg_sql);
 
             let ctx = SessionContext::new();

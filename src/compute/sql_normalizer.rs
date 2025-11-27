@@ -46,7 +46,8 @@ impl SqlNormalizer {
     ///
     /// DataFusion 要求 Timestamp 字段与 Timestamp 类型比较，不能直接与 Int64 比较
     /// 这个函数将常见的时间戳字段（如 pickup_datetime, dropoff_datetime, created_at, updated_at 等）
-    /// 的 Int64 字面量自动包装为 CAST(value AS TIMESTAMP)
+    /// 的 Int64 字面量自动包装为 to_timestamp_millis(value) 函数调用
+    /// 使用 to_timestamp_millis 而不是 CAST 可以避免溢出问题
     fn fix_timestamp_comparisons(sql: &str) -> String {
         // 常见的时间戳字段名模式
         let timestamp_fields = vec![
@@ -75,8 +76,9 @@ impl SqlNormalizer {
                         let operator = &caps[1];
                         let value = &caps[2];
 
-                        // 替换为: field_name [比较符] CAST(数字 AS TIMESTAMP)
-                        format!("{} {} CAST({} AS TIMESTAMP)", field, operator, value)
+                        // 替换为: field_name [比较符] to_timestamp_millis(数字)
+                        // to_timestamp_millis 是 DataFusion 内置函数，将毫秒时间戳转为 Timestamp
+                        format!("{} {} to_timestamp_millis({})", field, operator, value)
                     })
                     .to_string();
             }

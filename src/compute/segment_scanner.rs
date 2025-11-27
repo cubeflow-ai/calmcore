@@ -162,19 +162,21 @@ impl SegmentScanner {
         let mut unsupported_filters = Vec::new();
         let mut has_supported_filter = false;
 
-        log::debug!(
-            "🔍 [apply_filters] Processing {} filters, valid_docs={}",
+        log::info!(
+            "🔍 [apply_filters] Processing {} filters, valid_docs={}, thread={:?}",
             filters.len(),
-            self.valid_docs.len()
+            self.valid_docs.len(),
+            std::thread::current().id()
         );
 
         for filter in filters {
             match self.expr_to_bitmap(filter) {
                 Some(bitmap) => {
-                    log::debug!(
-                        "✓ [apply_filters] Filter handled via index: {:?}, bitmap_size={}",
+                    log::info!(
+                        "✓ [apply_filters] Filter handled via index: {:?}, bitmap_size={}, thread={:?}",
                         filter,
-                        bitmap.len()
+                        bitmap.len(),
+                        std::thread::current().id()
                     );
                     result_bitmap &= bitmap;
                     has_supported_filter = true;
@@ -342,7 +344,7 @@ impl SegmentScanner {
         }
 
         // 应用 WHERE 过滤条件
-        let (result_bitmap, _unsupported_filters) = self.apply_filters(filters);
+        let (result_bitmap, unsupported_filters) = self.apply_filters(filters);
         let result_bitmap = result_bitmap
             .ok_or_else(|| CoreError::Internal("Failed to apply filters".to_string()))?;
 
@@ -366,7 +368,100 @@ impl SegmentScanner {
         }
 
         // 过滤 batch
-        self.filter_batch_by_bitmap(&batch, &filtered_bitmap, start_doc_id)
+        let filtered_batch = self.filter_batch_by_bitmap(&batch, &filtered_bitmap, start_doc_id)?;
+
+        // 如果有不支持的过滤器，使用 DataFusion 进行二次过滤
+        if !unsupported_filters.is_empty() {
+            log::debug!(
+                "🔍 [scan_with_skip_and_limit] Applying {} DataFusion filters",
+                unsupported_filters.len()
+            );
+            return self.apply_datafusion_filter(filtered_batch, &unsupported_filters);
+        }
+
+        Ok(filtered_batch)
+    }
+
+    /// 使用 DataFusion 对 RecordBatch 进行二次过滤
+    fn apply_datafusion_filter(
+        &self,
+        batch: RecordBatch,
+        filters: &[Expr],
+    ) -> crate::utils::error::CoreResult<RecordBatch> {
+        use crate::utils::error::CoreError;
+        use datafusion::arrow::compute::filter_record_batch;
+        use datafusion::common::ToDFSchema;
+        use datafusion::execution::context::SessionContext;
+        use datafusion::physical_expr::create_physical_expr;
+
+        if filters.is_empty() || batch.num_rows() == 0 {
+            return Ok(batch);
+        }
+
+        // 组合所有 filters
+        let combined_filter = if filters.len() == 1 {
+            filters[0].clone()
+        } else {
+            let mut combined = filters[0].clone();
+            for i in 1..filters.len() {
+                combined = Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr {
+                    left: Box::new(combined),
+                    op: datafusion::logical_expr::Operator::And,
+                    right: Box::new(filters[i].clone()),
+                });
+            }
+            combined
+        };
+
+        let ctx = SessionContext::new();
+        let df_schema = batch.schema().to_dfschema_ref().map_err(|e| {
+            CoreError::Internal(format!("Failed to convert schema to DFSchema: {}", e))
+        })?;
+
+        let physical_expr =
+            create_physical_expr(&combined_filter, &df_schema, ctx.state().execution_props())
+                .map_err(|e| {
+                    CoreError::Internal(format!("Failed to create physical expr: {}", e))
+                })?;
+
+        let result = physical_expr
+            .evaluate(&batch)
+            .map_err(|e| CoreError::Internal(format!("Failed to evaluate filter: {}", e)))?;
+
+        let predicate = match result {
+            datafusion::physical_plan::ColumnarValue::Array(array) => {
+                use datafusion::arrow::array::AsArray;
+                let boolean_array = array.as_boolean();
+                if boolean_array.len() != batch.num_rows() {
+                    return Err(CoreError::Internal(format!(
+                        "Filter returned array of length {}, expected {}",
+                        boolean_array.len(),
+                        batch.num_rows()
+                    )));
+                }
+                boolean_array.clone()
+            }
+            datafusion::physical_plan::ColumnarValue::Scalar(scalar) => match scalar {
+                ScalarValue::Boolean(Some(v)) => {
+                    if v {
+                        return Ok(batch);
+                    } else {
+                        return Ok(RecordBatch::new_empty(batch.schema()));
+                    }
+                }
+                ScalarValue::Boolean(None) => {
+                    return Ok(RecordBatch::new_empty(batch.schema()));
+                }
+                _ => {
+                    return Err(CoreError::Internal(
+                        "Filter returned non-boolean scalar".to_string(),
+                    ))
+                }
+            },
+        };
+
+        filter_record_batch(&batch, &predicate)
+            .map_err(|e| CoreError::Internal(format!("Failed to filter batch: {}", e)))
     }
 
     /// 获取指定范围内的有效文档（未删除）
@@ -1219,7 +1314,15 @@ impl SegmentScanner {
             Some(reader) => {
                 // 有索引,调用 reader.query()
                 // 如果查询失败(类型不匹配等),返回空 bitmap
-                Some(reader.query(value).unwrap_or_else(RoaringBitmap::new))
+                let bitmap = reader.query(value).unwrap_or_else(RoaringBitmap::new);
+                log::debug!(
+                    "🔎 [query_equal] field='{}', value={:?}, result_count={}, thread={:?}",
+                    field_name,
+                    value,
+                    bitmap.len(),
+                    std::thread::current().id()
+                );
+                Some(bitmap)
             }
             None => {
                 log::info!(
@@ -1501,39 +1604,43 @@ impl SegmentStream {
             }
         }
 
-        // 🎯 根据命中数量自适应选择策略
+        // 🚀 根据命中数量自适应选择策略
         // - 大数据量(>= 10000): 批量收集再查找，减少函数调用
         // - 小数据量(< 10000): 逐个查找，避免额外内存分配
         let batch_groups = if self.total_docs >= 10000 {
             // 策略A: 批量处理（适合大数据量）
             let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
-            let mut doc_ids_to_process: Vec<u32> = Vec::new();
 
-            // 🚀 关键优化：target_chunk_size 必须考虑 LIMIT！
-            // 如果 LIMIT 10，就只收集 ~100 个 doc_ids，不要收集 10万个！
-            let base_chunk_size = self.chunk_size * 1000; // 每个 batch 约 1000 docs
-            let target_chunk_size = if let Some(remaining) = remaining_rows {
-                // 有 LIMIT：只收集 remaining * 10 (预留一些buffer，因为可能跨多个batch)
-                base_chunk_size.min(remaining * 10)
-            } else {
-                // 无 LIMIT：使用完整的 chunk size
-                base_chunk_size
-            };
+            // 🚀 流式处理: 收集刚好够填满 chunk_size 个 batch 的 doc_ids
+            // 而不是一次性收集所有 doc_ids 然后丢弃多余的 batch
+            let mut doc_ids_to_process: Vec<u32> = Vec::new();
+            let mut batch_key_set: std::collections::HashSet<u32> =
+                std::collections::HashSet::new();
 
             log::debug!(
-                "  [SegmentStream] target_chunk_size={}, remaining_rows={:?}, total_docs={}",
-                target_chunk_size,
-                remaining_rows,
-                self.total_docs
+                "  [SegmentStream] Collecting doc_ids to fill up to {} batches, remaining_rows={:?}",
+                self.chunk_size,
+                remaining_rows
             );
 
-            // 先收集一批 doc_ids
+            // 逐个收集 doc_id,边收集边统计 batch 数量
             for doc_id in self.doc_ids_iter.by_ref() {
-                doc_ids_to_process.push(doc_id);
+                // LIMIT 优化
+                if let Some(remaining) = remaining_rows {
+                    if doc_ids_to_process.len() >= remaining {
+                        break;
+                    }
+                }
 
-                // 达到目标 chunk size，停止收集
-                if doc_ids_to_process.len() >= target_chunk_size {
-                    break;
+                // 检查这个 doc_id 属于哪个 batch
+                if let Some(batch_key) = self.raw_data.get_batch_key_for_doc(doc_id) {
+                    doc_ids_to_process.push(doc_id);
+                    batch_key_set.insert(batch_key);
+
+                    // 🎯 关键: 如果已经收集了 chunk_size 个不同的 batch,停止
+                    if batch_key_set.len() >= self.chunk_size {
+                        break;
+                    }
                 }
             }
 
@@ -1543,16 +1650,21 @@ impl SegmentStream {
             }
 
             log::debug!(
-                "  [SegmentStream] Using batch lookup for {} doc_ids (total_docs={})",
+                "  [SegmentStream] Collected {} doc_ids spanning {} batches (limit: {})",
                 doc_ids_to_process.len(),
-                self.total_docs
+                batch_key_set.len(),
+                self.chunk_size
             );
 
-            // 🚀 批量查找 batch_key 并分组
+            // 批量查找 batch_key 并分组
             let batch_groups = self.raw_data.batch_lookup_doc_ids(&doc_ids_to_process);
 
-            // 限制 batch 数量到 chunk_size
-            batch_groups.into_iter().take(self.chunk_size).collect()
+            log::debug!(
+                "  [SegmentStream] batch_lookup returned {} batch groups",
+                batch_groups.len()
+            );
+
+            batch_groups
         } else {
             // 策略B: 逐个处理（适合小数据量）
             let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
@@ -1647,11 +1759,13 @@ impl SegmentStream {
 
         // 3. 生成 RecordBatches
         let mut result_batches = Vec::new();
+        let mut total_rows_generated = 0;
 
         for (batch_start_id, doc_ids_in_batch) in batch_groups {
             // 空投影处理
             if is_empty_projection {
                 let row_count = doc_ids_in_batch.len();
+                total_rows_generated += row_count;
                 if row_count > 0 {
                     if let Ok(batch) = RecordBatch::try_new_with_options(
                         self.schema.clone(),
@@ -1660,6 +1774,8 @@ impl SegmentStream {
                             .with_row_count(Some(row_count)),
                     ) {
                         result_batches.push(batch);
+                    } else {
+                        log::warn!("  [SegmentStream] Failed to create empty projection batch with {} rows", row_count);
                     }
                 }
                 continue;
@@ -1753,14 +1869,23 @@ impl SegmentStream {
             }
         }
 
-        log::debug!(
-            "  [SegmentStream] Generated {} result batches",
-            result_batches.len()
+        log::info!(
+            "  [SegmentStream] Generated {} result batches, total_rows_generated={}, doc_ids collected from bitmap={}",
+            result_batches.len(),
+            total_rows_generated,
+            self.total_docs
         );
 
         // 更新已返回的行数（用于 LIMIT 下推）
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
         self.rows_returned += total_rows;
+
+        log::info!(
+            "  [SegmentStream] Batch row count check: total_rows={}, total_rows_generated={}, match={}",
+            total_rows,
+            total_rows_generated,
+            total_rows == total_rows_generated
+        );
 
         Ok(result_batches)
     }

@@ -15,14 +15,14 @@ pub async fn handle_insert<W: io::Read + io::Write>(
     results: QueryResultWriter<'_, W>,
 ) -> io::Result<()> {
     let start_time = std::time::Instant::now();
-    log::info!("⏱️  [INSERT] Starting, SQL length: {} bytes", query.len());
+    log::debug!("⏱️  [INSERT] Starting, SQL length: {} bytes", query.len());
 
     let parse_start = std::time::Instant::now();
 
     // 快速解析 INSERT 语句
     let (table_name, columns, all_rows) = parse_insert_fast(query)?;
 
-    log::info!(
+    log::debug!(
         "⏱️  [INSERT] Parsed {} rows in {:?}",
         all_rows.len(),
         parse_start.elapsed()
@@ -58,7 +58,7 @@ pub async fn handle_insert<W: io::Read + io::Write>(
         partition_data.entry(partition_id).or_default().push(row);
     }
 
-    log::info!(
+    log::debug!(
         "⏱️  [INSERT] Routed to {} partitions in {:?}",
         partition_data.len(),
         route_start.elapsed()
@@ -103,13 +103,13 @@ pub async fn handle_insert<W: io::Read + io::Write>(
         total_inserted += rows.len() as u64;
     }
 
-    log::info!(
+    log::debug!(
         "⏱️  [INSERT] Total insert time: {:?}, {} rows, {:.0} rows/sec",
         insert_start.elapsed(),
         total_inserted,
         total_inserted as f64 / insert_start.elapsed().as_secs_f64()
     );
-    log::info!("⏱️  [INSERT] Overall time: {:?}\n", start_time.elapsed());
+    log::debug!("⏱️  [INSERT] Overall time: {:?}\n", start_time.elapsed());
 
     results.completed(total_inserted, 0)
 }
