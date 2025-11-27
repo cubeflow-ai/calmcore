@@ -210,29 +210,36 @@ async fn create_index(
     if let Some(mappings) = payload.mappings {
         for (field_name, mapping) in mappings.properties {
             let should_index = mapping.index.unwrap_or(true);
+            // 统一将字段名转为小写
+            let field_name_lower = field_name.to_lowercase();
 
             let field = match mapping.field_type.as_str() {
                 "text" | "keyword" => FieldOption::Keyword {
-                    name: field_name,
+                    name: field_name_lower.clone(),
                     index: should_index,
                     is_array: false,
                     persist_option: None,
                     case_sensitive: true,
                 },
                 "long" | "integer" => FieldOption::I64 {
-                    name: field_name,
+                    name: field_name_lower.clone(),
                     index: should_index,
                 },
                 "float" | "double" => FieldOption::F64 {
-                    name: field_name,
+                    name: field_name_lower.clone(),
                     index: should_index,
                 },
                 "boolean" => FieldOption::Boolean {
-                    name: field_name,
+                    name: field_name_lower.clone(),
                     index: should_index,
                 },
+                "date" => FieldOption::Timestamp {
+                    name: field_name_lower.clone(),
+                    index: should_index,
+                    format: Some("iso8601".to_string()),
+                },
                 _ => FieldOption::Keyword {
-                    name: field_name,
+                    name: field_name_lower.clone(),
                     index: should_index,
                     is_array: false,
                     persist_option: None,

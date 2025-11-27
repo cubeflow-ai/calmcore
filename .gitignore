@@ -29,3 +29,6 @@ big_data/
 test_suite/datasets
 test_suite/test_data
 test_data
+logs/*
+test_suite/logs
+test_suite/logs/*

@@ -169,7 +169,11 @@ fn parse_insert_fast(query: &str) -> io::Result<(String, Vec<String>, Vec<Vec<St
     }
 
     let cols_str = String::from_utf8_lossy(&query_bytes[cols_start..pos]);
-    let columns: Vec<String> = cols_str.split(',').map(|s| s.trim().to_string()).collect();
+    // 将列名统一转为小写
+    let columns: Vec<String> = cols_str
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .collect();
 
     pos += 1; // 跳过 ')'
 
@@ -357,7 +361,7 @@ fn build_record_batch(
                     .collect();
                 (
                     Arc::new(Int32Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Int32, false),
+                    Field::new(&name.to_lowercase(), DataType::Int32, false),
                 )
             }
             FieldOption::I64 { name, .. } => {
@@ -374,7 +378,7 @@ fn build_record_batch(
                     .collect();
                 (
                     Arc::new(Int64Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Int64, false),
+                    Field::new(&name.to_lowercase(), DataType::Int64, false),
                 )
             }
             FieldOption::U64 { name, .. } => {
@@ -391,7 +395,7 @@ fn build_record_batch(
                     .collect();
                 (
                     Arc::new(UInt64Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::UInt64, false),
+                    Field::new(&name.to_lowercase(), DataType::UInt64, false),
                 )
             }
             FieldOption::F32 { name, .. } => {
@@ -408,7 +412,7 @@ fn build_record_batch(
                     .collect();
                 (
                     Arc::new(Float32Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Float32, false),
+                    Field::new(&name.to_lowercase(), DataType::Float32, false),
                 )
             }
             FieldOption::F64 { name, .. } => {
@@ -425,7 +429,7 @@ fn build_record_batch(
                     .collect();
                 (
                     Arc::new(Float64Array::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Float64, false),
+                    Field::new(&name.to_lowercase(), DataType::Float64, false),
                 )
             }
             FieldOption::Boolean { name, .. } => {
@@ -442,14 +446,14 @@ fn build_record_batch(
                     .collect();
                 (
                     Arc::new(BooleanArray::from(vals?)) as ArrayRef,
-                    Field::new(name, DataType::Boolean, false),
+                    Field::new(&name.to_lowercase(), DataType::Boolean, false),
                 )
             }
             FieldOption::Keyword { name, .. } => {
                 let vals: Vec<&str> = rows.iter().map(|row| row[col_idx].as_str()).collect();
                 (
                     Arc::new(StringArray::from(vals)) as ArrayRef,
-                    Field::new(name, DataType::Utf8, false),
+                    Field::new(&name.to_lowercase(), DataType::Utf8, false),
                 )
             }
             FieldOption::Timestamp { name, .. } => {
@@ -467,7 +471,7 @@ fn build_record_batch(
                 (
                     Arc::new(TimestampMillisecondArray::from(vals?)) as ArrayRef,
                     Field::new(
-                        name,
+                        &name.to_lowercase(),
                         DataType::Timestamp(TimeUnit::Millisecond, None),
                         false,
                     ),

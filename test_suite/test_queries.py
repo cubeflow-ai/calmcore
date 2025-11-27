@@ -83,21 +83,24 @@ def compare_results(calm_results, mysql_results, name):
     """对比两个数据库的查询结果"""
     calm_normalized = normalize_results(calm_results)
     mysql_normalized = normalize_results(mysql_results)
-    
+
     if len(calm_normalized) != len(mysql_normalized):
-        print_colored(Colors.RED, f"    ❌ Row count mismatch: Calm={len(calm_results)}, MySQL={len(mysql_results)}")
+        print_colored(
+            Colors.RED,
+            f"    ❌ Row count mismatch: Calm={len(calm_results)}, MySQL={len(mysql_results)}",
+        )
         return False
-    
+
     # 对于聚合查询，结果顺序可能不同，需要排序后对比
     calm_sorted = sorted(calm_normalized)
     mysql_sorted = sorted(mysql_normalized)
-    
+
     if calm_sorted == mysql_sorted:
         print_colored(Colors.GREEN, f"    ✓ Results match ({len(calm_results)} rows)")
         return True
     else:
         print_colored(Colors.RED, f"    ❌ Results differ!")
-        
+
         # 显示前几行差异
         max_show = 5
         print_colored(Colors.YELLOW, f"    First {max_show} rows from each:")
@@ -109,7 +112,7 @@ def compare_results(calm_results, mysql_results, name):
         for i, row in enumerate(mysql_results[:max_show]):
             formatted = [format_value(v) for v in row]
             print(f"      [{i}] {formatted}")
-        
+
         return False
 
 
@@ -119,12 +122,12 @@ def run_comparison_query(calm_cursor, mysql_cursor, name, sql):
     print_colored(Colors.YELLOW, f"📊 {name}")
     print(f"SQL: {sql}")
     print()
-    
+
     # 执行 Calm 查询
     calm_success = False
     calm_duration = 0
     calm_results = []
-    
+
     print_colored(Colors.CYAN, "  [Calm] Executing...")
     start_time = time.time()
     try:
@@ -132,16 +135,19 @@ def run_comparison_query(calm_cursor, mysql_cursor, name, sql):
         calm_results = calm_cursor.fetchall()
         calm_duration = time.time() - start_time
         calm_success = True
-        print_colored(Colors.GREEN, f"  [Calm] ✓ {len(calm_results):,} rows in {calm_duration:.3f}s")
+        print_colored(
+            Colors.GREEN,
+            f"  [Calm] ✓ {len(calm_results):,} rows in {calm_duration:.3f}s",
+        )
     except Exception as e:
         calm_duration = time.time() - start_time
         print_colored(Colors.RED, f"  [Calm] ❌ Failed: {e}")
-    
+
     # 执行 MySQL 查询
     mysql_success = False
     mysql_duration = 0
     mysql_results = []
-    
+
     print_colored(Colors.MAGENTA, "  [MySQL] Executing...")
     start_time = time.time()
     try:
@@ -149,16 +155,19 @@ def run_comparison_query(calm_cursor, mysql_cursor, name, sql):
         mysql_results = mysql_cursor.fetchall()
         mysql_duration = time.time() - start_time
         mysql_success = True
-        print_colored(Colors.GREEN, f"  [MySQL] ✓ {len(mysql_results):,} rows in {mysql_duration:.3f}s")
+        print_colored(
+            Colors.GREEN,
+            f"  [MySQL] ✓ {len(mysql_results):,} rows in {mysql_duration:.3f}s",
+        )
     except Exception as e:
         mysql_duration = time.time() - start_time
         print_colored(Colors.RED, f"  [MySQL] ❌ Failed: {e}")
-    
+
     # 对比结果
     print()
     if calm_success and mysql_success:
         match = compare_results(calm_results, mysql_results, name)
-        
+
         # 性能对比
         if calm_duration > 0 and mysql_duration > 0:
             speedup = mysql_duration / calm_duration
@@ -166,7 +175,7 @@ def run_comparison_query(calm_cursor, mysql_cursor, name, sql):
                 print_colored(Colors.GREEN, f"    ⚡ Calm is {speedup:.2f}x faster")
             else:
                 print_colored(Colors.YELLOW, f"    ⚡ MySQL is {1/speedup:.2f}x faster")
-        
+
         return match
     elif calm_success:
         print_colored(Colors.YELLOW, "    ⚠️  Only Calm succeeded")
@@ -181,9 +190,9 @@ def run_comparison_query(calm_cursor, mysql_cursor, name, sql):
 
 def test_nyc_taxi(calm_conn, mysql_conn):
     """测试 NYC Taxi 数据集的查询"""
-    print_colored(Colors.BLUE, "\n" + "="*80)
+    print_colored(Colors.BLUE, "\n" + "=" * 80)
     print_colored(Colors.BLUE, "=== NYC Taxi Dataset - Calm vs MySQL Comparison ===")
-    print_colored(Colors.BLUE, "="*80)
+    print_colored(Colors.BLUE, "=" * 80)
 
     calm_cursor = calm_conn.cursor()
     mysql_cursor = mysql_conn.cursor()
@@ -195,47 +204,63 @@ def test_nyc_taxi(calm_conn, mysql_conn):
 
     test_cases = [
         ("1. Simple COUNT", "SELECT COUNT(*) FROM taxi_trips"),
-        
         ("2. Simple SELECT with LIMIT", "SELECT * FROM taxi_trips LIMIT 10"),
-        
-        ("3. Time range query (Jan 1, 2024)",
-         f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}"),
-        
-        ("4. Filter by passenger count",
-         "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 2"),
-        
-        ("5. COUNT by passenger count",
-         "SELECT passenger_count, COUNT(*) as count FROM taxi_trips GROUP BY passenger_count ORDER BY passenger_count"),
-        
-        ("6. Average fare by payment type",
-         "SELECT payment_type, AVG(fare_amount) as avg_fare, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type ORDER BY payment_type"),
-        
-        ("7. SUM by payment type",
-         "SELECT payment_type, SUM(total_amount) as total FROM taxi_trips GROUP BY payment_type ORDER BY payment_type"),
-        
-        ("8. MIN/MAX statistics",
-         "SELECT MIN(fare_amount) as min_fare, MAX(fare_amount) as max_fare FROM taxi_trips"),
-        
-        ("9. COUNT by pickup location (Top 10)",
-         "SELECT pickup_location_id, COUNT(*) as count FROM taxi_trips GROUP BY pickup_location_id ORDER BY count DESC LIMIT 10"),
-        
-        ("10. Complex filter (time + passenger + distance)",
-         f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_8_2024} AND passenger_count >= 2 AND trip_distance > 5.0"),
-        
-        ("11. High tip trips",
-         "SELECT COUNT(*) FROM taxi_trips WHERE tip_amount > 10.0"),
-        
-        ("12. Zero fare trips",
-         "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount = 0"),
-        
-        ("13. Long distance trips",
-         "SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 50.0"),
-        
-        ("14. Multiple GROUP BY fields",
-         "SELECT pickup_location_id, dropoff_location_id, COUNT(*) as cnt FROM taxi_trips GROUP BY pickup_location_id, dropoff_location_id ORDER BY cnt DESC LIMIT 10"),
-        
-        ("15. HAVING clause",
-         "SELECT payment_type, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type HAVING cnt > 1000 ORDER BY payment_type"),
+        (
+            "3. Time range query (Jan 1, 2024)",
+            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}",
+        ),
+        (
+            "4. Filter by passenger count",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 2",
+        ),
+        (
+            "5. COUNT by passenger count",
+            "SELECT passenger_count, COUNT(*) as count FROM taxi_trips GROUP BY passenger_count ORDER BY passenger_count",
+        ),
+        (
+            "6. Average fare by payment type",
+            "SELECT payment_type, AVG(fare_amount) as avg_fare, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type ORDER BY payment_type",
+        ),
+        (
+            "7. SUM by payment type",
+            "SELECT payment_type, SUM(total_amount) as total FROM taxi_trips GROUP BY payment_type ORDER BY payment_type",
+        ),
+        (
+            "8. MIN/MAX statistics",
+            "SELECT MIN(fare_amount) as min_fare, MAX(fare_amount) as max_fare FROM taxi_trips",
+        ),
+        (
+            "9. COUNT by pickup location (Top 10)",
+            "SELECT pickup_location_id, COUNT(*) as count FROM taxi_trips GROUP BY pickup_location_id ORDER BY count DESC LIMIT 10",
+        ),
+        (
+            "10. Complex filter (time + passenger + distance)",
+            f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_8_2024} AND passenger_count >= 2 AND trip_distance > 5.0",
+        ),
+        (
+            "11. High tip trips",
+            "SELECT COUNT(*) FROM taxi_trips WHERE tip_amount > 10.0",
+        ),
+        (
+            "12. Zero fare trips",
+            "SELECT COUNT(*) FROM taxi_trips WHERE fare_amount = 0",
+        ),
+        (
+            "13. Long distance trips",
+            "SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 50.0",
+        ),
+        (
+            "14. Multiple GROUP BY fields",
+            "SELECT pickup_location_id, dropoff_location_id, COUNT(*) as cnt FROM taxi_trips GROUP BY pickup_location_id, dropoff_location_id ORDER BY cnt DESC LIMIT 10",
+        ),
+        (
+            "15. HAVING clause",
+            "SELECT payment_type, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type HAVING cnt > 1000 ORDER BY payment_type",
+        ),
+        (
+            "16. Date range + LIKE pattern + ORDER BY + OFFSET",
+            f"SELECT id, pickup_datetime, passenger_count FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '%1%' ORDER BY pickup_datetime DESC LIMIT 10 OFFSET 10",
+        ),
     ]
 
     passed = 0
@@ -250,7 +275,7 @@ def test_nyc_taxi(calm_conn, mysql_conn):
         except Exception as e:
             print_colored(Colors.RED, f"❌ Test failed with exception: {e}")
             failed += 1
-        
+
         time.sleep(0.1)  # 短暂暂停，避免过快
 
     # 总结
@@ -261,11 +286,17 @@ def test_nyc_taxi(calm_conn, mysql_conn):
     print(f"Total tests: {total}")
     print_colored(Colors.GREEN, f"Passed: {passed}")
     print_colored(Colors.RED, f"Failed: {failed}")
-    
+
     if failed == 0:
-        print_colored(Colors.GREEN, "\n🎉 All tests passed! Calm and MySQL results match perfectly!")
+        print_colored(
+            Colors.GREEN,
+            "\n🎉 All tests passed! Calm and MySQL results match perfectly!",
+        )
     else:
-        print_colored(Colors.YELLOW, f"\n⚠️  {failed} test(s) failed. Please investigate differences.")
+        print_colored(
+            Colors.YELLOW,
+            f"\n⚠️  {failed} test(s) failed. Please investigate differences.",
+        )
 
     calm_cursor.close()
     mysql_cursor.close()
@@ -284,7 +315,7 @@ def main():
         sys.exit(1)
 
     print_colored(Colors.BLUE, "=== Database Connection Test ===\n")
-    
+
     print("Connecting to Calm (127.0.0.1:3307)...")
     calm_conn = connect_calm()
     print_colored(Colors.GREEN, "✓ Connected to Calm\n")
