@@ -48,7 +48,25 @@ impl ParallelExecutor {
         let partition_names = self.engine.list_partitions(table_name).await;
 
         // 计算每个 partition 需要返回的数据量
-        let partition_limit = offset.unwrap_or(0) + limit;
+        // 🔧 关键修复: 当有 OFFSET 时,每个分区需要返回更多数据以保证全局排序的正确性
+        // 策略: 每个分区返回 (offset + limit) * partition_count 条数据
+        // 这样可以确保全局 TopK 合并时有足够的候选数据
+        let partition_count = partition_names.len().max(1);
+        let partition_limit = if offset.is_some() && offset.unwrap() > 0 {
+            // 有 OFFSET 时,每个分区需要返回足够多的数据
+            (offset.unwrap_or(0) + limit) * partition_count
+        } else {
+            // 无 OFFSET 时,只需要 limit 条即可
+            limit
+        };
+
+        log::info!(
+            "🔧 [ParallelSortLimit] partition_count={}, partition_limit={} (offset={:?}, limit={})",
+            partition_count,
+            partition_limit,
+            offset,
+            limit
+        );
 
         // 🚀 并行查询所有 partition
         let futures: Vec<_> = partition_names

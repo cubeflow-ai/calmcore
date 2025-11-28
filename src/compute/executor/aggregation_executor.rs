@@ -13,6 +13,7 @@ use std::sync::Arc;
 use datafusion::arrow::array::{ArrayRef, Int64Array, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 
 use crate::engine::Engine;
@@ -88,10 +89,7 @@ impl AggregationExecutor {
         sql: &str,
         table_name: &str,
     ) -> CoreResult<QueryResult> {
-        // 🔧 修复: 移除 ORDER BY 和 LIMIT,因为对 COUNT(*) 聚合查询无意义
-        // 这些子句可能导致 DataFusion 优化错误,丢失 WHERE 条件
-        let cleaned_sql = Self::remove_order_by_and_limit(sql);
-        log::info!("🔍 [CountWithFilter] Executing: {}", cleaned_sql);
+        log::info!("🔍 [CountWithFilter] Original SQL: {}", sql);
 
         let partition_names = self.engine.list_partitions(table_name).await;
 
@@ -101,9 +99,9 @@ impl AggregationExecutor {
             .map(|partition_name| {
                 let table_name = table_name.to_string();
                 let partition_name = partition_name.clone();
-                let sql = cleaned_sql.clone();
+                let sql = sql.to_string();
                 async move {
-                    self.execute_count_on_partition(&table_name, &partition_name, &sql)
+                    self.execute_count_on_partition_safe(&table_name, &partition_name, &sql)
                         .await
                 }
             })
@@ -156,47 +154,18 @@ impl AggregationExecutor {
             sql
         );
 
-        // 🔧 提取 ORDER BY 和 LIMIT 子句,稍后在合并后应用
-        let (order_by_clause, limit_clause) = Self::extract_order_and_limit(sql);
-
-        // 🔧 移除 ORDER BY 和 LIMIT,让各 partition 做完整的 GROUP BY
-        let mut partition_sql = Self::remove_order_by_and_limit(sql);
-
-        // 改写 SQL: 确保 SELECT 列表包含 GROUP BY 字段和 COUNT(*)
-        // 将 "SELECT count(*)" 改为 "SELECT group_field, count(*)"
-        if !partition_sql
-            .to_lowercase()
-            .contains(&format!("select {}", group_field.to_lowercase()))
-        {
-            // 需要添加 GROUP BY 字段到 SELECT 列表
-            let sql_lower = partition_sql.to_lowercase();
-            if let Some(select_pos) = sql_lower.find("select") {
-                let before = &partition_sql[..select_pos + 6]; // "SELECT"
-                let after = &partition_sql[select_pos + 6..];
-                partition_sql = format!("{} {}, {}", before.trim(), group_field, after.trim());
-            }
-        }
-
-        if order_by_clause.is_some() || limit_clause.is_some() {
-            log::info!(
-                "🔧 [CountWithGroupBy] Removed ORDER BY/LIMIT from partition queries, will apply after merge"
-            );
-        }
-
-        log::info!("📊 [CountWithGroupBy] Partition SQL: {}", partition_sql);
-
         let partition_names = self.engine.list_partitions(table_name).await;
         let mut all_batches = Vec::new();
 
-        // 🚀 并行执行所有 partition
+        // 🚀 并行执行所有 partition (使用原始 SQL,在 partition 内部用 LogicalPlan 处理)
         let futures: Vec<_> = partition_names
             .iter()
             .map(|partition_name| {
                 let table_name = table_name.to_string();
                 let partition_name = partition_name.clone();
-                let sql = partition_sql.clone();
+                let sql = sql.to_string();
                 async move {
-                    self.execute_group_by_on_partition(&table_name, &partition_name, &sql)
+                    self.execute_group_by_on_partition_safe(&table_name, &partition_name, &sql)
                         .await
                 }
             })
@@ -243,49 +212,9 @@ impl AggregationExecutor {
             let combined = concat_batches(&schema, &all_batches)
                 .map_err(|e| CoreError::Internal(format!("Merge failed: {}", e)))?;
 
-            // 从 schema 中获取实际的 COUNT 列名 (可能是 "count(*)" 或 "COUNT(*)")
-            let count_field_name = schema
-                .fields()
-                .iter()
-                .find(|f| {
-                    let name_lower = f.name().to_lowercase();
-                    name_lower == "count(*)" || name_lower == "cnt" || name_lower.contains("count")
-                })
-                .map(|f| f.name().clone())
-                .unwrap_or_else(|| "count(*)".to_string());
+            log::info!("🔄 [Re-aggregation] Merging {} batches", all_batches.len());
 
-            log::info!(
-                "🔍 [Re-agg] Detected count field name: '{}'",
-                count_field_name
-            );
-
-            // 构建重新聚合的 SQL: SELECT group_field, SUM(count_field) AS original_name FROM temp_results GROUP BY group_field
-            let mut re_agg_sql = format!(
-                "SELECT \"{}\", SUM(\"{}\") AS \"{}\" FROM temp_results GROUP BY \"{}\"",
-                group_field, count_field_name, count_field_name, group_field
-            );
-
-            // 🔧 在重新聚合后应用原始的 ORDER BY 和 LIMIT
-            // 需要将 ORDER BY 中的 COUNT(*) 替换为列名(不带引号,因为 DataFusion 会自动处理)
-            if let Some(mut order_by) = order_by_clause {
-                // 将 COUNT(*) 或 count(*) 替换为列名
-                let order_by_upper = order_by.to_uppercase();
-                if order_by_upper.contains("COUNT(*)") {
-                    // 直接替换为列名,不添加引号(DataFusion 会自动处理小写列名)
-                    order_by = order_by
-                        .replace("COUNT(*)", &count_field_name)
-                        .replace("count(*)", &count_field_name);
-                    log::info!("🔧 [Re-agg] Rewrote ORDER BY: {}", order_by);
-                }
-                re_agg_sql.push_str(&order_by);
-            }
-            if let Some(limit) = &limit_clause {
-                re_agg_sql.push_str(limit);
-            }
-
-            log::info!("🔄 [Re-aggregation SQL] {}", re_agg_sql);
-
-            // 用 DataFusion 重新聚合
+            // 🔧 使用 DataFusion 重新聚合
             let ctx = SessionContext::new();
             let provider =
                 datafusion::datasource::MemTable::try_new(schema.clone(), vec![vec![combined]])
@@ -294,12 +223,48 @@ impl AggregationExecutor {
             ctx.register_table("temp_results", Arc::new(provider))
                 .map_err(|e| CoreError::Internal(format!("Register failed: {}", e)))?;
 
-            let df = ctx
+            // 获取字段名
+            let field_names: Vec<String> =
+                schema.fields().iter().map(|f| f.name().clone()).collect();
+
+            if field_names.len() < 2 {
+                return Err(CoreError::Internal(
+                    "Schema must have at least 2 fields".to_string(),
+                ));
+            }
+
+            let group_col = &field_names[0];
+            let count_col = &field_names[1];
+
+            // 构建基本的重新聚合 SQL
+            let mut re_agg_sql = format!(
+                "SELECT \"{}\" AS \"{}\", SUM(\"{}\") AS \"{}\" FROM temp_results GROUP BY \"{}\"",
+                group_col, group_col, count_col, count_col, group_col
+            );
+
+            // 🔧 直接从原始 SQL 字符串提取 ORDER BY 和 LIMIT (简单且可靠)
+            let sql_upper = sql.to_uppercase();
+            if let Some(order_pos) = sql_upper.find(" ORDER BY") {
+                let order_clause = &sql[order_pos..];
+                // 找到 LIMIT 的位置
+                if let Some(limit_pos) = order_clause.to_uppercase().find(" LIMIT") {
+                    re_agg_sql.push_str(&order_clause[..limit_pos]);
+                    re_agg_sql.push_str(&order_clause[limit_pos..]);
+                } else {
+                    re_agg_sql.push_str(order_clause);
+                }
+            } else if let Some(limit_pos) = sql_upper.find(" LIMIT") {
+                re_agg_sql.push_str(&sql[limit_pos..]);
+            }
+
+            log::info!("🔄 [Re-aggregation SQL] {}", re_agg_sql);
+
+            let re_agg_df = ctx
                 .sql(&re_agg_sql)
                 .await
-                .map_err(|e| CoreError::Internal(format!("Re-agg failed: {}", e)))?;
+                .map_err(|e| CoreError::Internal(format!("Re-agg SQL failed: {}", e)))?;
 
-            let final_batches = df
+            let final_batches = re_agg_df
                 .collect()
                 .await
                 .map_err(|e| CoreError::Internal(format!("Final collect failed: {}", e)))?;
@@ -343,6 +308,140 @@ impl AggregationExecutor {
     }
 
     // ===== 私有方法 =====
+
+    /// 在单个 partition 上安全地执行 GROUP BY 查询
+    ///
+    /// 使用 LogicalPlan 操作移除 ORDER BY 和 LIMIT,避免字符串操作的风险。
+    async fn execute_group_by_on_partition_safe(
+        &self,
+        table_name: &str,
+        partition_name: &str,
+        sql: &str,
+    ) -> CoreResult<Vec<RecordBatch>> {
+        let ctx = SessionContext::new();
+
+        let partition = self
+            .engine
+            .get_partition(table_name, partition_name)
+            .await
+            .ok_or_else(|| {
+                CoreError::NotExisted(format!(
+                    "Partition {} not found for table '{}'",
+                    partition_name, table_name
+                ))
+            })?;
+
+        let provider = Arc::new(crate::compute::PartitionTableProvider::new(partition));
+
+        ctx.register_table(table_name, provider)
+            .map_err(|e| CoreError::Internal(format!("Failed to register table: {}", e)))?;
+
+        // 🔧 使用 LogicalPlan 安全地移除 ORDER BY 和 LIMIT
+        let df = ctx
+            .sql(sql)
+            .await
+            .map_err(|e| CoreError::InvalidParam(format!("Query parse error: {}", e)))?;
+
+        let plan = df.logical_plan().clone();
+        let cleaned_plan = Self::remove_sort_and_limit_from_plan(plan);
+
+        let cleaned_df = DataFrame::new(ctx.state(), cleaned_plan);
+
+        let batches = cleaned_df
+            .collect()
+            .await
+            .map_err(|e| CoreError::Internal(format!("Query execution error: {}", e)))?;
+
+        Ok(batches)
+    }
+
+    /// 递归移除 LogicalPlan 中的 Sort 和 Limit 节点
+    ///
+    /// 这个方法会递归遍历 LogicalPlan 树,移除顶层的 Sort 和 Limit 节点。
+    /// 与字符串操作不同,这种方式不会影响子查询中的 ORDER BY/LIMIT。
+    fn remove_sort_and_limit_from_plan(plan: LogicalPlan) -> LogicalPlan {
+        match plan {
+            LogicalPlan::Sort(sort) => {
+                // 跳过 Sort 节点,继续处理其输入
+                Self::remove_sort_and_limit_from_plan((*sort.input).clone())
+            }
+            LogicalPlan::Limit(limit) => {
+                // 跳过 Limit 节点,继续处理其输入
+                Self::remove_sort_and_limit_from_plan((*limit.input).clone())
+            }
+            // 其他节点保持不变
+            _ => plan,
+        }
+    }
+
+    /// 在单个 partition 上安全地执行 COUNT(*) 查询
+    ///
+    /// 使用 LogicalPlan 操作移除 ORDER BY 和 LIMIT,避免字符串操作的风险。
+    /// 对于 COUNT(*) 聚合查询,ORDER BY 和 LIMIT 是无意义的。
+    async fn execute_count_on_partition_safe(
+        &self,
+        table_name: &str,
+        partition_name: &str,
+        sql: &str,
+    ) -> CoreResult<u64> {
+        let ctx = SessionContext::new();
+
+        let partition = self
+            .engine
+            .get_partition(table_name, partition_name)
+            .await
+            .ok_or_else(|| {
+                CoreError::NotExisted(format!(
+                    "Partition {} not found for table '{}'",
+                    partition_name, table_name
+                ))
+            })?;
+
+        let provider = Arc::new(crate::compute::PartitionTableProvider::new(partition));
+
+        ctx.register_table(table_name, provider)
+            .map_err(|e| CoreError::Internal(format!("Failed to register table: {}", e)))?;
+
+        // 🔧 使用 LogicalPlan 安全地移除 ORDER BY 和 LIMIT
+        let df = ctx
+            .sql(sql)
+            .await
+            .map_err(|e| CoreError::InvalidParam(format!("Query parse error: {}", e)))?;
+
+        let plan = df.logical_plan().clone();
+        let cleaned_plan = Self::remove_sort_and_limit_from_plan(plan);
+
+        let cleaned_df = DataFrame::new(ctx.state(), cleaned_plan);
+
+        let batches = cleaned_df
+            .collect()
+            .await
+            .map_err(|e| CoreError::Internal(format!("Query execution error: {}", e)))?;
+
+        // 提取 COUNT(*) 结果
+        let count = if batches.is_empty() {
+            0u64
+        } else {
+            let batch = &batches[0];
+            if batch.num_rows() == 0 {
+                0u64
+            } else {
+                let column = batch.column(0);
+                // 尝试读取 UInt64 或 Int64
+                if let Some(arr) = column.as_any().downcast_ref::<UInt64Array>() {
+                    arr.value(0)
+                } else if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
+                    arr.value(0) as u64
+                } else {
+                    return Err(CoreError::Internal(
+                        "COUNT(*) result is not UInt64 or Int64".to_string(),
+                    ));
+                }
+            }
+        };
+
+        Ok(count)
+    }
 
     /// 统计单个 partition 的行数
     async fn count_partition(
@@ -495,54 +594,37 @@ impl AggregationExecutor {
         }
     }
 
-    /// 在单个 partition 上执行 GROUP BY 查询
-    async fn execute_group_by_on_partition(
-        &self,
-        table_name: &str,
-        partition_name: &str,
-        sql: &str,
-    ) -> CoreResult<Vec<RecordBatch>> {
-        let ctx = SessionContext::new();
-
-        let partition = self
-            .engine
-            .get_partition(table_name, partition_name)
-            .await
-            .ok_or_else(|| {
-                CoreError::NotExisted(format!(
-                    "Partition {} not found for table '{}'",
-                    partition_name, table_name
-                ))
-            })?;
-
-        let provider = Arc::new(crate::compute::PartitionTableProvider::new(partition));
-
-        ctx.register_table(table_name, provider)
-            .map_err(|e| CoreError::Internal(format!("Failed to register table: {}", e)))?;
-
-        let df = ctx
-            .sql(sql)
-            .await
-            .map_err(|e| CoreError::InvalidParam(format!("Query parse error: {}", e)))?;
-
-        let batches = df
-            .collect()
-            .await
-            .map_err(|e| CoreError::Internal(format!("Query execution error: {}", e)))?;
-
-        Ok(batches)
-    }
-
     /// 执行通用聚合查询(MIN, MAX, SUM, AVG, etc.)
     pub async fn execute_general_aggregation(
         &self,
         sql: &str,
         table_name: &str,
+        info: &crate::compute::optimizer::AggregationInfo,
     ) -> CoreResult<QueryResult> {
         log::info!("📊 [GeneralAggregation] Executing: {}", sql);
 
-        // 🔧 提取 ORDER BY 和 LIMIT 子句,稍后在 re-aggregation 后应用
-        let (order_by_clause, limit_clause) = Self::extract_order_and_limit(sql);
+        // 🔧 使用从 PlanAnalyzer 提取的 ORDER BY 和 LIMIT 信息（避免重复解析）
+        let order_by_clause = info.order_by.as_ref().map(|fields| {
+            let order_strs: Vec<String> = fields
+                .iter()
+                .map(|(field, asc)| {
+                    if *asc {
+                        field.clone()
+                    } else {
+                        format!("{} DESC", field)
+                    }
+                })
+                .collect();
+            format!(" ORDER BY {}", order_strs.join(", "))
+        });
+
+        let limit_clause = info.limit.map(|l| {
+            if let Some(offset) = info.offset {
+                format!(" LIMIT {} OFFSET {}", l, offset)
+            } else {
+                format!(" LIMIT {}", l)
+            }
+        });
 
         // 🔧 移除 ORDER BY 和 LIMIT,让各 partition 做完整聚合
         let partition_sql = Self::remove_order_by_and_limit(sql);
@@ -554,38 +636,67 @@ impl AggregationExecutor {
         }
 
         let partition_names = self.engine.list_partitions(table_name).await;
+
+        // 🚀 并行执行所有 partition
+        let futures: Vec<_> = partition_names
+            .iter()
+            .map(|partition_name| {
+                let table_name = table_name.to_string();
+                let partition_name = partition_name.clone();
+                let partition_sql = partition_sql.clone();
+                async move {
+                    let partition = self
+                        .engine
+                        .get_partition(&table_name, &partition_name)
+                        .await
+                        .ok_or_else(|| {
+                            CoreError::NotExisted(format!("Partition {} not found", partition_name))
+                        })?;
+
+                    let ctx = SessionContext::new();
+                    let provider = Arc::new(
+                        crate::compute::PartitionTableProviderWithHints::new_with_hints(
+                            partition, None, None,
+                        ),
+                    );
+
+                    ctx.register_table(&table_name, provider).map_err(|e| {
+                        CoreError::Internal(format!("Failed to register table: {}", e))
+                    })?;
+
+                    let df = ctx
+                        .sql(&partition_sql)
+                        .await
+                        .map_err(|e| CoreError::Internal(format!("Query failed: {}", e)))?;
+
+                    let batches = df
+                        .collect()
+                        .await
+                        .map_err(|e| CoreError::Internal(format!("Collect failed: {}", e)))?;
+
+                    Ok::<_, CoreError>(batches)
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
         let mut all_batches = Vec::new();
-
-        for partition_name in &partition_names {
-            let partition = self
-                .engine
-                .get_partition(table_name, partition_name)
-                .await
-                .ok_or_else(|| {
-                    CoreError::NotExisted(format!("Partition {} not found", partition_name))
-                })?;
-
-            let ctx = SessionContext::new();
-            let provider = Arc::new(
-                crate::compute::PartitionTableProviderWithHints::new_with_hints(
-                    partition, None, None,
-                ),
-            );
-
-            ctx.register_table(table_name, provider)
-                .map_err(|e| CoreError::Internal(format!("Failed to register table: {}", e)))?;
-
-            let df = ctx
-                .sql(&partition_sql)
-                .await
-                .map_err(|e| CoreError::Internal(format!("Query failed: {}", e)))?;
-
-            let batches = df
-                .collect()
-                .await
-                .map_err(|e| CoreError::Internal(format!("Collect failed: {}", e)))?;
-
-            all_batches.extend(batches);
+        for (idx, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(batches) => {
+                    log::info!(
+                        "📦 Partition {} returned {} batches",
+                        partition_names[idx],
+                        batches.len()
+                    );
+                    all_batches.extend(batches);
+                }
+                Err(e) => {
+                    log::warn!("⚠️  Partition {} query failed: {}", partition_names[idx], e);
+                    return Err(e);
+                }
+            }
         }
 
         // 对于聚合结果需要重新聚合

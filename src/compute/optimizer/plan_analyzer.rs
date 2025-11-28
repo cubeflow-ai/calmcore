@@ -80,6 +80,12 @@ pub struct AggregationInfo {
     pub has_avg: bool,
     pub has_max: bool,
     pub has_min: bool,
+    /// ORDER BY 字段列表 [(field_name, ascending)]
+    pub order_by: Option<Vec<(String, bool)>>,
+    /// LIMIT 数量
+    pub limit: Option<usize>,
+    /// OFFSET
+    pub offset: Option<usize>,
 }
 
 // ===== 非聚合查询相关结构 =====
@@ -603,6 +609,24 @@ fn classify_aggregation_query(query: &Query) -> Option<QueryType> {
     }
 
     // ===== 通用聚合路径 =====
+    // 提取 ORDER BY 信息
+    let order_by = query.order_by.as_ref().and_then(|ob| match &ob.kind {
+        datafusion::sql::sqlparser::ast::OrderByKind::Expressions(order_exprs) => {
+            if order_exprs.is_empty() {
+                None
+            } else {
+                extract_sort_fields_from_ast(order_exprs)
+            }
+        }
+        _ => None,
+    });
+
+    // 提取 LIMIT 和 OFFSET
+    let (limit, offset) = match extract_limit_offset_from_ast(query) {
+        Some((l, o)) => (Some(l), o),
+        None => (None, None),
+    };
+
     Some(QueryType::GeneralAggregation(AggregationInfo {
         group_by_count: group_by_fields.len(),
         has_count,
@@ -610,6 +634,9 @@ fn classify_aggregation_query(query: &Query) -> Option<QueryType> {
         has_avg,
         has_max,
         has_min,
+        order_by,
+        limit,
+        offset,
     }))
 }
 

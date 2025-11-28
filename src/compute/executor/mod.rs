@@ -117,7 +117,7 @@ impl Executor {
                         );
                         // 使用聚合执行器处理通用聚合查询
                         self.aggregation_executor
-                            .execute_general_aggregation(&normalized_sql, &plan.table_name)
+                            .execute_general_aggregation(&normalized_sql, &plan.table_name, &info)
                             .await
                     }
 

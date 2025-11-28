@@ -304,6 +304,7 @@ def load_nyc_taxi(conn, limit=None, graphql_port=8000):
                     rate = total_loaded / elapsed if elapsed > 0 else 0
                     print(f"  Progress: {total_loaded:,} rows ({rate:.0f} rows/sec)")
 
+            cursor.execute("flush tables taxi_trips")
             # 最后一次 commit（确保所有数据都提交）
             conn.commit()
 
