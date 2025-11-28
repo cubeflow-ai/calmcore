@@ -530,7 +530,7 @@ impl NaturalOrderExecutor {
         projection_fields: &[String],
         is_select_star: bool,
     ) -> CoreResult<RecordBatch> {
-        use crate::compute::segment_scanner::SegmentScanner;
+        use crate::compute::table_provider::segment_scanner::SegmentScanner;
 
         // SegmentScanner 需要拥有所有权，所以 clone
         let deleted_owned = (*deleted).clone();

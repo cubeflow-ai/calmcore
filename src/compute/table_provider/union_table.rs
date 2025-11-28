@@ -120,7 +120,7 @@ impl TableProvider for UnionTableProvider {
 
         // 🚀 新策略: 扁平化所有partition的所有segment
         // 让它们都成为DataFusion的独立partition,实现真正的全局并行!
-        use crate::compute::segment_scanner::SegmentScanner;
+        use crate::compute::table_provider::segment_scanner::SegmentScanner;
 
         let mut all_segment_scanners = Vec::new();
 
@@ -166,7 +166,7 @@ impl TableProvider for UnionTableProvider {
 
         // 创建一个大的MultiSegmentExec,所有segment都是独立的DataFusion partition
         // DataFusion会自动并行调度它们!
-        use crate::compute::partition_table_provider::create_multi_segment_exec;
+        use crate::compute::table_provider::partition_table_provider::create_multi_segment_exec;
 
         let exec = create_multi_segment_exec(
             self.schema.clone(),
