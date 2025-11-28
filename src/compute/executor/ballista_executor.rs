@@ -156,47 +156,16 @@ impl DataFusionExecutor {
 
     /// 执行 ORDER BY _nature 查询 (深度分页优化)
     async fn execute_natural_order(&self, sql: &str) -> CoreResult<QueryResult> {
-        use crate::compute::optimizer::{analyze_query, QueryType};
-        use datafusion::sql::parser::DFParser;
-        use datafusion::sql::sqlparser::dialect::MySqlDialect;
+        // 直接调用 natural_order_executor，它会自己解析 SQL
+        let result = self
+            .natural_order_executor
+            .execute_natural_order(sql)
+            .await?;
 
-        // 解析 SQL 获取详细信息
-        let dialect = MySqlDialect {};
-        let mut statements = DFParser::parse_sql_with_dialect(sql, &dialect)?;
-        let statement = statements
-            .pop_front()
-            .ok_or_else(|| CoreError::InvalidParam("Failed to parse SQL".to_string()))?;
-
-        // 分析查询计划
-        let plan = analyze_query(statement).ok_or_else(|| {
-            CoreError::InvalidParam("Failed to analyze natural order query".to_string())
-        })?;
-
-        // 提取 NaturalOrderInfo
-        if let QueryType::NaturalOrder(info) = plan.query_type {
-            let result = self
-                .natural_order_executor
-                .execute_natural_order(
-                    sql,
-                    &plan.table_name,
-                    info.limit,
-                    info.offset.unwrap_or(0),
-                    info.where_clause.as_deref(),
-                    &info.projection_fields,
-                    info.is_select_star,
-                )
-                .await?;
-
-            // 转换结果
-            Ok(QueryResult {
-                batch: result.batch,
-                matched_docs: result.matched_docs,
-            })
-        } else {
-            Err(CoreError::InvalidParam(
-                "Not a valid ORDER BY _nature query".to_string(),
-            ))
-        }
+        Ok(QueryResult {
+            batch: result.batch,
+            matched_docs: result.matched_docs,
+        })
     }
 
     /// 从 SQL 中提取表名 (简化版本)

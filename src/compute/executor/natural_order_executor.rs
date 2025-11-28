@@ -61,32 +61,90 @@ impl NaturalOrderExecutor {
         }
     }
 
+    /// 解析 ORDER BY _nature 查询的 SQL
+    ///
+    /// 返回: (table_name, limit, offset, where_clause, projection_fields, is_select_star)
+    fn parse_sql(
+        &self,
+        sql: &str,
+    ) -> CoreResult<(String, usize, usize, Option<String>, Vec<String>, bool)> {
+        use regex::Regex;
+
+        let sql_upper = sql.to_uppercase();
+
+        // 提取表名: FROM <table_name>
+        let table_re = Regex::new(r"FROM\s+([a-zA-Z0-9_]+)").unwrap();
+        let table_name = table_re
+            .captures(sql)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string())
+            .ok_or_else(|| CoreError::InvalidParam("Cannot find table name in SQL".into()))?;
+
+        // 提取 LIMIT
+        let limit_re = Regex::new(r"LIMIT\s+(\d+)").unwrap();
+        let limit = limit_re
+            .captures(&sql_upper)
+            .and_then(|caps| caps.get(1))
+            .and_then(|m| m.as_str().parse::<usize>().ok())
+            .ok_or_else(|| CoreError::InvalidParam("ORDER BY _nature requires LIMIT".into()))?;
+
+        // 提取 OFFSET (可选)
+        let offset_re = Regex::new(r"OFFSET\s+(\d+)").unwrap();
+        let offset = offset_re
+            .captures(&sql_upper)
+            .and_then(|caps| caps.get(1))
+            .and_then(|m| m.as_str().parse::<usize>().ok())
+            .unwrap_or(0);
+
+        // 提取 SELECT 字段
+        let select_re = Regex::new(r"SELECT\s+(.+?)\s+FROM").unwrap();
+        let (projection_fields, is_select_star) = if let Some(caps) = select_re.captures(sql) {
+            let fields_str = caps.get(1).map(|m| m.as_str()).unwrap_or("*");
+            if fields_str.trim() == "*" {
+                (vec![], true)
+            } else {
+                let fields: Vec<String> = fields_str
+                    .split(',')
+                    .map(|f| f.trim().to_string())
+                    .collect();
+                (fields, false)
+            }
+        } else {
+            (vec![], true)
+        };
+
+        // 提取 WHERE 子句 (可选)
+        let where_re = Regex::new(r"WHERE\s+(.+?)(?:\s+ORDER\s+BY|\s+LIMIT|$)").unwrap();
+        let where_clause = where_re
+            .captures(sql)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().trim().to_string());
+
+        Ok((
+            table_name,
+            limit,
+            offset,
+            where_clause,
+            projection_fields,
+            is_select_star,
+        ))
+    }
+
     /// 执行自然顺序查询
     ///
     /// # 参数
-    /// * `sql` - 原始 SQL（包含 ORDER BY _nature）
-    /// * `table_name` - 表名
-    /// * `limit` - LIMIT 值
-    /// * `offset` - OFFSET 值
-    /// * `where_clause` - WHERE 条件的 SQL 文本（可选）
-    /// * `projection_fields` - 投影字段列表（用于列裁剪）
-    /// * `is_select_star` - 是否是 SELECT *
+    /// * `sql` - 完整的 SQL 查询 (包含 ORDER BY _nature)
     ///
     /// # 示例
     /// ```sql
     /// SELECT app_name, timestamp FROM table WHERE app_name='test' ORDER BY _nature LIMIT 1000 OFFSET 1000000;
     /// ```
-    pub async fn execute_natural_order(
-        &self,
-        sql: &str,
-        table_name: &str,
-        limit: usize,
-        offset: usize,
-        where_clause: Option<&str>,
-        projection_fields: &[String],
-        is_select_star: bool,
-    ) -> CoreResult<QueryResult> {
+    pub async fn execute_natural_order(&self, sql: &str) -> CoreResult<QueryResult> {
         let total_start = std::time::Instant::now();
+
+        // 解析 SQL 提取参数
+        let (table_name, limit, offset, where_clause, projection_fields, is_select_star) =
+            self.parse_sql(sql)?;
 
         log::info!(
             "🌿 [NaturalOrder] Executing natural order query: table={}, limit={}, offset={}, where={:?}, projection={:?}, is_select_star={}",
@@ -100,7 +158,7 @@ impl NaturalOrderExecutor {
 
         // 第一步：构建元数据索引
         let step1_start = std::time::Instant::now();
-        let segment_metas = self.build_segment_metadata(table_name).await?;
+        let segment_metas = self.build_segment_metadata(&table_name).await?;
         log::info!(
             "⏱️  [NaturalOrder] Step 1 (metadata): {:?}",
             step1_start.elapsed()
@@ -135,11 +193,11 @@ impl NaturalOrderExecutor {
         let step3_start = std::time::Instant::now();
         let batches = self
             .read_from_segments(
-                table_name,
+                &table_name,
                 sql,
                 &target_segments,
-                where_clause,
-                projection_fields,
+                where_clause.as_deref(),
+                &projection_fields,
                 is_select_star,
             )
             .await?;
@@ -153,7 +211,7 @@ impl NaturalOrderExecutor {
         let step4_start = std::time::Instant::now();
         let final_batch = if batches.is_empty() {
             self.result_merger
-                .create_empty_batch_from_sql(sql, table_name, &self.engine)
+                .create_empty_batch_from_sql(sql, &table_name, &self.engine)
                 .await?
         } else {
             self.result_merger.concat_batches(batches)?
