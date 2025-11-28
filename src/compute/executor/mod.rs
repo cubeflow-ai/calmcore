@@ -1,4 +1,5 @@
 mod aggregation_executor;
+mod ballista_executor; // 🚀 新的 Ballista executor
 mod cursor_pagination;
 mod natural_order_executor;
 mod parallel_executor;
@@ -18,6 +19,7 @@ use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
 use aggregation_executor::AggregationExecutor;
+use ballista_executor::BallistaExecutor; // 🚀 引入 Ballista executor
 use natural_order_executor::NaturalOrderExecutor;
 use parallel_executor::ParallelExecutor;
 use serial_executor::SerialExecutor;
@@ -50,16 +52,34 @@ pub struct Executor {
     parallel_executor: ParallelExecutor,
     aggregation_executor: AggregationExecutor,
     natural_order_executor: NaturalOrderExecutor,
+    ballista_executor: Option<BallistaExecutor>, // 🚀 可选的 Ballista executor
+    engine: Arc<Engine>,                         // 需要保存 engine 引用
 }
 
 impl Executor {
     /// 创建新的查询执行器
     pub fn new(engine: Arc<Engine>) -> Self {
+        // 检查是否启用 Ballista
+        let use_ballista = std::env::var("USE_BALLISTA")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase()
+            == "true";
+
+        let ballista_executor = if use_ballista {
+            log::info!("🚀 [Executor] Ballista mode enabled");
+            Some(BallistaExecutor::new(engine.clone()))
+        } else {
+            log::info!("📊 [Executor] Standard mode (DataFusion)");
+            None
+        };
+
         Self {
             serial_executor: SerialExecutor::new(engine.clone()),
             parallel_executor: ParallelExecutor::new(engine.clone()),
             aggregation_executor: AggregationExecutor::new(engine.clone()),
             natural_order_executor: NaturalOrderExecutor::new(engine.clone()),
+            ballista_executor,
+            engine,
         }
     }
 
@@ -67,6 +87,12 @@ impl Executor {
     ///
     /// 根据 QueryType 直接路由到对应的执行器，无嵌套判断
     pub async fn execute_sql(&self, sql: &str) -> CoreResult<QueryResult> {
+        // 🚀 如果启用了 Ballista,直接使用 Ballista executor
+        if let Some(ref ballista_executor) = self.ballista_executor {
+            log::info!("🚀 [Executor] Using Ballista for query");
+            return ballista_executor.execute_sql(sql).await;
+        }
+
         log::info!("📥 [Executor] Received SQL: {}", sql);
 
         // 🔧 标准化 SQL：验证语法并转换 MySQL 特有语法
