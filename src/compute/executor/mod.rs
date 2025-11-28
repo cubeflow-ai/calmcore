@@ -1,5 +1,4 @@
 mod ballista_executor; // DataFusion executor
-mod cursor_pagination;
 mod natural_order_executor; // 特殊优化: ORDER BY _nature
 
 use std::sync::Arc;
@@ -10,8 +9,6 @@ use crate::engine::Engine;
 use crate::utils::error::CoreResult;
 
 use ballista_executor::DataFusionExecutor;
-
-pub use cursor_pagination::{CursorInfo, CursorPagination};
 
 /// 查询结果
 #[derive(Debug)]
