@@ -949,4 +949,89 @@ impl Partition {
             )))
         }
     }
+
+    /// 扫描并返回 partition 中的所有数据
+    ///
+    /// 用于 UnionTable 的流式扫描,返回所有 segment 的数据
+    /// 按 segment 顺序返回: current segment + frozen segments
+    ///
+    /// # 返回
+    /// Vec<RecordBatch>: 所有数据的 RecordBatch
+    pub async fn scan_all(&self) -> CoreResult<Vec<RecordBatch>> {
+        log::info!("📍 [Partition::scan_all] Starting scan...");
+        let mut batches = Vec::new();
+
+        // 1. 扫描 frozen segments (只读,稳定)
+        {
+            log::info!("📍 [Partition::scan_all] Acquiring frozen_segments lock...");
+            let frozen_segments = self.frozen_segments.read().unwrap();
+            log::info!(
+                "📍 [Partition::scan_all] Got lock, {} frozen segments",
+                frozen_segments.len()
+            );
+            for (idx, (_seg_id, segment)) in frozen_segments.iter().enumerate() {
+                // 获取 segment 的所有文档 ID
+                let doc_count = segment.total_count() as u32;
+                log::info!(
+                    "📍 [Partition::scan_all] Processing frozen segment {}/{}, doc_count={}",
+                    idx + 1,
+                    frozen_segments.len(),
+                    doc_count
+                );
+                if doc_count == 0 {
+                    log::info!(
+                        "📍 [Partition::scan_all] Segment {}/{} is empty, skipping",
+                        idx + 1,
+                        frozen_segments.len()
+                    );
+                    continue;
+                }
+
+                let doc_ids: Vec<u32> = (0..doc_count).collect();
+                log::info!("📍 [Partition::scan_all] Segment {}/{} - calling get_documents with {} doc_ids", idx + 1, frozen_segments.len(), doc_ids.len());
+
+                // 读取文档数据
+                if let Some(batch) = segment.get_documents(&doc_ids)? {
+                    log::info!(
+                        "📍 [Partition::scan_all] Segment {}/{} - got batch with {} rows",
+                        idx + 1,
+                        frozen_segments.len(),
+                        batch.num_rows()
+                    );
+                    batches.push(batch);
+                } else {
+                    log::info!(
+                        "📍 [Partition::scan_all] Segment {}/{} - get_documents returned None",
+                        idx + 1,
+                        frozen_segments.len()
+                    );
+                }
+            }
+            log::info!("📍 [Partition::scan_all] Finished scanning all frozen segments, collected {} batches", batches.len());
+        }
+
+        // 2. 扫描 current segment (可能正在写入)
+        {
+            log::info!("📍 [Partition::scan_all] Acquiring current_segment lock...");
+            let current_segment = self.current_segment.read().unwrap();
+            log::info!(
+                "📍 [Partition::scan_all] Got lock, {} docs in current segment",
+                current_segment.doc_count()
+            );
+            let doc_count = current_segment.doc_count() as u32;
+            if doc_count > 0 {
+                let doc_ids: Vec<u32> = (0..doc_count).collect();
+
+                if let Some(batch) = current_segment.get_documents(&doc_ids)? {
+                    batches.push(batch);
+                }
+            }
+        }
+
+        log::info!(
+            "✅ [Partition::scan_all] Completed, returning {} batches",
+            batches.len()
+        );
+        Ok(batches)
+    }
 }

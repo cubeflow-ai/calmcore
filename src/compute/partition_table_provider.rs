@@ -5,8 +5,11 @@ use datafusion::{
     catalog::Session,
     datasource::{TableProvider, TableType},
     error::Result,
+    execution::{SendableRecordBatchStream, TaskContext},
     logical_expr::{Expr, TableProviderFilterPushDown},
-    physical_plan::ExecutionPlan,
+    physical_expr::EquivalenceProperties,
+    physical_plan::execution_plan::{Boundedness, EmissionType},
+    physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties},
 };
 
 use crate::partition::Partition;
@@ -100,57 +103,62 @@ impl TableProvider for PartitionTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        // Collect execution plans from all segments (current + frozen)
-        let mut segment_plans: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
-
         log::info!(
-            "🔍 [PartitionTableProvider::scan] Starting scan for partition {}, projection={:?}, filters={:?}, limit={:?}",
+            "🔍 [PartitionTableProvider::scan] Starting scan for partition {}, projection={:?}, filters={}, limit={:?}",
             self.partition.name(),
             projection,
-            filters,
+            filters.len(),
             limit
         );
+
+        // 🚀 新方案: 让每个segment成为一个独立的partition,实现真正的并行
+        // 而不是使用UnionExec串行合并
+
+        // 提前为每个segment创建SegmentScanner,存储扫描所需的数据
+        let mut segment_scanners = Vec::new();
 
         // Add current segment (only if non-empty)
         {
             let current_segment = self.partition.get_current_segment();
-            let doc_count = current_segment.doc_count();
-
-            if doc_count > 0 {
-                let scanner = self.create_segment_scanner(&current_segment)?;
-                // 使用新的优化方法，传递完整的查询上下文
-                if let Some(plan) = scanner.create_plan(filters, projection, limit, None) {
-                    segment_plans.push(plan);
-                }
+            if current_segment.doc_count() > 0 {
+                let scanner = SegmentScanner::new(
+                    self.schema.clone(),
+                    current_segment.get_row_data(),
+                    current_segment.get_index_readers(),
+                    current_segment.doc_count(),
+                    current_segment.get_deleted(),
+                );
+                segment_scanners.push(scanner);
             }
         }
 
         // Add frozen segments
         {
             let frozen_segments = self.partition.get_frozen_segments();
-
             for (_seg_id, segment) in frozen_segments.iter() {
-                let scanner = self.create_segment_scanner(segment)?;
-                // 使用新的优化方法，传递完整的查询上下文
-                if let Some(plan) = scanner.create_plan(filters, projection, limit, None) {
-                    segment_plans.push(plan);
-                }
+                let scanner = SegmentScanner::new(
+                    self.schema.clone(),
+                    segment.get_row_data(),
+                    segment.get_index_readers(),
+                    segment.doc_count(),
+                    segment.get_deleted(),
+                );
+                segment_scanners.push(scanner);
             }
         }
 
         log::info!(
-            "🔍 [PartitionTableProvider::scan] Total segment plans created: {}",
-            segment_plans.len()
+            "🔍 [PartitionTableProvider::scan] Found {} segments",
+            segment_scanners.len()
         );
 
-        // Handle empty partition case - return empty plan instead of error
-        if segment_plans.is_empty() {
+        // Handle empty partition case
+        if segment_scanners.is_empty() {
             log::warn!(
                 "⚠️  [PartitionTableProvider::scan] No segments found, returning empty plan"
             );
             use datafusion::physical_plan::empty::EmptyExec;
 
-            // 使用投影后的schema(如果有),否则使用完整schema
             let empty_schema = if let Some(proj) = projection {
                 let fields: Vec<_> = proj.iter().map(|i| self.schema.field(*i).clone()).collect();
                 Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
@@ -161,15 +169,183 @@ impl TableProvider for PartitionTableProvider {
             return Ok(Arc::new(EmptyExec::new(empty_schema)));
         }
 
-        // If only one segment, return its plan directly
-        if segment_plans.len() == 1 {
-            return Ok(segment_plans.into_iter().next().unwrap());
+        // 🔥 创建 MultiSegmentExec: 让DataFusion并行执行每个segment
+        // 每个segment作为一个partition,DataFusion会自动并行调度
+        Ok(Arc::new(MultiSegmentExec::new(
+            self.schema.clone(),
+            segment_scanners,
+            filters.to_vec(),
+            projection.cloned(),
+            limit,
+        )))
+    }
+}
+
+/// MultiSegmentExec: 并行扫描多个segment的ExecutionPlan
+///
+/// **关键设计**:
+/// - 每个segment作为一个DataFusion partition
+/// - DataFusion会自动并行调度这些partition
+/// - 每个partition内部使用SegmentScanner的优化能力(索引过滤、projection下推等)
+/// - 流式返回数据,无需collect
+pub struct MultiSegmentExec {
+    schema: SchemaRef,
+    segment_scanners: Vec<SegmentScanner>,
+    filters: Vec<Expr>,
+    projection: Option<Vec<usize>>,
+    limit: Option<usize>,
+    properties: PlanProperties,
+}
+
+/// 创建 MultiSegmentExec 的公开函数
+/// 供 UnionTableProvider 使用,实现全局并行
+pub fn create_multi_segment_exec(
+    schema: SchemaRef,
+    segment_scanners: Vec<SegmentScanner>,
+    filters: Vec<Expr>,
+    projection: Option<Vec<usize>>,
+    limit: Option<usize>,
+) -> MultiSegmentExec {
+    MultiSegmentExec::new(schema, segment_scanners, filters, projection, limit)
+}
+
+impl MultiSegmentExec {
+    fn new(
+        schema: SchemaRef,
+        segment_scanners: Vec<SegmentScanner>,
+        filters: Vec<Expr>,
+        projection: Option<Vec<usize>>,
+        limit: Option<usize>,
+    ) -> Self {
+        let num_partitions = segment_scanners.len();
+
+        // 应用projection到schema
+        let output_schema = if let Some(ref proj) = projection {
+            let fields: Vec<_> = proj.iter().map(|i| schema.field(*i).clone()).collect();
+            Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
+        } else {
+            schema.clone()
+        };
+
+        // 创建 PlanProperties
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::UnknownPartitioning(num_partitions),
+            EmissionType::Final,
+            Boundedness::Bounded,
+        );
+
+        Self {
+            schema: output_schema,
+            segment_scanners,
+            filters,
+            projection,
+            limit,
+            properties,
+        }
+    }
+}
+
+impl std::fmt::Debug for MultiSegmentExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultiSegmentExec")
+            .field("num_segments", &self.segment_scanners.len())
+            .field("filters", &self.filters.len())
+            .field("projection", &self.projection)
+            .field("limit", &self.limit)
+            .finish()
+    }
+}
+
+impl DisplayAs for MultiSegmentExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "MultiSegmentExec: segments={}, filters={}, projection={:?}, limit={:?}",
+            self.segment_scanners.len(),
+            self.filters.len(),
+            self.projection,
+            self.limit
+        )
+    }
+}
+
+impl ExecutionPlan for MultiSegmentExec {
+    fn name(&self) -> &str {
+        "MultiSegmentExec"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        log::info!(
+            "🎯 [MultiSegmentExec::execute] Executing partition {} (segment)",
+            partition
+        );
+
+        if partition >= self.segment_scanners.len() {
+            return Err(datafusion::error::DataFusionError::Internal(format!(
+                "Partition {} out of range (total: {})",
+                partition,
+                self.segment_scanners.len()
+            )));
         }
 
-        // Create Union plan for multiple segments
-        use datafusion::physical_plan::union::UnionExec;
+        let scanner = &self.segment_scanners[partition];
 
-        let union_plan = UnionExec::new(segment_plans);
-        Ok(Arc::new(union_plan))
+        // 使用 SegmentScanner 的优化能力创建执行计划
+        // TODO: 支持 ORDER BY 下推 (需要从LogicalPlan中提取)
+        let plan = scanner.create_plan(
+            &self.filters,
+            self.projection.as_ref(),
+            self.limit,
+            None, // sort: 暂时不支持,可以后续从context中提取
+        );
+
+        match plan {
+            Some(segment_plan) => {
+                log::info!(
+                    "✅ [MultiSegmentExec] Partition {} created execution plan",
+                    partition
+                );
+                // 直接执行segment的plan并返回stream
+                segment_plan.execute(0, _context)
+            }
+            None => {
+                log::info!(
+                    "📋 [MultiSegmentExec] Partition {} has no data (empty result)",
+                    partition
+                );
+                // 返回空stream
+                use datafusion::physical_plan::empty::EmptyExec;
+                let empty_plan = EmptyExec::new(self.schema.clone());
+                empty_plan.execute(0, _context)
+            }
+        }
     }
 }

@@ -595,226 +595,95 @@ impl AggregationExecutor {
     }
 
     /// 执行通用聚合查询(MIN, MAX, SUM, AVG, etc.)
+    ///
+    /// 🚀 新架构：使用 UnionTableProvider + RecordHub + Stream
+    /// - 完全交给 DataFusion 处理查询优化和执行
+    /// - 自动并行扫描所有 partition
+    /// - 流式处理 + 自动背压控制
+    /// - 代码更简洁，性能更好
     pub async fn execute_general_aggregation(
         &self,
         sql: &str,
         table_name: &str,
-        info: &crate::compute::optimizer::AggregationInfo,
+        _info: &crate::compute::optimizer::AggregationInfo,
     ) -> CoreResult<QueryResult> {
-        log::info!("📊 [GeneralAggregation] Executing: {}", sql);
+        log::info!("📊 [GeneralAggregation] Executing with UnionTable: {}", sql);
 
-        // 🔧 使用从 PlanAnalyzer 提取的 ORDER BY 和 LIMIT 信息（避免重复解析）
-        let order_by_clause = info.order_by.as_ref().map(|fields| {
-            let order_strs: Vec<String> = fields
-                .iter()
-                .map(|(field, asc)| {
-                    if *asc {
-                        field.clone()
-                    } else {
-                        format!("{} DESC", field)
-                    }
-                })
-                .collect();
-            format!(" ORDER BY {}", order_strs.join(", "))
-        });
-
-        let limit_clause = info.limit.map(|l| {
-            if let Some(offset) = info.offset {
-                format!(" LIMIT {} OFFSET {}", l, offset)
-            } else {
-                format!(" LIMIT {}", l)
-            }
-        });
-
-        // 🔧 移除 ORDER BY 和 LIMIT,让各 partition 做完整聚合
-        let partition_sql = Self::remove_order_by_and_limit(sql);
-
-        if order_by_clause.is_some() || limit_clause.is_some() {
-            log::info!(
-                "🔧 [GeneralAggregation] Removed ORDER BY/LIMIT from partition queries, will apply after re-aggregation"
-            );
-        }
-
+        // 1. 获取所有 partition
         let partition_names = self.engine.list_partitions(table_name).await;
+        let mut partitions = Vec::new();
 
-        // 🚀 并行执行所有 partition
-        let futures: Vec<_> = partition_names
-            .iter()
-            .map(|partition_name| {
-                let table_name = table_name.to_string();
-                let partition_name = partition_name.clone();
-                let partition_sql = partition_sql.clone();
-                async move {
-                    let partition = self
-                        .engine
-                        .get_partition(&table_name, &partition_name)
-                        .await
-                        .ok_or_else(|| {
-                            CoreError::NotExisted(format!("Partition {} not found", partition_name))
-                        })?;
-
-                    let ctx = SessionContext::new();
-                    let provider = Arc::new(
-                        crate::compute::PartitionTableProviderWithHints::new_with_hints(
-                            partition, None, None,
-                        ),
-                    );
-
-                    ctx.register_table(&table_name, provider).map_err(|e| {
-                        CoreError::Internal(format!("Failed to register table: {}", e))
-                    })?;
-
-                    let df = ctx
-                        .sql(&partition_sql)
-                        .await
-                        .map_err(|e| CoreError::Internal(format!("Query failed: {}", e)))?;
-
-                    let batches = df
-                        .collect()
-                        .await
-                        .map_err(|e| CoreError::Internal(format!("Collect failed: {}", e)))?;
-
-                    Ok::<_, CoreError>(batches)
-                }
-            })
-            .collect();
-
-        let results = futures::future::join_all(futures).await;
-
-        let mut all_batches = Vec::new();
-        for (idx, result) in results.into_iter().enumerate() {
-            match result {
-                Ok(batches) => {
-                    log::info!(
-                        "📦 Partition {} returned {} batches",
-                        partition_names[idx],
-                        batches.len()
-                    );
-                    all_batches.extend(batches);
-                }
-                Err(e) => {
-                    log::warn!("⚠️  Partition {} query failed: {}", partition_names[idx], e);
-                    return Err(e);
-                }
+        for partition_name in partition_names {
+            if let Some(partition) = self.engine.get_partition(table_name, &partition_name).await {
+                partitions.push(partition);
             }
         }
 
-        // 对于聚合结果需要重新聚合
-        let batch = if all_batches.is_empty() {
+        if partitions.is_empty() {
+            return Err(CoreError::NotExisted(format!(
+                "No partitions found for table '{}'",
+                table_name
+            )));
+        }
+
+        log::info!(
+            "📦 [GeneralAggregation] Found {} partitions",
+            partitions.len()
+        );
+
+        // 2. 创建 UnionTableProvider (无需 RecordHub, 使用 DataFusion 内置的 UnionExec)
+        let union_table = crate::compute::UnionTableProvider::new(partitions)?;
+
+        // 3. 创建 DataFusion SessionContext 并注册表
+        let ctx = SessionContext::new();
+        ctx.register_table(table_name, Arc::new(union_table))
+            .map_err(|e| CoreError::Internal(format!("Failed to register union table: {}", e)))?;
+
+        log::info!("✅ [GeneralAggregation] UnionTable registered, executing SQL...");
+
+        // 5. 直接执行原始 SQL，让 DataFusion 自动优化和执行
+        // 不需要手动处理 ORDER BY/LIMIT/聚合重组
+        // DataFusion 会自动：
+        // - 优化查询计划
+        // - 并行扫描数据
+        // - 正确处理聚合、排序、限制
+        let df = ctx
+            .sql(sql)
+            .await
+            .map_err(|e| CoreError::Internal(format!("Query failed: {}", e)))?;
+
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| CoreError::Internal(format!("Collect failed: {}", e)))?;
+
+        log::info!(
+            "📊 [GeneralAggregation] Query returned {} batches",
+            batches.len()
+        );
+
+        // 6. 返回结果
+        let batch = if batches.is_empty() {
+            // 空结果
             let schema = Arc::new(Schema::new(vec![Field::new(
                 "result",
                 DataType::Int64,
                 true,
             )]));
             RecordBatch::new_empty(schema)
-        } else if all_batches.len() == 1 {
-            all_batches[0].clone()
+        } else if batches.len() == 1 {
+            batches[0].clone()
         } else {
-            // 多个 partition 的聚合结果需要再次聚合
-            // 每个 batch 已经是聚合后的结果(如 MIN, MAX)
-            // 我们需要对这些结果再次执行相同的聚合操作
-
+            // 多个 batch，需要合并
             use datafusion::arrow::compute::concat_batches;
-            let schema = all_batches[0].schema();
-            let combined = concat_batches(&schema, &all_batches)
-                .map_err(|e| CoreError::Internal(format!("Merge failed: {}", e)))?;
-
-            // 为合并后的结果构建重新聚合的SQL
-            // 从schema中获取列名,这些列名是聚合函数的结果
-            let field_names: Vec<String> = schema
-                .fields()
-                .iter()
-                .map(|f| format!("\"{}\"", f.name()))
-                .collect();
-
-            // 构建重新聚合的SQL
-            // 例如: SELECT MIN(col1), MAX(col2) FROM temp_results
-            // 其中 col1 是 "min(taxi_trips.fare_amount)"
-            let mut agg_exprs = Vec::new();
-            let mut group_keys = Vec::new();
-
-            for field_name in &field_names {
-                let lower = field_name.to_lowercase();
-
-                // 判断是否为聚合函数结果列
-                // 注意: 必须先判断特定的聚合函数(MIN/MAX/AVG),再判断通用的COUNT别名
-                // 否则 min_fare, max_fare, avg_fare 会被误识别为 COUNT
-                let is_count_result = lower == "\"cnt\""
-                    || lower == "\"count\""
-                    || lower == "\"total\""
-                    || lower.ends_with("_cnt\"")
-                    || lower.ends_with("_count\"");
-
-                if lower.contains("min(") || (lower.starts_with("\"min_") && !is_count_result) {
-                    agg_exprs.push(format!("MIN({}) AS {}", field_name, field_name));
-                } else if lower.contains("max(")
-                    || (lower.starts_with("\"max_") && !is_count_result)
-                {
-                    agg_exprs.push(format!("MAX({}) AS {}", field_name, field_name));
-                } else if lower.contains("sum(")
-                    || (lower.starts_with("\"sum_") && !is_count_result)
-                {
-                    agg_exprs.push(format!("SUM({}) AS {}", field_name, field_name));
-                } else if lower.contains("avg(")
-                    || lower.contains("\"avg")
-                    || (lower.starts_with("\"avg_") && !is_count_result)
-                    || lower.ends_with("_avg\"")
-                {
-                    // AVG 需要特殊处理: 理想情况应该是 SUM(sum_col) / SUM(count_col)
-                    // 但这需要改写原始SQL让partition返回sum和count
-                    // 这里使用 AVG 作为近似(会有轻微误差,但比SUM正确得多)
-                    agg_exprs.push(format!("AVG({}) AS {}", field_name, field_name));
-                } else if lower.contains("count(") || is_count_result {
-                    // COUNT 结果或聚合别名都需要用 SUM 合并
-                    agg_exprs.push(format!("SUM({}) AS {}", field_name, field_name));
-                } else {
-                    // 普通列,用于GROUP BY
-                    agg_exprs.push(field_name.clone());
-                    group_keys.push(field_name.clone());
-                }
-            }
-
-            let mut re_agg_sql = format!("SELECT {} FROM temp_results", agg_exprs.join(", "));
-            if !group_keys.is_empty() {
-                re_agg_sql.push_str(&format!(" GROUP BY {}", group_keys.join(", ")));
-            }
-
-            // 🔧 在 re-aggregation 后应用原始的 ORDER BY 和 LIMIT
-            if let Some(order_by) = &order_by_clause {
-                re_agg_sql.push_str(order_by);
-            }
-            if let Some(limit) = &limit_clause {
-                re_agg_sql.push_str(limit);
-            }
-
-            log::info!("🔄 [Re-aggregation SQL] {}", re_agg_sql);
-
-            let ctx = SessionContext::new();
-            let provider =
-                datafusion::datasource::MemTable::try_new(schema.clone(), vec![vec![combined]])
-                    .map_err(|e| CoreError::Internal(format!("MemTable failed: {}", e)))?;
-
-            ctx.register_table("temp_results", Arc::new(provider))
-                .map_err(|e| CoreError::Internal(format!("Register failed: {}", e)))?;
-
-            let df = ctx
-                .sql(&re_agg_sql)
-                .await
-                .map_err(|e| CoreError::Internal(format!("Re-agg failed: {}", e)))?;
-
-            let final_batches = df
-                .collect()
-                .await
-                .map_err(|e| CoreError::Internal(format!("Final collect failed: {}", e)))?;
-
-            if final_batches.is_empty() {
-                RecordBatch::new_empty(schema)
-            } else {
-                final_batches[0].clone()
-            }
+            let schema = batches[0].schema();
+            concat_batches(&schema, &batches)
+                .map_err(|e| CoreError::Internal(format!("Merge failed: {}", e)))?
         };
 
         let matched_docs = batch.num_rows();
+
+        log::info!("✅ [GeneralAggregation] Completed: {} rows", matched_docs);
 
         Ok(QueryResult {
             batch,

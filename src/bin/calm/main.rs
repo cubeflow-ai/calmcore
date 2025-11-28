@@ -179,12 +179,6 @@ fn init_logger(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
                 builder.init();
             }
         }
-        "both" => {
-            // TODO: env_logger 不支持同时输出到控制台和文件
-            // 这里先输出到控制台，后续可以考虑使用 tracing 或其他日志库
-            eprintln!("Info: 'both' target not fully supported yet, using console");
-            builder.init();
-        }
         _ => {
             eprintln!("Warning: unknown log target '{}', using console", target);
             builder.init();
