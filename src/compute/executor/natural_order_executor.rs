@@ -25,8 +25,6 @@ use crate::segment::field_store::row_data::RowDataStore;
 use crate::segment::field_store::IndexReader;
 use crate::utils::error::{CoreError, CoreResult};
 
-use super::result_merger::ResultMerger;
-
 /// 查询结果
 #[derive(Debug)]
 pub struct QueryResult {
@@ -50,15 +48,11 @@ pub struct SegmentMeta {
 /// 自然顺序执行器
 pub struct NaturalOrderExecutor {
     engine: Arc<Engine>,
-    result_merger: ResultMerger,
 }
 
 impl NaturalOrderExecutor {
     pub fn new(engine: Arc<Engine>) -> Self {
-        Self {
-            engine,
-            result_merger: ResultMerger::new(),
-        }
+        Self { engine }
     }
 
     /// 解析 ORDER BY _nature 查询的 SQL
@@ -210,11 +204,9 @@ impl NaturalOrderExecutor {
 
         let step4_start = std::time::Instant::now();
         let final_batch = if batches.is_empty() {
-            self.result_merger
-                .create_empty_batch_from_sql(sql, &table_name, &self.engine)
-                .await?
+            self.create_empty_batch(&table_name).await?
         } else {
-            self.result_merger.concat_batches(batches)?
+            self.concat_batches(batches)?
         };
         log::info!(
             "⏱️  [NaturalOrder] Step 4 (merge batches): {:?}",
@@ -728,6 +720,54 @@ impl NaturalOrderExecutor {
         }
 
         Ok(cleaned.trim().to_string())
+    }
+
+    /// 合并多个 RecordBatch
+    fn concat_batches(&self, batches: Vec<RecordBatch>) -> CoreResult<RecordBatch> {
+        if batches.is_empty() {
+            return Err(CoreError::Internal("No batches to concat".to_string()));
+        }
+
+        if batches.len() == 1 {
+            return Ok(batches.into_iter().next().unwrap());
+        }
+
+        use datafusion::arrow::compute::concat_batches;
+        let schema = batches[0].schema();
+        concat_batches(&schema, &batches)
+            .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
+    }
+
+    /// 创建空 RecordBatch（从第一个 segment 获取 schema）
+    async fn create_empty_batch(&self, table_name: &str) -> CoreResult<RecordBatch> {
+        use datafusion::arrow::array::{new_empty_array, ArrayRef};
+
+        // 获取第一个 partition 和 segment
+        let partition_names = self.engine.list_partitions(table_name).await;
+        let first_partition_name = partition_names.into_iter().next().ok_or_else(|| {
+            CoreError::NotExisted(format!("No partitions found for table '{}'", table_name))
+        })?;
+
+        let partition = self
+            .engine
+            .get_partition(table_name, &first_partition_name)
+            .await
+            .ok_or_else(|| {
+                CoreError::NotExisted(format!("Partition {} not found", first_partition_name))
+            })?;
+
+        // 获取 schema
+        let arrow_schema = partition.schema().to_arrow_schema();
+
+        // 创建空数组
+        let empty_columns: Vec<ArrayRef> = arrow_schema
+            .fields()
+            .iter()
+            .map(|field| new_empty_array(field.data_type()))
+            .collect();
+
+        RecordBatch::try_new(arrow_schema, empty_columns)
+            .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)))
     }
 }
 

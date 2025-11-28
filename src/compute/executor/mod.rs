@@ -1,7 +1,6 @@
 mod ballista_executor; // DataFusion executor
 mod cursor_pagination;
 mod natural_order_executor; // 特殊优化: ORDER BY _nature
-mod result_merger; // natural_order 需要
 
 use std::sync::Arc;
 
