@@ -21,11 +21,11 @@ use crate::utils::error::{CoreError, CoreResult};
 /// - DataFusion 处理查询优化、并行、聚合
 /// - 我们只提供 TableProvider (包含所有优化)
 /// - 代码量从 3000+ 行减少到 < 100 行
-pub struct BallistaExecutor {
+pub struct DataFusionExecutor {
     engine: Arc<Engine>,
 }
 
-impl BallistaExecutor {
+impl DataFusionExecutor {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_extract_table_name() {
-        let executor = BallistaExecutor::new(Arc::new(Engine::new()));
+        let executor = DataFusionExecutor::new(Arc::new(Engine::new()));
 
         assert_eq!(
             executor.extract_table_name("SELECT * FROM users").unwrap(),
