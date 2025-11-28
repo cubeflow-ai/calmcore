@@ -132,7 +132,7 @@ fn default_log_level() -> String {
 }
 
 fn default_log_target() -> String {
-    "file".to_string()
+    "console".to_string()
 }
 
 fn default_log_file() -> Option<PathBuf> {

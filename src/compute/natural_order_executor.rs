@@ -55,6 +55,22 @@ impl NaturalOrderExecutor {
         Self { engine }
     }
 
+    /// 从表达式中提取数字
+    fn extract_number_from_expr(
+        &self,
+        expr: &datafusion::sql::sqlparser::ast::Expr,
+    ) -> Option<usize> {
+        use datafusion::sql::sqlparser::ast::{Expr, Value};
+
+        match expr {
+            Expr::Value(value_with_span) => match &value_with_span.value {
+                Value::Number(n, _) => n.parse::<usize>().ok(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// 解析 ORDER BY _nature 查询的 SQL
     ///
     /// 返回: (table_name, limit, offset, where_clause, projection_fields, is_select_star)
@@ -62,89 +78,180 @@ impl NaturalOrderExecutor {
         &self,
         sql: &str,
     ) -> CoreResult<(String, usize, usize, Option<String>, Vec<String>, bool)> {
-        use regex::Regex;
+        use datafusion::sql::sqlparser::ast::{Expr, SelectItem, SetExpr, Statement, TableFactor};
+        use datafusion::sql::sqlparser::dialect::GenericDialect;
+        use datafusion::sql::sqlparser::parser::Parser;
 
-        let sql_upper = sql.to_uppercase();
+        log::debug!("🔍 [NaturalOrder] Parsing SQL: '{}'", sql);
 
-        // 提取表名: FROM <table_name> 或 FROM `table_name`
-        // 支持: 字母、数字、下划线、连字符，以及反引号包裹
-        let table_re = Regex::new(r"FROM\s+`?([a-zA-Z0-9_-]+)`?").unwrap();
-        let table_name = table_re
-            .captures(sql)
-            .and_then(|caps| caps.get(1))
-            .map(|m| m.as_str().to_string())
-            .ok_or_else(|| CoreError::InvalidParam("Cannot find table name in SQL".into()))?;
+        // 解析 SQL
+        let dialect = GenericDialect {};
+        let statements = Parser::parse_sql(&dialect, sql).map_err(|e| {
+            log::error!("❌ [NaturalOrder] Failed to parse SQL '{}': {}", sql, e);
+            CoreError::InvalidParam(format!("Failed to parse SQL: {}", e))
+        })?;
 
-        // 提取 LIMIT 和 OFFSET
-        // 支持两种语法:
-        // 1. MySQL: LIMIT offset, count  (LIMIT 1000, 10)
-        // 2. 标准: LIMIT count OFFSET offset  (LIMIT 10 OFFSET 1000)
-        let limit;
-        let offset;
-
-        // 先尝试 MySQL 语法: LIMIT offset, count
-        let mysql_limit_re = Regex::new(r"LIMIT\s+(\d+)\s*,\s*(\d+)").unwrap();
-        if let Some(caps) = mysql_limit_re.captures(&sql_upper) {
-            // MySQL 语法: LIMIT offset, count
-            offset = caps
-                .get(1)
-                .and_then(|m| m.as_str().parse::<usize>().ok())
-                .unwrap_or(0);
-            limit = caps
-                .get(2)
-                .and_then(|m| m.as_str().parse::<usize>().ok())
-                .ok_or_else(|| {
-                    CoreError::InvalidParam("Invalid LIMIT count in MySQL syntax".into())
-                })?;
-        } else {
-            // 标准 SQL 语法: LIMIT count [OFFSET offset]
-            let limit_re = Regex::new(r"LIMIT\s+(\d+)").unwrap();
-            limit = limit_re
-                .captures(&sql_upper)
-                .and_then(|caps| caps.get(1))
-                .and_then(|m| m.as_str().parse::<usize>().ok())
-                .ok_or_else(|| CoreError::InvalidParam("ORDER BY _nature requires LIMIT".into()))?;
-
-            let offset_re = Regex::new(r"OFFSET\s+(\d+)").unwrap();
-            offset = offset_re
-                .captures(&sql_upper)
-                .and_then(|caps| caps.get(1))
-                .and_then(|m| m.as_str().parse::<usize>().ok())
-                .unwrap_or(0);
+        if statements.is_empty() {
+            return Err(CoreError::InvalidParam("Empty SQL statement".into()));
         }
 
-        // 提取 SELECT 字段
-        let select_re = Regex::new(r"SELECT\s+(.+?)\s+FROM").unwrap();
-        let (projection_fields, is_select_star) = if let Some(caps) = select_re.captures(sql) {
-            let fields_str = caps.get(1).map(|m| m.as_str()).unwrap_or("*");
-            if fields_str.trim() == "*" {
-                (vec![], true)
+        let statement = &statements[0];
+
+        if let Statement::Query(query) = statement {
+            if let SetExpr::Select(select) = query.body.as_ref() {
+                // 1. 提取表名
+                let table_name = if let Some(table_with_joins) = select.from.first() {
+                    match &table_with_joins.relation {
+                        TableFactor::Table { name, .. } => name
+                            .0
+                            .iter()
+                            .map(|ident| ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("."),
+                        _ => {
+                            return Err(CoreError::InvalidParam(
+                                "Complex table expressions not supported".into(),
+                            ))
+                        }
+                    }
+                } else {
+                    return Err(CoreError::InvalidParam(
+                        "Cannot find table name in SQL".into(),
+                    ));
+                };
+                // 2. 提取 SELECT 字段
+                let (projection_fields, is_select_star) = if select.projection.len() == 1 {
+                    match &select.projection[0] {
+                        SelectItem::Wildcard(_) => (vec![], true),
+                        SelectItem::UnnamedExpr(expr) => {
+                            if let Expr::Identifier(ident) = expr {
+                                let ident_str = ident.to_string();
+                                if ident_str == "*" {
+                                    (vec![], true)
+                                } else {
+                                    (vec![ident_str], false)
+                                }
+                            } else {
+                                // 复杂表达式，暂时不支持
+                                (vec![], true)
+                            }
+                        }
+                        SelectItem::ExprWithAlias { alias, .. } => (vec![alias.to_string()], false),
+                        SelectItem::QualifiedWildcard(_, _) => (vec![], true),
+                    }
+                } else if select.projection.iter().all(|item| {
+                    matches!(
+                        item,
+                        SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. }
+                    )
+                }) {
+                    // 多个字段
+                    let fields: Result<Vec<String>, CoreError> = select
+                        .projection
+                        .iter()
+                        .map(|item| match item {
+                            SelectItem::UnnamedExpr(expr) => {
+                                if let Expr::Identifier(ident) = expr {
+                                    Ok(ident.to_string())
+                                } else {
+                                    Err(CoreError::InvalidParam(
+                                        "Complex expressions in SELECT not supported".into(),
+                                    ))
+                                }
+                            }
+                            SelectItem::ExprWithAlias { alias, .. } => Ok(alias.to_string()),
+                            _ => Err(CoreError::InvalidParam("Unsupported SELECT item".into())),
+                        })
+                        .collect();
+                    (fields?, false)
+                } else {
+                    (vec![], true)
+                };
+
+                // 3. 提取 WHERE 子句
+                let where_clause = if let Some(selection) = &select.selection {
+                    Some(format!("{}", selection))
+                } else {
+                    None
+                };
+
+                // 4. 解析 LIMIT 和 OFFSET - 使用 sqlparser 的 LimitClause
+                let (limit, offset) = if let Some(limit_clause) = &query.limit_clause {
+                    use datafusion::sql::sqlparser::ast::LimitClause;
+
+                    match limit_clause {
+                        LimitClause::OffsetCommaLimit {
+                            offset: offset_expr,
+                            limit: limit_expr,
+                        } => {
+                            // MySQL 语法: LIMIT offset, limit
+                            let offset_val =
+                                self.extract_number_from_expr(offset_expr).ok_or_else(|| {
+                                    CoreError::InvalidParam(
+                                        "Invalid offset in MySQL LIMIT syntax".into(),
+                                    )
+                                })?;
+                            let limit_val =
+                                self.extract_number_from_expr(limit_expr).ok_or_else(|| {
+                                    CoreError::InvalidParam(
+                                        "Invalid limit in MySQL LIMIT syntax".into(),
+                                    )
+                                })?;
+                            log::info!(
+                                "✅ [NaturalOrder] MySQL LIMIT syntax parsed: offset={}, limit={}",
+                                offset_val,
+                                limit_val
+                            );
+                            (limit_val, offset_val)
+                        }
+                        LimitClause::LimitOffset { limit, offset, .. } => {
+                            // 标准 SQL 语法: LIMIT count [OFFSET offset]
+                            let limit_val = if let Some(limit_expr) = limit {
+                                self.extract_number_from_expr(limit_expr).ok_or_else(|| {
+                                    CoreError::InvalidParam("Invalid limit value".into())
+                                })?
+                            } else {
+                                return Err(CoreError::InvalidParam(
+                                    "ORDER BY _nature requires LIMIT".into(),
+                                ));
+                            };
+
+                            let offset_val = if let Some(offset_obj) = offset {
+                                self.extract_number_from_expr(&offset_obj.value)
+                                    .ok_or_else(|| {
+                                        CoreError::InvalidParam("Invalid offset value".into())
+                                    })?
+                            } else {
+                                0
+                            };
+                            log::info!("✅ [NaturalOrder] Standard LIMIT syntax parsed: limit={}, offset={}", limit_val, offset_val);
+                            (limit_val, offset_val)
+                        }
+                    }
+                } else {
+                    return Err(CoreError::InvalidParam(
+                        "ORDER BY _nature requires LIMIT".into(),
+                    ));
+                };
+
+                Ok((
+                    table_name,
+                    limit,
+                    offset,
+                    where_clause,
+                    projection_fields,
+                    is_select_star,
+                ))
             } else {
-                let fields: Vec<String> = fields_str
-                    .split(',')
-                    .map(|f| f.trim().to_string())
-                    .collect();
-                (fields, false)
+                Err(CoreError::InvalidParam(
+                    "Only SELECT statements are supported".into(),
+                ))
             }
         } else {
-            (vec![], true)
-        };
-
-        // 提取 WHERE 子句 (可选)
-        let where_re = Regex::new(r"WHERE\s+(.+?)(?:\s+ORDER\s+BY|\s+LIMIT|$)").unwrap();
-        let where_clause = where_re
-            .captures(sql)
-            .and_then(|caps| caps.get(1))
-            .map(|m| m.as_str().trim().to_string());
-
-        Ok((
-            table_name,
-            limit,
-            offset,
-            where_clause,
-            projection_fields,
-            is_select_star,
-        ))
+            Err(CoreError::InvalidParam(
+                "Only SELECT statements are supported".into(),
+            ))
+        }
     }
 
     /// 执行自然顺序查询
@@ -162,6 +269,13 @@ impl NaturalOrderExecutor {
         // 解析 SQL 提取参数
         let (table_name, limit, offset, where_clause, projection_fields, is_select_star) =
             self.parse_sql(sql)?;
+
+        let filter_exprs = if let Some(where_sql) = &where_clause {
+            self.parse_where_filters(where_sql)?
+        } else {
+            Vec::new()
+        };
+        let force_full_projection = !filter_exprs.is_empty();
 
         log::info!(
             "🌿 [NaturalOrder] Executing natural order query: table={}, limit={}, offset={}, where={:?}, projection={:?}, is_select_star={}",
@@ -192,7 +306,11 @@ impl NaturalOrderExecutor {
 
         // 第二步：计算需要读取的 segments
         let step2_start = std::time::Instant::now();
+
+        // 🔑 关键：ORDER BY _nature 始终使用物理 offset/limit
+        // 先定位到物理位置，读取固定数量的物理行，然后过滤
         let target_segments = self.calculate_target_segments(&segment_metas, offset, limit)?;
+
         log::info!(
             "⏱️  [NaturalOrder] Step 2 (calculate): {:?}",
             step2_start.elapsed()
@@ -213,9 +331,9 @@ impl NaturalOrderExecutor {
                 &table_name,
                 sql,
                 &target_segments,
-                where_clause.as_deref(),
                 &projection_fields,
                 is_select_star,
+                force_full_projection,
             )
             .await?;
         log::info!(
@@ -223,14 +341,30 @@ impl NaturalOrderExecutor {
             step3_start.elapsed()
         );
 
-        let matched_docs = batches.iter().map(|b| b.num_rows()).sum();
-
         let step4_start = std::time::Instant::now();
         let final_batch = if batches.is_empty() {
             self.create_empty_batch(&table_name).await?
         } else {
             self.concat_batches(batches)?
         };
+
+        // 应用过滤器（如果有）
+        let final_batch = if filter_exprs.is_empty() {
+            // 无过滤器，直接返回
+            final_batch
+        } else {
+            // 对物理行应用过滤
+            let filtered = self.apply_filters_to_batch(final_batch, &filter_exprs)?;
+
+            // 投影（如果需要）
+            if is_select_star || projection_fields.is_empty() {
+                filtered
+            } else {
+                self.project_batch(filtered, &projection_fields)?
+            }
+        };
+
+        let matched_docs = final_batch.num_rows();
         log::info!(
             "⏱️  [NaturalOrder] Step 4 (merge batches): {:?}",
             step4_start.elapsed()
@@ -416,9 +550,9 @@ impl NaturalOrderExecutor {
         table_name: &str,
         sql: &str,
         target_segments: &[(String, String, usize, usize)],
-        where_clause: Option<&str>,
         projection_fields: &[String],
         is_select_star: bool,
+        force_full_projection: bool,
     ) -> CoreResult<Vec<RecordBatch>> {
         // 清理 SQL：移除 ORDER BY _nature 和 LIMIT/OFFSET
         let _cleaned_sql = self.clean_sql_for_segment_query(sql)?;
@@ -512,9 +646,9 @@ impl NaturalOrderExecutor {
                     row_data,
                     *skip,
                     *read_count,
-                    where_clause,
                     projection_fields,
                     is_select_star,
+                    force_full_projection,
                 )
                 .await?;
             log::debug!(
@@ -549,9 +683,9 @@ impl NaturalOrderExecutor {
         row_data: Arc<RowDataStore>,
         skip: usize,
         read_count: usize,
-        where_clause: Option<&str>,
         projection_fields: &[String],
         is_select_star: bool,
+        force_full_projection: bool,
     ) -> CoreResult<RecordBatch> {
         use crate::compute::table_provider::segment_scanner::SegmentScanner;
 
@@ -567,15 +701,8 @@ impl NaturalOrderExecutor {
             deleted_owned,
         );
 
-        // 🚀 从 WHERE 条件解析过滤器
-        let filters = if let Some(where_sql) = where_clause {
-            self.parse_where_filters(where_sql, &schema)?
-        } else {
-            Vec::new()
-        };
-
         // 🚀 构建投影列索引
-        let projection = if is_select_star {
+        let projection = if is_select_star || force_full_projection {
             None // SELECT * 读取所有列
         } else {
             // 根据字段名找到列索引
@@ -598,8 +725,7 @@ impl NaturalOrderExecutor {
         };
 
         // 🚀 核心优化：使用 SegmentScanner 的 scan_with_skip 并应用投影下推
-        let batch =
-            scanner.scan_with_skip_and_limit(&filters, skip, read_count, projection.as_ref())?;
+        let batch = scanner.scan_with_skip_and_limit(&[], skip, read_count, projection.as_ref())?;
 
         Ok(batch)
     }
@@ -608,7 +734,6 @@ impl NaturalOrderExecutor {
     fn parse_where_filters(
         &self,
         where_sql: &str,
-        _schema: &Arc<ArrowSchema>,
     ) -> CoreResult<Vec<datafusion::logical_expr::Expr>> {
         use datafusion::sql::sqlparser::dialect::GenericDialect;
         use datafusion::sql::sqlparser::parser::Parser;
@@ -647,6 +772,119 @@ impl NaturalOrderExecutor {
         }
 
         Ok(Vec::new())
+    }
+
+    fn apply_filters_to_batch(
+        &self,
+        batch: RecordBatch,
+        filters: &[datafusion::logical_expr::Expr],
+    ) -> CoreResult<RecordBatch> {
+        use crate::utils::error::CoreError;
+        use datafusion::arrow::compute::filter_record_batch;
+        use datafusion::common::ToDFSchema;
+        use datafusion::execution::context::SessionContext;
+        use datafusion::physical_expr::create_physical_expr;
+
+        if filters.is_empty() || batch.num_rows() == 0 {
+            return Ok(batch);
+        }
+
+        let combined_filter = if filters.len() == 1 {
+            filters[0].clone()
+        } else {
+            let mut expr = filters[0].clone();
+            for filter in &filters[1..] {
+                expr = datafusion::logical_expr::Expr::BinaryExpr(
+                    datafusion::logical_expr::BinaryExpr {
+                        left: Box::new(expr),
+                        op: datafusion::logical_expr::Operator::And,
+                        right: Box::new(filter.clone()),
+                    },
+                );
+            }
+            expr
+        };
+
+        let ctx = SessionContext::new();
+        let df_schema = batch.schema().to_dfschema_ref().map_err(|e| {
+            CoreError::Internal(format!("Failed to convert schema to DFSchema: {}", e))
+        })?;
+
+        let physical_expr =
+            create_physical_expr(&combined_filter, &df_schema, ctx.state().execution_props())
+                .map_err(|e| {
+                    CoreError::Internal(format!("Failed to create physical expr: {}", e))
+                })?;
+
+        let result = physical_expr
+            .evaluate(&batch)
+            .map_err(|e| CoreError::Internal(format!("Failed to evaluate filter: {}", e)))?;
+
+        let predicate = match result {
+            datafusion::physical_plan::ColumnarValue::Array(array) => {
+                use datafusion::arrow::array::AsArray;
+                let boolean_array = array.as_boolean();
+                if boolean_array.len() != batch.num_rows() {
+                    return Err(CoreError::Internal(format!(
+                        "Filter produced {} rows, expected {}",
+                        boolean_array.len(),
+                        batch.num_rows()
+                    )));
+                }
+                boolean_array.clone()
+            }
+            datafusion::physical_plan::ColumnarValue::Scalar(scalar) => match scalar {
+                datafusion::scalar::ScalarValue::Boolean(Some(true)) => {
+                    return Ok(batch);
+                }
+                datafusion::scalar::ScalarValue::Boolean(Some(false))
+                | datafusion::scalar::ScalarValue::Boolean(None) => {
+                    return Ok(RecordBatch::new_empty(batch.schema()));
+                }
+                _ => {
+                    return Err(CoreError::Internal(
+                        "Filter returned non-boolean scalar".to_string(),
+                    ));
+                }
+            },
+        };
+
+        filter_record_batch(&batch, &predicate)
+            .map_err(|e| CoreError::Internal(format!("Failed to filter batch: {}", e)))
+    }
+
+    fn project_batch(
+        &self,
+        batch: RecordBatch,
+        projection_fields: &[String],
+    ) -> CoreResult<RecordBatch> {
+        use crate::utils::error::CoreError;
+
+        if projection_fields.is_empty() {
+            return Ok(batch);
+        }
+
+        let schema = batch.schema();
+        let mut indices = Vec::new();
+        for field_name in projection_fields {
+            if let Some((idx, _)) = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .find(|(_, f)| f.name() == field_name)
+            {
+                indices.push(idx);
+            } else {
+                return Err(CoreError::InvalidParam(format!(
+                    "Field '{}' not found in result schema",
+                    field_name
+                )));
+            }
+        }
+
+        batch
+            .project(&indices)
+            .map_err(|e| CoreError::Internal(format!("Failed to project batch: {}", e)))
     }
 
     /// 将 sqlparser 的 Expr 转换为 DataFusion 的 Expr

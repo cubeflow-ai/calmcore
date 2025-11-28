@@ -16,6 +16,7 @@ use std::{
     hash::Hash,
     marker::PhantomData,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use mem_btree::persist::UnionLeafSerializer;
@@ -165,12 +166,34 @@ impl<K: IndexKey> GenericIndexedField<K> {
 
         // 2. 转换为 (K, RoaringBitmap) 的迭代器
         let len = btree.len();
-        let iter = btree.iter().map(|item| {
+
+        // 🔍 调试: 收集所有 items 并检查数量是否匹配
+        let mut items: Vec<Arc<(K, RoaringBitmap, Option<Duration>)>> = Vec::new();
+
+        for item in btree.iter() {
             let (key, value_lock, _ttl) = &*item;
             let ids = value_lock.read().unwrap();
             let bitmap = RoaringBitmap::from_sorted_iter(ids.iter().copied()).unwrap();
-            Arc::new((key.clone(), bitmap, None))
-        });
+            items.push(Arc::new((key.clone(), bitmap, None)));
+        }
+
+        log::info!(
+            "📊 [persist] BTree stats: len()={}, items.len()={}, field={}",
+            len,
+            items.len(),
+            self.field.name()
+        );
+
+        if len != items.len() {
+            log::error!(
+                "❌ [persist] BTree len mismatch! len()={} but collected {} items",
+                len,
+                items.len()
+            );
+        }
+
+        let items_count = items.len();
+        let iter = items.into_iter();
 
         // 3. 持久化
         let serializer = K::new_serializer(zstd_level);
@@ -178,15 +201,60 @@ impl<K: IndexKey> GenericIndexedField<K> {
 
         writer
             .persist::<K, RoaringBitmap, RoaringBitmap>(
-                len,
+                items_count, // 🔧 使用 items_count 而不是 len
                 Box::new(serializer),
                 Some(Box::new(BitmapUnionLeaf::new())), // 启用 union_leaf 优化
                 iter,
             )
             .map_err(|e| CoreError::IOError(e.to_string()))?;
 
-        // 4. 创建磁盘索引
+        // 4. 创建磁盘索引并验证
         let disk_index = InvertedIndex::new_disk(path, K::new_serializer(zstd_level))?;
+
+        // 🔍 验证磁盘索引的数据完整性
+        log::info!(
+            "🔍 [persist] Verifying disk index for field '{}'",
+            self.field.name()
+        );
+
+        // 统计磁盘索引中每个 key 的 bitmap 大小
+        let mut disk_total_docs = 0;
+        let mut disk_key_count = 0;
+
+        // 遍历原始内存索引来对比
+        if let InvertedIndex::Memory(mem_tree) = &*memory_index {
+            for item in mem_tree.iter() {
+                let (key, value_lock, _ttl) = &*item;
+                let mem_ids = value_lock.read().unwrap();
+                let mem_count = mem_ids.len();
+
+                // 从磁盘索引读取相同的 key
+                if let Some(disk_bitmap) = disk_index.get_bitmap(key) {
+                    let disk_count = disk_bitmap.len() as usize;
+
+                    if mem_count != disk_count {
+                        log::error!(
+                            "❌ [persist] Data mismatch! Memory has {} docs, disk has {} docs (diff: {})",
+                            mem_count, disk_count, mem_count as i64 - disk_count as i64
+                        );
+                    }
+
+                    disk_total_docs += disk_count as u64;
+                    disk_key_count += 1;
+                } else {
+                    log::error!(
+                        "❌ [persist] Key not found in disk index! mem_count={}",
+                        mem_count
+                    );
+                }
+            }
+        }
+
+        log::info!(
+            "✅ [persist] Disk index verification complete: {} keys, {} total docs",
+            disk_key_count,
+            disk_total_docs
+        );
 
         Ok(Self {
             field: self.field.clone(),
@@ -250,11 +318,29 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
         }
 
         // 批量更新索引
-        let mut indexs = self.indexs.read().unwrap().clone();
+        // 🔧 修复: 不要 clone，直接操作原始索引
+        // clone BTree 会导致 Arc 共享，修改后覆盖可能丢失 BTree 结构变化
+        let mut indexs = self.indexs.write().unwrap();
+
+        // 🔍 调试：记录更新前后的统计
+        let field_name = self.field.name();
+        let before_len = indexs.len();
+        let total_ids_to_add: usize = mtp.values().map(|v| v.len()).sum();
+
         for (k, ids) in mtp {
             indexs.extend(k, ids);
         }
-        *self.indexs.write().unwrap() = indexs;
+
+        let after_len = indexs.len();
+        log::debug!(
+            "📝 [write] field='{}', before_len={}, after_len={}, keys_added={}, total_ids={}",
+            field_name,
+            before_len,
+            after_len,
+            after_len - before_len,
+            total_ids_to_add
+        );
+        // indexs 的 write guard 会在作用域结束时自动释放
 
         Ok(())
     }

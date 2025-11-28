@@ -280,8 +280,6 @@ impl SegmentScanner {
         limit: usize,
         projection: Option<&Vec<usize>>,
     ) -> crate::utils::error::CoreResult<RecordBatch> {
-        use crate::utils::error::CoreError;
-
         let scan_start = std::time::Instant::now();
 
         // 计算要读取的物理 doc_ids 范围
@@ -345,8 +343,15 @@ impl SegmentScanner {
 
         // 应用 WHERE 过滤条件
         let (result_bitmap, unsupported_filters) = self.apply_filters(filters);
-        let result_bitmap = result_bitmap
-            .ok_or_else(|| CoreError::Internal("Failed to apply filters".to_string()))?;
+        let result_bitmap = match result_bitmap {
+            Some(bitmap) => bitmap,
+            None => {
+                log::debug!(
+                    "📊 [SegmentScanner] Filter returned no matching docs, returning empty batch"
+                );
+                return self.create_empty_batch();
+            }
+        };
 
         // 只保留在当前范围内且满足条件的行
         let mut filtered_bitmap = RoaringBitmap::new();
@@ -1744,9 +1749,13 @@ impl SegmentStream {
             is_empty_projection
         );
 
+        // 🚨 修复: 即使是空投影(COUNT),也必须读取数据来验证行的存在性
+        // 原因: bitmap 中的 doc_id 可能在 parquet 中已被删除或不存在
+        // 解决方案: 对于空投影,读取所有列(因为需要确认行的完整性)
         let source_batches = if is_empty_projection {
-            log::debug!("🔧 [SegmentStream] Empty projection detected, skipping data read");
-            HashMap::new()
+            log::debug!("🔧 [SegmentStream] Empty projection (COUNT), reading all columns to verify row existence");
+            // 必须读取所有列(projection=None)来确保 row schema 正确
+            self.raw_data.get_batch_with_projection(&batch_keys, None)
         } else {
             log::debug!(
                 "🔧 [SegmentStream] Reading {} batches with projection",
@@ -1762,21 +1771,43 @@ impl SegmentStream {
         let mut total_rows_generated = 0;
 
         for (batch_start_id, doc_ids_in_batch) in batch_groups {
-            // 空投影处理
+            // 🚨 修复: 空投影处理 - 必须读取实际数据并验证行存在性
+            // 不能直接使用 bitmap 大小,因为:
+            // 1. bitmap 中的 doc_id 可能在 parquet 中已被删除
+            // 2. 可能有 unsupported_filters 需要在 DataFusion 层面过滤
+            // 因此即使是空投影(COUNT),也必须确认实际行数
             if is_empty_projection {
-                let row_count = doc_ids_in_batch.len();
-                total_rows_generated += row_count;
-                if row_count > 0 {
-                    if let Ok(batch) = RecordBatch::try_new_with_options(
-                        self.schema.clone(),
-                        vec![],
-                        &datafusion::arrow::record_batch::RecordBatchOptions::new()
-                            .with_row_count(Some(row_count)),
-                    ) {
-                        result_batches.push(batch);
-                    } else {
-                        log::warn!("  [SegmentStream] Failed to create empty projection batch with {} rows", row_count);
+                // 对于空投影,仍需要从 source_batch 中确认行的存在性
+                if let Some(source_batch) = source_batches.get(&batch_start_id) {
+                    // 计算有效的行索引(确保在 source_batch 范围内)
+                    let valid_row_count = doc_ids_in_batch
+                        .iter()
+                        .filter(|&&doc_id| {
+                            let row_idx = (doc_id - batch_start_id) as usize;
+                            row_idx < source_batch.num_rows()
+                        })
+                        .count();
+
+                    total_rows_generated += valid_row_count;
+                    if valid_row_count > 0 {
+                        if let Ok(batch) = RecordBatch::try_new_with_options(
+                            self.schema.clone(),
+                            vec![],
+                            &datafusion::arrow::record_batch::RecordBatchOptions::new()
+                                .with_row_count(Some(valid_row_count)),
+                        ) {
+                            result_batches.push(batch);
+                        } else {
+                            log::warn!("  [SegmentStream] Failed to create empty projection batch with {} rows", valid_row_count);
+                        }
                     }
+                } else {
+                    // source_batch 不存在,说明这个 batch 已被删除,跳过
+                    log::debug!(
+                        "  [SegmentStream] Batch {} not found (deleted), skipping {} doc_ids",
+                        batch_start_id,
+                        doc_ids_in_batch.len()
+                    );
                 }
                 continue;
             }

@@ -225,9 +225,6 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
     fn on_query(&mut self, query: &str, results: QueryResultWriter<W>) -> io::Result<()> {
         let query_trimmed = query.trim();
 
-        // 🔍 记录所有查询用于调试
-        log::info!("📨 [MySQL] Received query: {}", query_trimmed);
-
         // 去除 MySQL 注释 (/* ... */)
         let query_without_comment = if query_trimmed.starts_with("/*") {
             if let Some(end_pos) = query_trimmed.find("*/") {
@@ -251,6 +248,20 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             .join(" ")
             .to_lowercase();
 
+        // INSERT 语句
+        if query_lower.starts_with("insert") {
+            log::info!("📨 [MySQL] Received query: {}", query_trimmed.len());
+            return tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(insert_handler::handle_insert(
+                    self.engine.clone(),
+                    query,
+                    results,
+                ))
+            });
+        }
+
+        log::info!("📨 [MySQL] Received query: {}", query_trimmed);
+
         // 忽略客户端初始化命令和事务命令
         if query_lower.starts_with("set ")
             || query_lower.starts_with("select @@")
@@ -273,6 +284,8 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             || query_lower == "begin"
             || query_lower.starts_with("start transaction")
         {
+            log::info!("📨 [MySQL] Received query: {}", query_trimmed);
+
             // 特殊处理: SET TRACING 命令
             if query_lower.starts_with("set tracing") {
                 use crate::utils::tracing::{disable_tracing, enable_tracing, toggle_tracing};
@@ -327,6 +340,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
         // flush tables 命令
         if query_lower.starts_with("flush tables") {
+            log::info!("📨 [MySQL] Received query: {}", query_trimmed);
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     // 解析表名 (如果有指定)
@@ -407,17 +421,6 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                             .error(ErrorKind::ER_PARSE_ERROR, b"Invalid FLUSH TABLES syntax");
                     }
                 })
-            });
-        }
-
-        // INSERT 语句
-        if query_lower.starts_with("insert") {
-            return tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(insert_handler::handle_insert(
-                    self.engine.clone(),
-                    query,
-                    results,
-                ))
             });
         }
 

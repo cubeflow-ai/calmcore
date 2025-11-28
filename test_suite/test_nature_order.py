@@ -42,7 +42,7 @@ def connect_calm(host="127.0.0.1", port=3307):
         sys.exit(1)
 
 
-def test_nature_pagination(table_name, batch_size=1000):
+def test_nature_pagination(table_name, batch_size=1000, where_clause=None):
     """
     测试 ORDER BY _nature 分页
 
@@ -52,6 +52,8 @@ def test_nature_pagination(table_name, batch_size=1000):
     print_colored(
         Colors.CYAN, f"Testing ORDER BY _nature pagination on table: {table_name}"
     )
+    if where_clause:
+        print_colored(Colors.CYAN, f"WHERE clause: {where_clause}")
     print_colored(Colors.CYAN, f"Batch size: {batch_size}")
     print_colored(Colors.CYAN, f"{'='*60}\n")
 
@@ -64,8 +66,15 @@ def test_nature_pagination(table_name, batch_size=1000):
 
     print_colored(Colors.BLUE, "📖 Iterating through data with ORDER BY _nature...")
 
+    cursor.execute("select count(*) from " + table_name)
+    total_rows_in_table = cursor.fetchone()[0]
+
     while True:
-        sql = f"SELECT * FROM `{table_name}` ORDER BY _nature LIMIT {batch_size} OFFSET {offset}"
+        # MySQL 语法: LIMIT offset, limit（注意顺序）
+        sql = f"SELECT * FROM {table_name}"
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        sql += f" ORDER BY _nature LIMIT {offset}, {batch_size}"
 
         cursor.execute(sql)
         rows = cursor.fetchall()
@@ -88,7 +97,7 @@ def test_nature_pagination(table_name, batch_size=1000):
         offset += batch_size
 
         # 安全检查：防止无限循环
-        if offset > 10_000_000:
+        if offset > total_rows_in_table + batch_size:
             print_colored(Colors.RED, "⚠️  Safety limit reached (10M rows)")
             break
 
@@ -101,7 +110,7 @@ def test_nature_pagination(table_name, batch_size=1000):
     return total_rows, all_ids
 
 
-def verify_count(table_name):
+def verify_count(table_name, where_clause=None):
     """使用 COUNT(*) 验证总行数"""
     print_colored(Colors.BLUE, "\n🔢 Verifying total count with COUNT(*)...")
 
@@ -109,6 +118,8 @@ def verify_count(table_name):
     cursor = conn.cursor()
 
     sql = f"SELECT COUNT(*) FROM `{table_name}`"
+    if where_clause:
+        sql += f" WHERE {where_clause}"
     cursor.execute(sql)
     count = cursor.fetchone()[0]
 
@@ -145,7 +156,7 @@ def verify_uniqueness(all_ids):
         return True
 
 
-def verify_distribution(table_name, group_by_field):
+def verify_distribution(table_name, group_by_field, where_clause=None):
     """
     使用 GROUP BY 验证数据分布
 
@@ -160,7 +171,10 @@ def verify_distribution(table_name, group_by_field):
     cursor = conn.cursor()
 
     # 获取每个分组的计数
-    sql = f"SELECT {group_by_field}, COUNT(*) FROM `{table_name}` GROUP BY {group_by_field}"
+    sql = f"SELECT {group_by_field}, COUNT(*) FROM `{table_name}`"
+    if where_clause:
+        sql += f" WHERE {where_clause}"
+    sql += f" GROUP BY {group_by_field}"
     cursor.execute(sql)
     group_counts = cursor.fetchall()
 
@@ -183,18 +197,20 @@ def verify_distribution(table_name, group_by_field):
     return total_from_groupby, len(group_counts)
 
 
-def run_test(table_name, batch_size=1000, group_by_field=None):
+def run_test(table_name, batch_size=1000, group_by_field=None, where_clause=None):
     """运行完整的测试套件"""
     print_colored(Colors.YELLOW, f"\n{'#'*70}")
     print_colored(Colors.YELLOW, f"# ORDER BY _nature Test Suite")
     print_colored(Colors.YELLOW, f"# Table: {table_name}")
+    if where_clause:
+        print_colored(Colors.YELLOW, f"# WHERE: {where_clause}")
     print_colored(Colors.YELLOW, f"{'#'*70}\n")
 
     # 1. 使用 _nature 迭代所有数据
-    nature_total, all_ids = test_nature_pagination(table_name, batch_size)
+    nature_total, all_ids = test_nature_pagination(table_name, batch_size, where_clause)
 
     # 2. 验证总数
-    count_total = verify_count(table_name)
+    count_total = verify_count(table_name, where_clause)
 
     # 3. 验证唯一性
     is_unique = verify_uniqueness(all_ids)
@@ -202,7 +218,9 @@ def run_test(table_name, batch_size=1000, group_by_field=None):
     # 4. 验证数据分布
     groupby_total = None
     if group_by_field:
-        groupby_total, group_count = verify_distribution(table_name, group_by_field)
+        groupby_total, group_count = verify_distribution(
+            table_name, group_by_field, where_clause
+        )
 
     # 最终结果
     print_colored(Colors.YELLOW, f"\n{'='*70}")
@@ -255,27 +273,113 @@ def run_test(table_name, batch_size=1000, group_by_field=None):
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: python3 test_nature_order.py <table_name> [batch_size] [group_by_field]"
+            "Usage: python3 test_nature_order.py <table_name> [batch_size] [group_by_field] [where_clause]"
         )
         print("\nExamples:")
         print("  python3 test_nature_order.py nyc-taxi")
         print("  python3 test_nature_order.py nyc-taxi 500")
         print("  python3 test_nature_order.py nyc-taxi 1000 passenger_count")
+        print(
+            "  python3 test_nature_order.py nyc-taxi 1000 passenger_count 'passenger_count > 2'"
+        )
         sys.exit(1)
 
     table_name = sys.argv[1]
     batch_size = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
     group_by_field = sys.argv[3] if len(sys.argv) > 3 else None
+    where_clause = sys.argv[4] if len(sys.argv) > 4 else None
 
     # 默认的 group by 字段
     if group_by_field is None:
         if table_name == "nyc-taxi" or table_name == "taxi_trips":
+            table_name = "taxi_trips"
             group_by_field = "passenger_count"
         elif table_name == "wikipedia":
             group_by_field = "namespace"
 
-    success = run_test(table_name, batch_size, group_by_field)
-    sys.exit(0 if success else 1)
+    # 如果没有指定WHERE条件，运行多个测试场景
+    if where_clause is None:
+        test_results = {}
+
+        # 测试1: 无WHERE条件
+        print_colored(Colors.YELLOW, "\n" + "=" * 70)
+        print_colored(Colors.YELLOW, "TEST 1: Without WHERE clause (all rows)")
+        print_colored(Colors.YELLOW, "=" * 70)
+        test_results["TEST 1 (no WHERE)"] = run_test(
+            table_name, batch_size, group_by_field, None
+        )
+
+        # 测试2: 带WHERE条件 (根据表名自动生成)
+        print_colored(Colors.YELLOW, "\n" + "=" * 70)
+        if table_name == "taxi_trips":
+            where_clause = "passenger_count > 2"
+            print_colored(Colors.YELLOW, f"TEST 2: With WHERE clause ({where_clause})")
+            print_colored(Colors.YELLOW, "=" * 70)
+            test_results["TEST 2 (passenger_count > 2)"] = run_test(
+                table_name, batch_size, group_by_field, where_clause
+            )
+
+            # 测试3: 带另一个WHERE条件
+            print_colored(Colors.YELLOW, "\n" + "=" * 70)
+            where_clause = "passenger_count <= 2"
+            print_colored(Colors.YELLOW, f"TEST 3: With WHERE clause ({where_clause})")
+            print_colored(Colors.YELLOW, "=" * 70)
+            test_results["TEST 3 (passenger_count <= 2)"] = run_test(
+                table_name, batch_size, group_by_field, where_clause
+            )
+
+            # 测试4: 带复杂WHERE条件
+            print_colored(Colors.YELLOW, "\n" + "=" * 70)
+            where_clause = "passenger_count > 1 AND passenger_count < 6"
+            print_colored(Colors.YELLOW, f"TEST 4: With WHERE clause ({where_clause})")
+            print_colored(Colors.YELLOW, "=" * 70)
+            test_results["TEST 4 (1 < passenger_count < 6)"] = run_test(
+                table_name, batch_size, group_by_field, where_clause
+            )
+
+        elif table_name == "wikipedia":
+            where_clause = "namespace = 0"
+            print_colored(Colors.YELLOW, f"TEST 2: With WHERE clause ({where_clause})")
+            print_colored(Colors.YELLOW, "=" * 70)
+            test_results["TEST 2 (namespace = 0)"] = run_test(
+                table_name, batch_size, group_by_field, where_clause
+            )
+
+            # 测试3: 带另一个WHERE条件
+            print_colored(Colors.YELLOW, "\n" + "=" * 70)
+            where_clause = "namespace > 0"
+            print_colored(Colors.YELLOW, f"TEST 3: With WHERE clause ({where_clause})")
+            print_colored(Colors.YELLOW, "=" * 70)
+            test_results["TEST 3 (namespace > 0)"] = run_test(
+                table_name, batch_size, group_by_field, where_clause
+            )
+
+        # 最终总结
+        print_colored(Colors.YELLOW, "\n" + "=" * 70)
+        print_colored(Colors.YELLOW, "OVERALL TEST SUMMARY")
+        print_colored(Colors.YELLOW, "=" * 70)
+
+        all_passed = all(test_results.values())
+
+        for test_name, passed in test_results.items():
+            status = "✅ PASS" if passed else "❌ FAIL"
+            print_colored(Colors.CYAN, f"{test_name}: {status}")
+
+        print()
+
+        if all_passed:
+            print_colored(Colors.GREEN, "🎉 ALL TEST SCENARIOS PASSED!")
+        else:
+            print_colored(Colors.RED, "❌ SOME TEST SCENARIOS FAILED!")
+            failed_tests = [name for name, passed in test_results.items() if not passed]
+            print_colored(Colors.RED, f"Failed tests: {', '.join(failed_tests)}")
+        print()
+
+        sys.exit(0 if all_passed else 1)
+    else:
+        # 运行单个指定的WHERE条件测试
+        success = run_test(table_name, batch_size, group_by_field, where_clause)
+        sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":
