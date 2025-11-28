@@ -1,9 +1,7 @@
 mod ballista_executor; // DataFusion executor
 mod cursor_pagination;
-mod partition_executor;
-mod result_merger;
-mod scan_executor;
-mod sql_utils;
+mod natural_order_executor; // 特殊优化: ORDER BY _nature
+mod result_merger; // natural_order 需要
 
 use std::sync::Arc;
 
@@ -15,7 +13,6 @@ use crate::utils::error::CoreResult;
 use ballista_executor::DataFusionExecutor;
 
 pub use cursor_pagination::{CursorInfo, CursorPagination};
-pub use scan_executor::ScanExecutor;
 
 /// 查询结果
 #[derive(Debug)]

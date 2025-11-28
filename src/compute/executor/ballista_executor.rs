@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use datafusion::prelude::*;
 
-use super::QueryResult;
+use super::{natural_order_executor::NaturalOrderExecutor, QueryResult};
 use crate::compute::{SqlNormalizer, UnionTableProvider};
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
@@ -23,20 +23,25 @@ use crate::utils::error::{CoreError, CoreResult};
 /// - 代码量从 3000+ 行减少到 < 100 行
 pub struct DataFusionExecutor {
     engine: Arc<Engine>,
+    natural_order_executor: NaturalOrderExecutor,
 }
 
 impl DataFusionExecutor {
     pub fn new(engine: Arc<Engine>) -> Self {
-        Self { engine }
+        Self {
+            natural_order_executor: NaturalOrderExecutor::new(engine.clone()),
+            engine,
+        }
     }
 
     /// 执行 SQL 查询
     ///
     /// 简单到令人惊讶:
-    /// 1. 标准化 SQL (修复时间戳比较等)
-    /// 2. 创建 DataFusion SessionContext
-    /// 3. 注册我们的 TableProvider
-    /// 4. 执行查询 - DataFusion 自动处理一切!
+    /// 1. 检查是否是特殊查询 (ORDER BY _nature)
+    /// 2. 标准化 SQL (修复时间戳比较等)
+    /// 3. 创建 DataFusion SessionContext
+    /// 4. 注册我们的 TableProvider
+    /// 5. 执行查询 - DataFusion 自动处理一切!
     pub async fn execute_sql(&self, sql: &str) -> CoreResult<QueryResult> {
         log::info!("🚀 [DataFusion Executor] Executing SQL: {}", sql);
 
@@ -45,6 +50,15 @@ impl DataFusionExecutor {
 
         if normalized_sql != sql {
             log::info!("🔄 [SQL Normalized] {} -> {}", sql, normalized_sql);
+        }
+
+        // 🌿 特殊处理: ORDER BY _nature (深度分页优化)
+        let normalized_upper = normalized_sql.to_uppercase();
+        if normalized_upper.contains("ORDER BY _NATURE")
+            || normalized_upper.contains("ORDER BY `_NATURE`")
+        {
+            log::info!("🌿 [Natural Order] Detected ORDER BY _nature, using optimized executor");
+            return self.execute_natural_order(&normalized_sql).await;
         }
 
         // 从 SQL 中提取表名 (简化版本,生产环境需要更健壮的解析)
@@ -138,6 +152,51 @@ impl DataFusionExecutor {
             batch,
             matched_docs,
         })
+    }
+
+    /// 执行 ORDER BY _nature 查询 (深度分页优化)
+    async fn execute_natural_order(&self, sql: &str) -> CoreResult<QueryResult> {
+        use crate::compute::optimizer::{analyze_query, QueryType};
+        use datafusion::sql::parser::DFParser;
+        use datafusion::sql::sqlparser::dialect::MySqlDialect;
+
+        // 解析 SQL 获取详细信息
+        let dialect = MySqlDialect {};
+        let mut statements = DFParser::parse_sql_with_dialect(sql, &dialect)?;
+        let statement = statements
+            .pop_front()
+            .ok_or_else(|| CoreError::InvalidParam("Failed to parse SQL".to_string()))?;
+
+        // 分析查询计划
+        let plan = analyze_query(statement).ok_or_else(|| {
+            CoreError::InvalidParam("Failed to analyze natural order query".to_string())
+        })?;
+
+        // 提取 NaturalOrderInfo
+        if let QueryType::NaturalOrder(info) = plan.query_type {
+            let result = self
+                .natural_order_executor
+                .execute_natural_order(
+                    sql,
+                    &plan.table_name,
+                    info.limit,
+                    info.offset.unwrap_or(0),
+                    info.where_clause.as_deref(),
+                    &info.projection_fields,
+                    info.is_select_star,
+                )
+                .await?;
+
+            // 转换结果
+            Ok(QueryResult {
+                batch: result.batch,
+                matched_docs: result.matched_docs,
+            })
+        } else {
+            Err(CoreError::InvalidParam(
+                "Not a valid ORDER BY _nature query".to_string(),
+            ))
+        }
     }
 
     /// 从 SQL 中提取表名 (简化版本)
