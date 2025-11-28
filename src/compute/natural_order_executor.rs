@@ -66,29 +66,52 @@ impl NaturalOrderExecutor {
 
         let sql_upper = sql.to_uppercase();
 
-        // 提取表名: FROM <table_name>
-        let table_re = Regex::new(r"FROM\s+([a-zA-Z0-9_]+)").unwrap();
+        // 提取表名: FROM <table_name> 或 FROM `table_name`
+        // 支持: 字母、数字、下划线、连字符，以及反引号包裹
+        let table_re = Regex::new(r"FROM\s+`?([a-zA-Z0-9_-]+)`?").unwrap();
         let table_name = table_re
             .captures(sql)
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string())
             .ok_or_else(|| CoreError::InvalidParam("Cannot find table name in SQL".into()))?;
 
-        // 提取 LIMIT
-        let limit_re = Regex::new(r"LIMIT\s+(\d+)").unwrap();
-        let limit = limit_re
-            .captures(&sql_upper)
-            .and_then(|caps| caps.get(1))
-            .and_then(|m| m.as_str().parse::<usize>().ok())
-            .ok_or_else(|| CoreError::InvalidParam("ORDER BY _nature requires LIMIT".into()))?;
+        // 提取 LIMIT 和 OFFSET
+        // 支持两种语法:
+        // 1. MySQL: LIMIT offset, count  (LIMIT 1000, 10)
+        // 2. 标准: LIMIT count OFFSET offset  (LIMIT 10 OFFSET 1000)
+        let limit;
+        let offset;
 
-        // 提取 OFFSET (可选)
-        let offset_re = Regex::new(r"OFFSET\s+(\d+)").unwrap();
-        let offset = offset_re
-            .captures(&sql_upper)
-            .and_then(|caps| caps.get(1))
-            .and_then(|m| m.as_str().parse::<usize>().ok())
-            .unwrap_or(0);
+        // 先尝试 MySQL 语法: LIMIT offset, count
+        let mysql_limit_re = Regex::new(r"LIMIT\s+(\d+)\s*,\s*(\d+)").unwrap();
+        if let Some(caps) = mysql_limit_re.captures(&sql_upper) {
+            // MySQL 语法: LIMIT offset, count
+            offset = caps
+                .get(1)
+                .and_then(|m| m.as_str().parse::<usize>().ok())
+                .unwrap_or(0);
+            limit = caps
+                .get(2)
+                .and_then(|m| m.as_str().parse::<usize>().ok())
+                .ok_or_else(|| {
+                    CoreError::InvalidParam("Invalid LIMIT count in MySQL syntax".into())
+                })?;
+        } else {
+            // 标准 SQL 语法: LIMIT count [OFFSET offset]
+            let limit_re = Regex::new(r"LIMIT\s+(\d+)").unwrap();
+            limit = limit_re
+                .captures(&sql_upper)
+                .and_then(|caps| caps.get(1))
+                .and_then(|m| m.as_str().parse::<usize>().ok())
+                .ok_or_else(|| CoreError::InvalidParam("ORDER BY _nature requires LIMIT".into()))?;
+
+            let offset_re = Regex::new(r"OFFSET\s+(\d+)").unwrap();
+            offset = offset_re
+                .captures(&sql_upper)
+                .and_then(|caps| caps.get(1))
+                .and_then(|m| m.as_str().parse::<usize>().ok())
+                .unwrap_or(0);
+        }
 
         // 提取 SELECT 字段
         let select_re = Regex::new(r"SELECT\s+(.+?)\s+FROM").unwrap();
