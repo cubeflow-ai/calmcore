@@ -193,7 +193,58 @@ impl<K: IndexKey> GenericIndexedField<K> {
         }
 
         let items_count = items.len();
+
+        // 🔍 统计 items 中的文档总数
+        let total_docs_in_items: u64 = items
+            .iter()
+            .map(|item| {
+                let (_key, bitmap, _ttl) = &**item;
+                bitmap.len()
+            })
+            .sum();
+
+        log::info!(
+            "📊 [persist] Items stats: count={}, total_docs={}",
+            items_count,
+            total_docs_in_items
+        );
+
+        // 🔧 保存一份用于验证的 items（key、bitmap大小、以及在数组中的索引位置）
+        let verification_items: Vec<(usize, K, usize)> = items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                let (key, bitmap, _ttl) = &**item;
+                (idx, key.clone(), bitmap.len() as usize)
+            })
+            .collect();
+
+        log::info!(
+            "🔍 [persist] Verification items prepared: count={}, field='{}'",
+            verification_items.len(),
+            self.field.name()
+        );
+
+        // 🔍 记录关键索引位置的键（用于定位丢失位置）
+        let checkpoints = [0, 255, 256, 257, 65535, 65536, 65775, 65776, 65791, 65792];
+        for &idx in &checkpoints {
+            if idx < verification_items.len() {
+                let (pos, _key, count) = &verification_items[idx];
+                log::info!(
+                    "🔍 [persist] Checkpoint: index={}, pos={}, doc_count={}",
+                    idx,
+                    pos,
+                    count
+                );
+            }
+        }
+
         let iter = items.into_iter();
+
+        log::info!(
+            "🔧 [persist] Starting TreeWriter.persist with {} items",
+            items_count
+        );
 
         // 3. 持久化
         let serializer = K::new_serializer(zstd_level);
@@ -208,50 +259,161 @@ impl<K: IndexKey> GenericIndexedField<K> {
             )
             .map_err(|e| CoreError::IOError(e.to_string()))?;
 
+        log::info!(
+            "✅ [persist] TreeWriter.persist completed for field='{}'",
+            self.field.name()
+        );
+
         // 4. 创建磁盘索引并验证
+        log::info!(
+            "🔍 [persist] Loading disk index to verify {} items for field='{}'",
+            items_count,
+            self.field.name()
+        );
+
         let disk_index = InvertedIndex::new_disk(path, K::new_serializer(zstd_level))?;
 
+        // 🔍 持久化后立即检查磁盘索引的长度
+        let disk_len = disk_index.len();
+        log::info!(
+            "🔍 [persist] Disk index loaded: disk_len={}, expected={}, field='{}'",
+            disk_len,
+            items_count,
+            self.field.name()
+        );
+
+        if disk_len != items_count {
+            log::error!(
+                "❌ [persist] LENGTH MISMATCH! Before persist: {} items, After persist: {} items, LOST: {} items, field='{}'",
+                items_count,
+                disk_len,
+                items_count - disk_len,
+                self.field.name()
+            );
+        }
+
         // 🔍 验证磁盘索引的数据完整性
+        // 由于现在持久化过程中不允许写入(Segment.persist 会设置标记),
+        // 验证的数据应该与持久化的数据完全一致
         log::info!(
             "🔍 [persist] Verifying disk index for field '{}'",
             self.field.name()
         );
 
-        // 统计磁盘索引中每个 key 的 bitmap 大小
         let mut disk_total_docs = 0;
         let mut disk_key_count = 0;
+        let mut mismatches = 0;
+        let mut missing_keys = Vec::new();
+        let mut mismatch_details = Vec::new();
 
-        // 遍历原始内存索引来对比
-        if let InvertedIndex::Memory(mem_tree) = &*memory_index {
-            for item in mem_tree.iter() {
-                let (key, value_lock, _ttl) = &*item;
-                let mem_ids = value_lock.read().unwrap();
-                let mem_count = mem_ids.len();
+        // 使用持久化时收集的 items 进行验证
+        for (original_pos, key, mem_count) in verification_items.iter() {
+            // 🔍 Debug: Log when verifying positions around 65792
+            if *original_pos >= 65790 && *original_pos <= 65795 {
+                log::info!(
+                    "🔍 [persist] Verifying position {} (chunk 257 boundary)",
+                    original_pos
+                );
+            }
 
-                // 从磁盘索引读取相同的 key
-                if let Some(disk_bitmap) = disk_index.get_bitmap(key) {
-                    let disk_count = disk_bitmap.len() as usize;
+            if let Some(disk_bitmap) = disk_index.get_bitmap(key) {
+                let disk_count = disk_bitmap.len() as usize;
 
-                    if mem_count != disk_count {
-                        log::error!(
-                            "❌ [persist] Data mismatch! Memory has {} docs, disk has {} docs (diff: {})",
-                            mem_count, disk_count, mem_count as i64 - disk_count as i64
-                        );
-                    }
-
-                    disk_total_docs += disk_count as u64;
-                    disk_key_count += 1;
-                } else {
+                if *mem_count != disk_count {
                     log::error!(
-                        "❌ [persist] Key not found in disk index! mem_count={}",
-                        mem_count
+                        "❌ [persist] Data mismatch! original_pos={}, memory={} docs, disk={} docs (diff: {})",
+                        original_pos,
+                        mem_count,
+                        disk_count,
+                        *mem_count as i64 - disk_count as i64
                     );
+                    mismatch_details.push((*original_pos, *mem_count, disk_count));
+                    mismatches += 1;
                 }
+
+                disk_total_docs += disk_count as u64;
+                disk_key_count += 1;
+            } else {
+                log::error!(
+                    "❌ [persist] Key not found in disk index! original_pos={}, mem_count={}",
+                    original_pos,
+                    mem_count
+                );
+                missing_keys.push((*original_pos, *mem_count));
+                mismatches += 1;
             }
         }
 
+        if mismatches > 0 {
+            // 详细的错误报告
+            log::error!(
+                "❌ [persist] Verification FAILED for field '{}':",
+                self.field.name()
+            );
+            log::error!("   Total keys in memory: {}", verification_items.len());
+            log::error!("   Keys found on disk: {}", disk_key_count);
+            log::error!("   Missing keys: {} (showing first 10)", missing_keys.len());
+
+            // 🔍 分析丢失键的位置分布
+            if !missing_keys.is_empty() {
+                let first_missing = missing_keys[0].0;
+                let last_missing = missing_keys
+                    .last()
+                    .map(|(pos, _)| *pos)
+                    .unwrap_or(first_missing);
+                log::error!(
+                    "   Missing key range: {} to {} (span: {})",
+                    first_missing,
+                    last_missing,
+                    last_missing - first_missing + 1
+                );
+                log::error!(
+                    "   First missing / 256 = {} remainder {}",
+                    first_missing / 256,
+                    first_missing % 256
+                );
+                log::error!(
+                    "   Last missing / 256 = {} remainder {}",
+                    last_missing / 256,
+                    last_missing % 256
+                );
+            }
+
+            for (pos, mem_count) in missing_keys.iter().take(10) {
+                log::error!(
+                    "     - Position={} (chunk={}), mem_count={}",
+                    pos,
+                    pos / 256,
+                    mem_count
+                );
+            }
+
+            if !mismatch_details.is_empty() {
+                log::error!(
+                    "   Count mismatches: {} (showing first 10)",
+                    mismatch_details.len()
+                );
+                for (idx, mem_count, disk_count) in mismatch_details.iter().take(10) {
+                    log::error!(
+                        "     - Key index={}, mem={}, disk={}",
+                        idx,
+                        mem_count,
+                        disk_count
+                    );
+                }
+            }
+
+            return Err(CoreError::Internal(format!(
+                "Disk index verification failed for field '{}': {} missing keys, {} count mismatches (total {} items in memory)",
+                self.field.name(),
+                missing_keys.len(),
+                mismatch_details.len(),
+                verification_items.len()
+            )));
+        }
+
         log::info!(
-            "✅ [persist] Disk index verification complete: {} keys, {} total docs",
+            "✅ [persist] Verification complete: {} keys, {} total docs (all matched)",
             disk_key_count,
             disk_total_docs
         );
@@ -326,20 +488,73 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
         let field_name = self.field.name();
         let before_len = indexs.len();
         let total_ids_to_add: usize = mtp.values().map(|v| v.len()).sum();
+        let keys_to_add = mtp.len();
 
+        // 🔍 写入数据并验证
         for (k, ids) in mtp {
+            let ids_count = ids.len();
+            let key_clone = k.clone();
+
             indexs.extend(k, ids);
+
+            // 立即验证写入是否成功
+            if let Some(bitmap) = indexs.get_bitmap(&key_clone) {
+                let actual_count = bitmap.len() as usize;
+                // 注意：如果key已存在，actual_count会大于ids_count
+                if actual_count < ids_count {
+                    log::error!(
+                        "❌ [write] Data loss detected! field='{}', expected at least {} ids, but got {}",
+                        field_name,
+                        ids_count,
+                        actual_count
+                    );
+                    return Err(CoreError::Internal(format!(
+                        "Index write verification failed for field '{}': expected at least {} ids, got {}",
+                        field_name, ids_count, actual_count
+                    )));
+                }
+            } else {
+                log::error!(
+                    "❌ [write] Key not found after extend! field='{}', key was just added",
+                    field_name
+                );
+                return Err(CoreError::Internal(format!(
+                    "Index write verification failed for field '{}': key not found after extend",
+                    field_name
+                )));
+            }
         }
 
         let after_len = indexs.len();
-        log::debug!(
-            "📝 [write] field='{}', before_len={}, after_len={}, keys_added={}, total_ids={}",
+        log::info!(
+            "📝 [write] field='{}', before_len={}, after_len={}, keys_added={}, total_ids={}, start_id={}",
             field_name,
             before_len,
             after_len,
             after_len - before_len,
-            total_ids_to_add
+            total_ids_to_add,
+            start_id
         );
+
+        // 验证总的key数量变化是否合理
+        let actual_new_keys = after_len - before_len;
+        if actual_new_keys > keys_to_add {
+            log::warn!(
+                "⚠️ [write] Unexpected key count! field='{}', tried to add {} keys, but only {} were new",
+                field_name,
+                keys_to_add,
+                actual_new_keys
+            );
+        }
+
+        // 🔍 记录当前索引的总体统计
+        log::info!(
+            "📊 [write] After write: field='{}', total_keys={}, batch_size={}",
+            field_name,
+            after_len,
+            data.num_rows()
+        );
+
         // indexs 的 write guard 会在作用域结束时自动释放
 
         Ok(())

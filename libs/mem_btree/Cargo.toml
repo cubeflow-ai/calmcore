@@ -19,6 +19,7 @@ num-traits = "0.2.19"
 flate2 = "1.1.0"
 byteorder = "1.5"
 roaring = "0.11.2"
+log = "0.4"
 
 [dev-dependencies]
 rand = "0.9.0"

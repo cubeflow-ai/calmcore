@@ -250,7 +250,6 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
         // INSERT 语句
         if query_lower.starts_with("insert") {
-            log::info!("📨 [MySQL] Received query: {}", query_trimmed.len());
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(insert_handler::handle_insert(
                     self.engine.clone(),

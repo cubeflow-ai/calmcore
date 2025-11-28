@@ -448,18 +448,55 @@ where
     fn find_data_offset(&self, search_key: &K) -> Option<(i64, i64)> {
         let mut offset = self.root_offset;
 
+        static SEARCH_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let search_num = SEARCH_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Debug first few searches and searches around the boundary
+        let debug = search_num >= 65790 && search_num < 65795;
+
+        if debug {
+            eprintln!("🔍 [find_data_offset #{}] Starting search from root_offset={}", search_num, offset);
+        }
+
         // Traverse from root to leaf
         loop {
-            // Read node at current offset
-            let (is_leaf, keys, offsets, _union_data) = match self.read_node_at(offset as usize) {
-                Ok(node) => node,
-                Err(_) => return None,
-            };
+            if debug {
+                eprintln!("🔍 [find_data_offset #{}] Reading node at offset={}", search_num, offset);
+            }
 
-            let keys = self.reader_ser.deserialize_keys(&keys);
+            // Read node at current offset
+            let (is_leaf, keys_bytes, offsets, _union_data) =
+                match self.read_node_at(offset as usize) {
+                    Ok(node) => node,
+                    Err(_) => return None,
+                };
+
+            let keys = self.reader_ser.deserialize_keys(&keys_bytes);
+
+            // 🔍 Debug: Only log once for efficiency
+            static FIRST_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !is_leaf && offsets.len() == 257 && keys.len() == 256 {
+                if !FIRST_LOG.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    eprintln!(
+                        "🔍 [find_data_offset] Deserialized FIRST-LEVEL index: keys={}, offsets={}",
+                        keys.len(),
+                        offsets.len()
+                    );
+                }
+            }
 
             // Find the appropriate child/value in current node
             if is_leaf {
+                // 🔍 Debug: Log leaf node details
+                static LEAF_LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let count = LEAF_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count < 5 || keys.len() < 100 {
+                    eprintln!(
+                        "🔍 [find_data_offset] Reached LEAF node: keys.len()={}, offsets.len()={}",
+                        keys.len(),
+                        offsets.len()
+                    );
+                }
+
                 // Leaf node: do exact binary search
                 match self.binary_search_keys(&keys, search_key) {
                     SearchResult::Found(idx) => {
@@ -474,6 +511,10 @@ where
                     }
                     SearchResult::NotFound(_) => {
                         // Key not found in leaf
+                        eprintln!(
+                            "🔍 [find_data_offset] Key NOT FOUND in leaf: keys.len()={}",
+                            keys.len()
+                        );
                         return None;
                     }
                 }
@@ -489,14 +530,41 @@ where
                 // If no such i exists, use offsets[keys.len()]
 
                 let mut child_idx = 0;
+                let mut found_by_break = false;
+                let mut break_at_key_index = None;
                 for (i, key) in keys.iter().enumerate() {
                     if search_key < key {
                         child_idx = i;
+                        found_by_break = true;
+                        break_at_key_index = Some(i);
                         break;
                     }
                     // If we finish the loop without break, child_idx will be 0,
                     // but we want the last child
                     child_idx = i + 1;
+                }
+
+                // 🔍 Debug: Log when accessing last or near-last child in first-level index with 257 offsets
+                if offsets.len() == 257 && child_idx >= 254 {
+                    eprintln!(
+                        "🔍 [find_data_offset] child_idx={}, keys.len()={}, offsets.len()={}, found_by_break={}, break_at_key_index={:?}",
+                        child_idx,
+                        keys.len(),
+                        offsets.len(),
+                        found_by_break,
+                        break_at_key_index
+                    );
+                }
+
+                // 🔍 Debug: Check if we're about to access out of bounds
+                if child_idx >= offsets.len() {
+                    eprintln!(
+                        "❌ [find_data_offset] INDEX OUT OF BOUNDS! child_idx={}, offsets.len()={}, keys.len()={}",
+                        child_idx,
+                        offsets.len(),
+                        keys.len()
+                    );
+                    return None;
                 }
 
                 let next_offset = offsets[child_idx];
@@ -583,6 +651,16 @@ where
                 i64_coder::read(&self.node, &mut pos)
             }
         };
+
+        // 🔍 Debug: Log index nodes at first level (keys <= 256)
+        if !is_leaf && keys_len <= 256 {
+            log::info!(
+                "🔍 [read_node_at] FIRST-LEVEL Index node: keys={}, offsets={} (offset: {})",
+                keys_len,
+                offsets.len(),
+                offset
+            );
+        }
 
         // Read union_leaf data if this is a leaf node and has_union_leaf is enabled
         let union_data = if is_leaf && self.has_union_leaf {

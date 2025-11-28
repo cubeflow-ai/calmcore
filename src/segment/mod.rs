@@ -322,6 +322,13 @@ impl Segment {
         info: Option<WriteInfo>,
         lock: &RwLock<()>,
     ) -> CoreResult<Vec<u32>> {
+        // 🔒 检查是否已持久化 - 持久化后的 Segment 不允许写入
+        if self.persisted.load(Ordering::Relaxed) {
+            return Err(CoreError::Internal(
+                "Cannot write to persisted segment".to_string(),
+            ));
+        }
+
         // 直接使用原始数据,不添加 _internal_id 列
         let num_rows = data.num_rows() as u32;
         // generate auto-increment id for tracking
@@ -901,8 +908,19 @@ impl Segment {
         _segment_id: u64, // Deprecated: now using start-end range
         history_segments: &[(u64, Arc<Segment>)],
     ) -> CoreResult<()> {
-        // 注意：不再检查状态，允许多次持久化（幂等操作）
-        // 如果 segment 已经持久化，fields 和 row_data 已经是 Disk 变体，会直接跳过
+        // 🔒 设置持久化标记,防止持久化过程中有新的写入
+        // 使用 compare_exchange 确保只有第一次调用会成功
+        if self
+            .persisted
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            // 如果已经持久化，返回成功（幂等操作）
+            log::info!("[Segment] Already persisted, skipping");
+            return Ok(());
+        }
+
+        log::info!("[Segment] persist start - write lock acquired");
 
         // Calculate segment ID range: start_id to end_id (inclusive)
         // end_id 是最后一个文档的ID,不是下一个可用ID
@@ -1105,12 +1123,14 @@ impl Segment {
             .map_err(|e| CoreError::IOError(format!("Failed to write segment meta: {}", e)))?;
 
         // Phase 2: Atomic rename (only after all data is written)
-        std::fs::rename(&segment_tmp_path, &segment_path).map_err(|e| {
-            CoreError::IOError(format!(
+        if let Err(e) = std::fs::rename(&segment_tmp_path, &segment_path) {
+            // 持久化失败，重置标记允许重试
+            self.persisted.store(false, Ordering::SeqCst);
+            return Err(CoreError::IOError(format!(
                 "Failed to rename temp directory: {}. Temp dir preserved for recovery.",
                 e
-            ))
-        })?;
+            )));
+        }
 
         // 🔑 关键：只有 rename 成功后才替换 fields 和 row_data
         // 这样 rename 失败时还可以重试
@@ -1159,8 +1179,8 @@ impl Segment {
             println!("  Keeping external Parquet reference (no row_data replacement)");
         }
 
-        // 标记为已持久化
-        self.persisted.store(true, Ordering::Relaxed);
+        // 标记已在开始时设置，这里不需要重复设置
+        // self.persisted 已经是 true
 
         log::debug!("Segment persist completed in {:?}", start.elapsed());
 

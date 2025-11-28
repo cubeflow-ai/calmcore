@@ -937,6 +937,7 @@ impl Engine {
         key: PartitionKey,
         active_tasks: &Arc<tokio::sync::Mutex<HashMap<PartitionKey, JoinHandle<()>>>>,
     ) {
+
         // 检查是否已有任务在执行
         {
             let tasks = active_tasks.lock().await;

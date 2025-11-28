@@ -7,6 +7,7 @@ use std::{
 };
 
 use byteorder::{BigEndian, WriteBytesExt};
+use log;
 
 use super::*;
 
@@ -63,12 +64,31 @@ impl TreeWriter {
 
         let mut offset_tracker = MAGIC_VERSION.len() as i64; // Track offset manually instead of calling stream_position()
 
+        eprintln!(
+            "🔧 [TreeWriter] Starting persist: expected_len={}, chunk_size={}",
+            len, self.chunk_size
+        );
+
+        let mut actual_count = 0;
         for (_i, item) in iter.enumerate() {
             cw.add_key_offset(&item, offset_tracker)?;
 
             let value_bytes = serializer.serialize_value(&item.1);
             data_file.write_all(&value_bytes)?;
             offset_tracker += value_bytes.len() as i64;
+            actual_count += 1;
+        }
+
+        eprintln!(
+            "🔧 [TreeWriter] Iterator consumed: expected={}, actual={}",
+            len, actual_count
+        );
+
+        if actual_count != len {
+            eprintln!(
+                "❌ [TreeWriter] Item count mismatch! expected {} but got {}",
+                len, actual_count
+            );
         }
 
         data_file.flush()?;
@@ -80,6 +100,12 @@ impl TreeWriter {
 
         // Release any remaining keys in current chunk
         cw.release_chunk()?;
+
+        log::info!(
+            "📊 [TreeWriter] Total leaf chunks written: {}, expected: {}",
+            cw.leaf_chunk_count,
+            (len + self.chunk_size - 1) / self.chunk_size
+        );
 
         let level_index =
             std::mem::replace(&mut cw.second_level, vec![Chunk::new(self.chunk_size)]);
@@ -97,6 +123,9 @@ struct Chunk<K, V> {
     keys: Vec<K>,
     offsets: Vec<i64>,
     union: Option<V>,
+    // 🔧 The minimum key covered by this chunk (for index chunks)
+    // Used as separator key when this chunk becomes a child in upper level index
+    min_key: Option<K>,
 }
 
 impl<K: Clone, V> Chunk<K, V> {
@@ -106,6 +135,7 @@ impl<K: Clone, V> Chunk<K, V> {
             keys: Vec::with_capacity(chunk_size),
             offsets: Vec::with_capacity(chunk_size),
             union: None,
+            min_key: None,
         }
     }
 
@@ -128,7 +158,8 @@ struct ChunkWriter<'a, K, V> {
     union_leaf: Option<Box<dyn UnionLeafSerializer<V>>>,
     current: Chunk<K, V>,
     chunk_size: usize,
-    node_file_offset: u64, // Track node file offset manually
+    node_file_offset: u64,   // Track node file offset manually
+    leaf_chunk_count: usize, // 🔧 Track how many leaf chunks written
 }
 
 impl<'a, K, V> ChunkWriter<'a, K, V>
@@ -160,6 +191,7 @@ where
             current: Chunk::new(chunk_size),
             chunk_size,
             node_file_offset: initial_offset as u64,
+            leaf_chunk_count: 0,
         })
     }
 
@@ -203,6 +235,15 @@ where
         // move current to second level
         let old_chunk = std::mem::replace(&mut self.current, Chunk::new(self.chunk_size));
 
+        self.leaf_chunk_count += 1;
+
+        eprintln!(
+            "🔧 [TreeWriter::release_chunk] Writing leaf chunk #{} with {} keys, {} offsets",
+            self.leaf_chunk_count,
+            old_chunk.keys.len(),
+            old_chunk.offsets.len()
+        );
+
         // Use manually tracked offset instead of system call
         let chunk_node_offset = self.node_file_offset as i64;
 
@@ -213,23 +254,57 @@ where
 
         // add to second level index
         // Store as positive offset (chunk type flag will distinguish leaf vs index)
+
+        // 🔧 Check if current index chunk is full BEFORE adding
+        // Index chunk max: chunk_size keys + (chunk_size+1) offsets
+        // If keys.len() >= chunk_size, the chunk is full, create new chunk
+        {
+            let last = self.second_level.last().unwrap();
+            let is_first = last.offsets.is_empty();
+            let is_full = !is_first && last.keys.len() >= self.chunk_size;
+            
+            if is_full {
+                eprintln!(
+                    "🔧 [TreeWriter::release_chunk] Index chunk full (keys={}), creating new chunk BEFORE adding",
+                    last.keys.len()
+                );
+                self.second_level.push(Chunk::new(self.chunk_size));
+            }
+        }
+
         let last = self.second_level.last_mut().unwrap();
+        let is_first_in_index_chunk = last.offsets.is_empty();
+
+        eprintln!(
+            "🔧 [TreeWriter::release_chunk] Adding to index chunk: leaf_chunk={}, is_first={}, keys_before={}, chunk_offset={}",
+            self.leaf_chunk_count,
+            is_first_in_index_chunk,
+            last.keys.len(),
+            chunk_node_offset
+        );
 
         // B-tree index structure: keys [k1, k2], offsets [c0, c1, c2]
         // where c0 < k1 <= c1 < k2 <= c2
         // For the first chunk, we only add offset (leftmost child)
         // For subsequent chunks, we add both key and offset
-        if last.offsets.is_empty() {
-            // First chunk: only add offset as leftmost child
+        if is_first_in_index_chunk {
+            // First chunk in entire index: only add offset as leftmost child
+            // 🔧 Store min_key for use as separator when building upper level
             last.offsets.push(chunk_node_offset);
+            last.min_key = Some(first_key.clone());
         } else {
-            // Subsequent chunks: add key (separator) and offset
-            last.keys.push(first_key);
+            // Subsequent entries: add key (separator) and offset
+            last.keys.push(first_key.clone());
             last.offsets.push(chunk_node_offset);
         }
 
-        if last.is_finish() {
-            self.second_level.push(Chunk::new(self.chunk_size));
+        // 🔍 Debug: Log after adding for chunk 257
+        if self.leaf_chunk_count == 257 {
+            eprintln!(
+                "🔍 [release_chunk] AFTER adding chunk 257: keys.len()={}, offsets.len()={}",
+                last.keys.len(),
+                last.offsets.len()
+            );
         }
 
         Ok(())
@@ -239,9 +314,16 @@ where
     where
         U: Clone,
     {
+        eprintln!(
+            "🔧 [write_second_level] Called with {} chunks, is_leaf={}",
+            level_index.len(),
+            is_leaf
+        );
+
         if level_index.len() == 1 {
             let root_offset = self.node_file_offset;
 
+            eprintln!("🔧 [write_second_level] Single chunk - writing as root");
             self.write_chunk(level_index.into_iter().next().unwrap(), is_leaf)?;
 
             // write root node offset
@@ -253,27 +335,84 @@ where
             return Ok(());
         }
 
-        for chunk in level_index {
+        eprintln!("🔧 [write_second_level] Multiple chunks - building next level index");
+
+        for (idx, chunk) in level_index.into_iter().enumerate() {
             let root_offset = self.node_file_offset as i64;
 
-            // add to second level
-            let last = self.second_level.last_mut().unwrap();
+            eprintln!(
+                "🔧 [write_second_level] Processing chunk #{}: keys={}, offsets={}, has_min_key={}, last_offset={}",
+                idx + 1,
+                chunk.keys.len(),
+                chunk.offsets.len(),
+                chunk.min_key.is_some(),
+                chunk.offsets.last().unwrap_or(&-1)
+            );
 
-            // Same B-tree index logic: first chunk only adds offset, subsequent chunks add key + offset
-            if last.offsets.is_empty() {
-                // First chunk in this level: only add offset as leftmost child
-                last.offsets.push(root_offset);
-            } else {
-                // Subsequent chunks: add key (separator) and offset
-                last.keys.push(chunk.keys[0].clone());
-                last.offsets.push(root_offset);
+            // 🔧 CRITICAL: Get the separator key for this chunk
+            // Use min_key as the separator because it represents the minimum key covered by this chunk.
+            // If min_key is not set, fall back to keys.first() (for backwards compatibility or edge cases)
+            let separator_key = chunk.min_key.clone()
+                .or_else(|| chunk.keys.first().cloned());
+            
+            if separator_key.is_none() {
+                eprintln!(
+                    "🔧 [write_second_level] ERROR: No separator key available (keys={}, has_min_key={})",
+                    chunk.keys.len(),
+                    chunk.min_key.is_some()
+                );
+                continue;
             }
+
+            // 🔧 Check if we need a new chunk BEFORE adding
+            // Same logic: create new chunk when keys.len() == chunk_size (will overflow after adding)
+            {
+                let last = self.second_level.last().unwrap();
+                let is_first = last.offsets.is_empty();
+                let will_overflow = !is_first && last.keys.len() >= self.chunk_size;
+                
+                if will_overflow {
+                    self.second_level.push(Chunk::new(self.chunk_size));
+                }
+            }
+
+            // add to second level
+            {
+                let last = self.second_level.last_mut().unwrap();
+
+                // Same B-tree index logic: first chunk only adds offset, subsequent chunks add key + offset
+                if last.offsets.is_empty() {
+                    // First chunk in this level: only add offset as leftmost child
+                    // 🔧 Also store min_key for use as separator at next level
+                    eprintln!("🔧 [write_second_level] Adding to next level: is_first=true, root_offset={}", root_offset);
+                    last.offsets.push(root_offset);
+                    last.min_key = separator_key.clone();
+                } else {
+                    // Subsequent chunks: add key (separator) and offset
+                    // 🔧 Use separator_key which might be min_key for chunks with only first offset
+                    eprintln!("🔧 [write_second_level] Adding to next level: is_first=false, root_offset={}, keys_before={}", root_offset, last.keys.len());
+                    last.keys.push(separator_key.unwrap());
+                    last.offsets.push(root_offset);
+                }
+            } // Drop the borrow here
 
             self.write_chunk(chunk, is_leaf)?;
         }
 
         let level_index =
             std::mem::replace(&mut self.second_level, vec![Chunk::new(self.chunk_size)]);
+
+        eprintln!(
+            "🔧 [write_second_level] Recursing with next level: {} chunks",
+            level_index.len()
+        );
+        if level_index.len() > 0 {
+            eprintln!(
+                "🔧 [write_second_level] Next level chunk[0]: keys.len()={}, offsets.len()={}",
+                level_index[0].keys.len(),
+                level_index[0].offsets.len()
+            );
+        }
 
         // Recursive call: next level up is also index chunks (is_leaf=false)
         return self.write_second_level(level_index, false);
@@ -283,6 +422,23 @@ where
     where
         U: Clone,
     {
+        // 🔍 Debug: Log index chunk with 257 offsets
+        if !is_leaf && chunk.keys.len() == 256 && chunk.offsets.len() == 257 {
+            eprintln!(
+                "🔍 [write_chunk] Writing FIRST-LEVEL index: is_leaf={}, keys.len()={}, offsets.len()={}",
+                is_leaf,
+                chunk.keys.len(),
+                chunk.offsets.len()
+            );
+        }
+        
+        log::info!(
+            "🔧 [TreeWriter::write_chunk] is_leaf={}, keys.len()={}, offsets.len()={}",
+            is_leaf,
+            chunk.keys.len(),
+            chunk.offsets.len()
+        );
+
         // Write chunk type: 1 = leaf (points to data file), 0 = index (points to node file)
         self.node_file
             .write_all(&[if is_leaf { 1u8 } else { 0u8 }])?;
@@ -290,6 +446,12 @@ where
 
         // Serialize keys
         let keys_data = self.serializer.serialize_keys(&chunk.keys);
+
+        log::info!(
+            "🔧 [TreeWriter::write_chunk] Serialized {} keys into {} bytes",
+            chunk.keys.len(),
+            keys_data.len()
+        );
 
         // Write keys length as u32, then keys data
         self.node_file
