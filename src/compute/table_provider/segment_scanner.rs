@@ -1552,7 +1552,7 @@ impl ExecutionPlan for SegmentExec {
 struct SegmentStream {
     schema: SchemaRef,
     raw_data: RowDataStore,
-    doc_ids_iter: roaring::bitmap::IntoIter,
+    doc_ids_iter: std::iter::Peekable<roaring::bitmap::IntoIter>,
     projection: Option<Vec<usize>>,
     chunk_size: usize,
     limit: Option<usize>, // LIMIT 下推：如果设置，只返回这么多行
@@ -1586,7 +1586,7 @@ impl SegmentStream {
         Self {
             schema,
             raw_data,
-            doc_ids_iter: matched_docs.into_iter(),
+            doc_ids_iter: matched_docs.into_iter().peekable(),
             projection,
             chunk_size,
             limit,
@@ -1629,7 +1629,8 @@ impl SegmentStream {
             );
 
             // 逐个收集 doc_id,边收集边统计 batch 数量
-            for doc_id in self.doc_ids_iter.by_ref() {
+            // 🎯 使用 peek 避免在 chunk 边界丢失 doc_id
+            loop {
                 // LIMIT 优化
                 if let Some(remaining) = remaining_rows {
                     if doc_ids_to_process.len() >= remaining {
@@ -1637,22 +1638,52 @@ impl SegmentStream {
                     }
                 }
 
+                // 🎯 关键: 先 peek 查看下一个 doc_id,不消费
+                let &doc_id = match self.doc_ids_iter.peek() {
+                    Some(id) => id,
+                    None => {
+                        log::warn!(
+                            "🔚 [SegmentStream] Iterator正常结束, 已收集{}个doc_ids, {}个batches",
+                            doc_ids_to_process.len(),
+                            batch_key_set.len()
+                        );
+                        break; // 没有更多 doc_id
+                    }
+                };
+
                 // 检查这个 doc_id 属于哪个 batch
                 if let Some(batch_key) = self.raw_data.get_batch_key_for_doc(doc_id) {
+                    // 🎯 如果是新 batch 且已经收集够了 chunk_size,停止(不消费这个 doc_id)
+                    // 必须在消费前检查,否则 doc_id 会被迭代器消费但无法放回
+                    let is_new_batch = !batch_key_set.contains(&batch_key);
+                    if is_new_batch && batch_key_set.len() >= self.chunk_size {
+                        log::warn!("⛔ [SegmentStream] 达到chunk_size={}限制, 停止收集(doc_id {} 留给下次)", 
+                            batch_key_set.len(), doc_id);
+                        break; // 留给下一次 chunk 处理
+                    }
+
+                    // 安全消费这个 doc_id
+                    self.doc_ids_iter.next();
                     doc_ids_to_process.push(doc_id);
                     batch_key_set.insert(batch_key);
-
-                    // 🎯 关键: 如果已经收集了 chunk_size 个不同的 batch,停止
-                    if batch_key_set.len() >= self.chunk_size {
-                        break;
-                    }
+                } else {
+                    // 无效的 doc_id,消费并跳过
+                    log::debug!("  [SegmentStream] 跳过无效doc_id: {}", doc_id);
+                    self.doc_ids_iter.next();
                 }
             }
 
             // 没有更多数据
             if doc_ids_to_process.is_empty() {
+                log::warn!("⚠️  [SegmentStream] Loop退出但doc_ids_to_process为空");
                 return Ok(Vec::new());
             }
+
+            log::warn!(
+                "✅ [SegmentStream] Loop正常退出: 收集了{}个doc_ids, {}个batches",
+                doc_ids_to_process.len(),
+                batch_key_set.len()
+            );
 
             log::debug!(
                 "  [SegmentStream] Collected {} doc_ids spanning {} batches (limit: {})",
@@ -1672,12 +1703,13 @@ impl SegmentStream {
             batch_groups
         } else {
             // 策略B: 逐个处理（适合小数据量）
+            // 🎯 修复: 同样使用 peek 避免丢失 doc_id
             let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
             let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
             let mut current_batch_key: Option<u32> = None;
             let mut collected_rows = 0;
 
-            for doc_id in self.doc_ids_iter.by_ref() {
+            loop {
                 // LIMIT 优化
                 if let Some(remaining) = remaining_rows {
                     if collected_rows >= remaining {
@@ -1685,20 +1717,39 @@ impl SegmentStream {
                     }
                 }
 
+                // 🎯 使用 peek 先查看下一个 doc_id
+                let &doc_id = match self.doc_ids_iter.peek() {
+                    Some(id) => id,
+                    None => break,
+                };
+
                 // 获取 batch_key
                 let batch_key = match self.raw_data.get_batch_key_for_doc(doc_id) {
                     Some(key) => key,
-                    None => continue,
+                    None => {
+                        // 无效 doc_id,消费并跳过
+                        self.doc_ids_iter.next();
+                        continue;
+                    }
                 };
+
+                // 检查是否是新 batch
+                let is_new_batch =
+                    current_batch_key != Some(batch_key) && !batch_groups.contains_key(&batch_key);
+
+                // 🎯 如果是新 batch 且已经收集够了,停止(不消费这个 doc_id)
+                if is_new_batch && batch_groups.len() >= self.chunk_size {
+                    break;
+                }
+
+                // 安全消费这个 doc_id
+                self.doc_ids_iter.next();
 
                 // 优化：如果 batch_key 相同，直接加入
                 if current_batch_key == Some(batch_key) {
                     batch_groups.get_mut(&batch_key).unwrap().push(doc_id);
                 } else {
                     // 新的 batch_key
-                    if batch_groups.len() >= self.chunk_size {
-                        break;
-                    }
                     batch_groups.entry(batch_key).or_default().push(doc_id);
                     current_batch_key = Some(batch_key);
                 }
@@ -1942,6 +1993,11 @@ impl futures::Stream for SegmentStream {
             Ok(batches) => {
                 if batches.is_empty() {
                     // 没有更多数据
+                    log::warn!(
+                        "🏁 [SegmentStream] Stream完成: 总共返回 {} 行 (bitmap总数={})",
+                        self.rows_returned,
+                        self.total_docs
+                    );
                     Poll::Ready(None)
                 } else {
                     // 设置待处理队列
