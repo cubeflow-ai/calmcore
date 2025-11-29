@@ -49,8 +49,6 @@ pub struct Executor {
 impl Executor {
     /// 创建新的查询执行器
     pub fn new(engine: Arc<Engine>) -> Self {
-        log::info!("🚀 [Executor] DataFusion mode enabled");
-
         Self {
             datafusion_executor: DataFusionExecutor::new(engine.clone()),
             engine,

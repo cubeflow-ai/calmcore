@@ -259,8 +259,6 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             });
         }
 
-        log::info!("📨 [MySQL] Received query: {}", query_trimmed);
-
         // 忽略客户端初始化命令和事务命令
         if query_lower.starts_with("set ")
             || query_lower.starts_with("select @@")
@@ -306,6 +304,8 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                     return results.completed(0, 0);
                 }
             }
+
+            log::info!("📨 [MySQL] Received query: {}", query_trimmed);
 
             // 返回空结果或默认值
             log::info!(

@@ -198,7 +198,7 @@ impl ParquetRowDataReader {
 
         // If only one batch, return it directly
         if batches.len() == 1 {
-            log::info!(
+            log::debug!(
                 "        ⏱️  [Parquet] TOTAL get_with_projection: {:?}",
                 total_start.elapsed()
             );
@@ -214,7 +214,7 @@ impl ParquetRowDataReader {
             "        ⏱️  [Parquet] concat batches: {:?}",
             merge_start.elapsed()
         );
-        log::info!(
+        log::debug!(
             "        ⏱️  [Parquet] TOTAL get_with_projection: {:?}",
             total_start.elapsed()
         );

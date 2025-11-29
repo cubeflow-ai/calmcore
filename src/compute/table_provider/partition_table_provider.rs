@@ -303,7 +303,7 @@ impl ExecutionPlan for MultiSegmentExec {
         partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        log::info!(
+        log::debug!(
             "🎯 [MultiSegmentExec::execute] Executing partition {} (segment)",
             partition
         );

@@ -1641,14 +1641,7 @@ impl SegmentStream {
                 // 🎯 关键: 先 peek 查看下一个 doc_id,不消费
                 let &doc_id = match self.doc_ids_iter.peek() {
                     Some(id) => id,
-                    None => {
-                        log::warn!(
-                            "🔚 [SegmentStream] Iterator正常结束, 已收集{}个doc_ids, {}个batches",
-                            doc_ids_to_process.len(),
-                            batch_key_set.len()
-                        );
-                        break; // 没有更多 doc_id
-                    }
+                    None => break, // 没有更多 doc_id
                 };
 
                 // 检查这个 doc_id 属于哪个 batch
@@ -1657,8 +1650,6 @@ impl SegmentStream {
                     // 必须在消费前检查,否则 doc_id 会被迭代器消费但无法放回
                     let is_new_batch = !batch_key_set.contains(&batch_key);
                     if is_new_batch && batch_key_set.len() >= self.chunk_size {
-                        log::warn!("⛔ [SegmentStream] 达到chunk_size={}限制, 停止收集(doc_id {} 留给下次)", 
-                            batch_key_set.len(), doc_id);
                         break; // 留给下一次 chunk 处理
                     }
 
@@ -1675,15 +1666,8 @@ impl SegmentStream {
 
             // 没有更多数据
             if doc_ids_to_process.is_empty() {
-                log::warn!("⚠️  [SegmentStream] Loop退出但doc_ids_to_process为空");
                 return Ok(Vec::new());
             }
-
-            log::warn!(
-                "✅ [SegmentStream] Loop正常退出: 收集了{}个doc_ids, {}个batches",
-                doc_ids_to_process.len(),
-                batch_key_set.len()
-            );
 
             log::debug!(
                 "  [SegmentStream] Collected {} doc_ids spanning {} batches (limit: {})",
@@ -1819,7 +1803,6 @@ impl SegmentStream {
 
         // 3. 生成 RecordBatches
         let mut result_batches = Vec::new();
-        let mut total_rows_generated = 0;
 
         for (batch_start_id, doc_ids_in_batch) in batch_groups {
             // 🚨 修复: 空投影处理 - 必须读取实际数据并验证行存在性
@@ -1839,7 +1822,6 @@ impl SegmentStream {
                         })
                         .count();
 
-                    total_rows_generated += valid_row_count;
                     if valid_row_count > 0 {
                         if let Ok(batch) = RecordBatch::try_new_with_options(
                             self.schema.clone(),
@@ -1951,23 +1933,9 @@ impl SegmentStream {
             }
         }
 
-        log::info!(
-            "  [SegmentStream] Generated {} result batches, total_rows_generated={}, doc_ids collected from bitmap={}",
-            result_batches.len(),
-            total_rows_generated,
-            self.total_docs
-        );
-
         // 更新已返回的行数（用于 LIMIT 下推）
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
         self.rows_returned += total_rows;
-
-        log::info!(
-            "  [SegmentStream] Batch row count check: total_rows={}, total_rows_generated={}, match={}",
-            total_rows,
-            total_rows_generated,
-            total_rows == total_rows_generated
-        );
 
         Ok(result_batches)
     }
@@ -1993,11 +1961,6 @@ impl futures::Stream for SegmentStream {
             Ok(batches) => {
                 if batches.is_empty() {
                     // 没有更多数据
-                    log::warn!(
-                        "🏁 [SegmentStream] Stream完成: 总共返回 {} 行 (bitmap总数={})",
-                        self.rows_returned,
-                        self.total_docs
-                    );
                     Poll::Ready(None)
                 } else {
                     // 设置待处理队列
