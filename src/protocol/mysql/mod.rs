@@ -764,7 +764,29 @@ impl CalmBackend {
                     }
                     "REPEATABLE-READ"
                 }
-                "version" | "version_comment" => "8.0.32-calm",
+                "version" | "version_comment" => {
+                    // 返回 calm-{branch}-{commit} 格式
+                    use std::process::Command;
+
+                    let branch = Command::new("git")
+                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    let commit = Command::new("git")
+                        .args(["rev-parse", "--short", "HEAD"])
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    // 静态分配，避免生命周期问题
+                    Box::leak(format!("calm-{}-{}", branch, commit).into_boxed_str())
+                }
                 "autocommit" => "1",
                 "auto_commit" => "1",
                 _ => {

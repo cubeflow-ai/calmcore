@@ -1,0 +1,2823 @@
+[0;34m=== Database Connection Test ===
+[0m
+Connecting to Calm (127.0.0.1:3307)...
+[0;32m✓ Connected to Calm
+[0m
+Connecting to MySQL (127.0.0.1:3306, database: calm_test)...
+[0;32m✓ Connected to MySQL
+[0m
+[0;34m
+================================================================================[0m
+[0;34m=== NYC Taxi Dataset - Calm vs MySQL Comparison ===[0m
+[0;34m================================================================================[0m
+[0;36m
+总共 186 个测试用例[0m
+[0;36m  - 自动生成测试: 170 条[0m
+[0;36m  - 手动编写测试: 16 条[0m
+
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT COUNT(*) FROM taxi_trips...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.730s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.265s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 2.75x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT COUNT(DISTINCT passenger_count) FROM taxi_t...[0m
+SQL: SELECT COUNT(DISTINCT passenger_count) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.466s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.399s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.17x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT COUNT(DISTINCT payment_type) FROM taxi_trip...[0m
+SQL: SELECT COUNT(DISTINCT payment_type) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.470s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.000s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1228.55x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT COUNT(DISTINCT pickup_location_id) FROM tax...[0m
+SQL: SELECT COUNT(DISTINCT pickup_location_id) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.455s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.005s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 98.86x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT COUNT(DISTINCT dropoff_location_id) FROM ta...[0m
+SQL: SELECT COUNT(DISTINCT dropoff_location_id) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.447s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.027s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 16.82x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT SUM(trip_distance) FROM taxi_trips...[0m
+SQL: SELECT SUM(trip_distance) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.452s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.343s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.32x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT SUM(fare_amount) FROM taxi_trips...[0m
+SQL: SELECT SUM(fare_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.452s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.344s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.31x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT SUM(tip_amount) FROM taxi_trips...[0m
+SQL: SELECT SUM(tip_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.449s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.341s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.32x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT SUM(tolls_amount) FROM taxi_trips...[0m
+SQL: SELECT SUM(tolls_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;31m  [Calm] ❌ Failed: (1064, 'SQL execution failed: Query execution error: Schema error: No field named tolls_amount. Valid fields are taxi_trips.id, taxi_trips.pickup_datetime, taxi_trips.dropoff_datetime, taxi_trips.passenger_count, taxi_trips.trip_distance, taxi_trips.fare_amount, taxi_trips.tip_amount, taxi_trips.total_amount, taxi_trips.payment_type, taxi_trips.pickup_location_id, taxi_trips.dropoff_location_id.')[0m
+[0;35m  [MySQL] Executing...[0m
+[0;31m  [MySQL] ❌ Failed: (1054, "Unknown column 'tolls_amount' in 'field list'")[0m
+
+[0;31m    ❌ Both queries failed[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT SUM(total_amount) FROM taxi_trips...[0m
+SQL: SELECT SUM(total_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.438s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.340s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.29x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT AVG(trip_distance) FROM taxi_trips...[0m
+SQL: SELECT AVG(trip_distance) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.439s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.345s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.27x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT AVG(fare_amount) FROM taxi_trips...[0m
+SQL: SELECT AVG(fare_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.441s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.346s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.28x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT AVG(tip_amount) FROM taxi_trips...[0m
+SQL: SELECT AVG(tip_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.444s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.347s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.28x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT AVG(passenger_count) FROM taxi_trips...[0m
+SQL: SELECT AVG(passenger_count) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.446s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.366s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.22x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT MIN(trip_distance) FROM taxi_trips...[0m
+SQL: SELECT MIN(trip_distance) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.441s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.354s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.25x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT MAX(trip_distance) FROM taxi_trips...[0m
+SQL: SELECT MAX(trip_distance) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.447s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.355s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.26x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT MIN(fare_amount) FROM taxi_trips...[0m
+SQL: SELECT MIN(fare_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.449s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.357s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.26x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT MAX(fare_amount) FROM taxi_trips...[0m
+SQL: SELECT MAX(fare_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.457s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.393s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.16x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT MIN(passenger_count) FROM taxi_trips...[0m
+SQL: SELECT MIN(passenger_count) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.446s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.358s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.25x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT MAX(passenger_count) FROM taxi_trips...[0m
+SQL: SELECT MAX(passenger_count) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.444s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.355s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.25x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT MIN(pickup_datetime), MAX(pickup_datetime) ...[0m
+SQL: SELECT MIN(pickup_datetime), MAX(pickup_datetime) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.454s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [datetime.datetime(2002, 12, 31, 22, 59, 39), datetime.datetime(2024, 2, 1, 0, 1, 15)]
+[0;35m    MySQL:[0m
+      [0] ['2003-01-01 06:59:39', '2024-02-01 08:01:15']
+[1;33m    ⚡ MySQL is 450.38x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT SUM(fare_amount), AVG(fare_amount) FROM tax...[0m
+SQL: SELECT SUM(fare_amount), AVG(fare_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.499s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.507s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 1.02x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT COUNT(*), SUM(trip_distance), AVG(trip_dist...[0m
+SQL: SELECT COUNT(*), SUM(trip_distance), AVG(trip_distance) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.507s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.376s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.35x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT MIN(fare_amount), MAX(fare_amount), AVG(far...[0m
+SQL: SELECT MIN(fare_amount), MAX(fare_amount), AVG(fare_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.445s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.407s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.09x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT COUNT(*), SUM(fare_amount), SUM(tip_amount)...[0m
+SQL: SELECT COUNT(*), SUM(fare_amount), SUM(tip_amount), SUM(total_amount) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.470s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.458s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.03x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.450s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.359s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.25x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT AVG(fare_amount) FROM taxi_trips WHERE fare...[0m
+SQL: SELECT AVG(fare_amount) FROM taxi_trips WHERE fare_amount > 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.458s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.371s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.23x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT SUM(tip_amount) FROM taxi_trips WHERE tip_a...[0m
+SQL: SELECT SUM(tip_amount) FROM taxi_trips WHERE tip_amount > 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.451s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.366s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.23x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 聚合函数: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count > 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.445s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.356s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.25x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, COUNT(*) FROM taxi_trips G...[0m
+SQL: SELECT passenger_count, COUNT(*) FROM taxi_trips GROUP BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.457s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.532s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.16x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, COUNT(*) FROM taxi_trips G...[0m
+SQL: SELECT passenger_count, COUNT(*) FROM taxi_trips GROUP BY passenger_count ORDER BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.460s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.606s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.32x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, COUNT(*) FROM taxi_trips G...[0m
+SQL: SELECT passenger_count, COUNT(*) FROM taxi_trips GROUP BY passenger_count ORDER BY COUNT(*) DESC
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.544s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.538s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[1;33m    ⚡ MySQL is 1.01x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT payment_type, COUNT(*) FROM taxi_trips GROU...[0m
+SQL: SELECT payment_type, COUNT(*) FROM taxi_trips GROUP BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.441s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 0.270s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[1;33m    ⚡ MySQL is 1.63x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT payment_type, COUNT(*) FROM taxi_trips GROU...[0m
+SQL: SELECT payment_type, COUNT(*) FROM taxi_trips GROUP BY payment_type ORDER BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.458s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 0.257s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[1;33m    ⚡ MySQL is 1.78x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT pickup_location_id, COUNT(*) FROM taxi_trip...[0m
+SQL: SELECT pickup_location_id, COUNT(*) FROM taxi_trips GROUP BY pickup_location_id LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.439s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.011s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [137, 32984]
+      [1] [125, 13708]
+      [2] [140, 66060]
+      [3] [49, 504]
+      [4] [241, 164]
+[0;35m    MySQL:[0m
+      [0] [1, 295]
+      [1] [2, 3]
+      [2] [3, 105]
+      [3] [4, 3568]
+      [4] [6, 21]
+[1;33m    ⚡ MySQL is 40.48x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT dropoff_location_id, COUNT(*) FROM taxi_tri...[0m
+SQL: SELECT dropoff_location_id, COUNT(*) FROM taxi_trips GROUP BY dropoff_location_id LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.453s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.036s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [229, 63990]
+      [1] [75, 35754]
+      [2] [254, 517]
+      [3] [20, 376]
+      [4] [139, 605]
+[0;35m    MySQL:[0m
+      [0] [1, 7176]
+      [1] [2, 4]
+      [2] [3, 247]
+      [3] [4, 11536]
+      [4] [5, 9]
+[1;33m    ⚡ MySQL is 12.54x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, AVG(trip_distance) FROM ta...[0m
+SQL: SELECT passenger_count, AVG(trip_distance) FROM taxi_trips GROUP BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.448s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.584s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.30x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, AVG(fare_amount) FROM taxi...[0m
+SQL: SELECT passenger_count, AVG(fare_amount) FROM taxi_trips GROUP BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.455s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.585s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.29x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, SUM(trip_distance) FROM ta...[0m
+SQL: SELECT passenger_count, SUM(trip_distance) FROM taxi_trips GROUP BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.458s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.587s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.28x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, SUM(fare_amount) FROM taxi...[0m
+SQL: SELECT passenger_count, SUM(fare_amount) FROM taxi_trips GROUP BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.455s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.584s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.28x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, MIN(fare_amount), MAX(fare...[0m
+SQL: SELECT passenger_count, MIN(fare_amount), MAX(fare_amount) FROM taxi_trips GROUP BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.459s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.593s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.29x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT payment_type, AVG(fare_amount) FROM taxi_tr...[0m
+SQL: SELECT payment_type, AVG(fare_amount) FROM taxi_trips GROUP BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.459s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 4.705s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[0;32m    ⚡ Calm is 10.25x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT payment_type, SUM(total_amount) FROM taxi_t...[0m
+SQL: SELECT payment_type, SUM(total_amount) FROM taxi_trips GROUP BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.458s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 4.793s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[0;32m    ⚡ Calm is 10.46x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, payment_type, COUNT(*) FRO...[0m
+SQL: SELECT passenger_count, payment_type, COUNT(*) FROM taxi_trips GROUP BY passenger_count, payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 35 rows in 0.447s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 35 rows in 0.695s[0m
+
+[0;32m    ✓ Results match (35 rows)[0m
+[0;32m    ⚡ Calm is 1.55x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, payment_type, COUNT(*) FRO...[0m
+SQL: SELECT passenger_count, payment_type, COUNT(*) FROM taxi_trips GROUP BY passenger_count, payment_type ORDER BY passenger_count, payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 35 rows in 0.462s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 35 rows in 0.688s[0m
+
+[0;32m    ✓ Results match (35 rows)[0m
+[0;32m    ⚡ Calm is 1.49x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT pickup_location_id, dropoff_location_id, CO...[0m
+SQL: SELECT pickup_location_id, dropoff_location_id, COUNT(*) FROM taxi_trips GROUP BY pickup_location_id, dropoff_location_id LIMIT 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 50 rows in 0.458s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 50 rows in 0.752s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [141, 263, 5016]
+      [1] [263, 263, 3494]
+      [2] [48, 236, 1457]
+      [3] [43, 246, 600]
+      [4] [79, 256, 248]
+[0;35m    MySQL:[0m
+      [0] [186, 79, 2666]
+      [1] [140, 236, 6099]
+      [2] [107, 137, 2490]
+      [3] [249, 232, 459]
+      [4] [170, 161, 3796]
+[0;32m    ⚡ Calm is 1.64x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT pickup_location_id, dropoff_location_id, AV...[0m
+SQL: SELECT pickup_location_id, dropoff_location_id, AVG(trip_distance) FROM taxi_trips GROUP BY pickup_location_id, dropoff_location_id LIMIT 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 50 rows in 0.471s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 50 rows in 0.793s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [229, 229, '0.54']
+      [1] [230, 209, '5.23']
+      [2] [263, 141, '0.92']
+      [3] [90, 161, '1.66']
+      [4] [141, 263, '1.01']
+[0;35m    MySQL:[0m
+      [0] [186, 79, '2.23']
+      [1] [140, 236, '1.31']
+      [2] [107, 137, '0.72']
+      [3] [249, 232, '2.17']
+      [4] [170, 161, '0.91']
+[0;32m    ⚡ Calm is 1.68x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, COUNT(*) as cnt FROM taxi_...[0m
+SQL: SELECT passenger_count, COUNT(*) as cnt FROM taxi_trips GROUP BY passenger_count HAVING cnt > 100
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 7 rows in 0.448s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 7 rows in 0.542s[0m
+
+[0;32m    ✓ Results match (7 rows)[0m
+[0;32m    ⚡ Calm is 1.21x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, COUNT(*) as cnt FROM taxi_...[0m
+SQL: SELECT passenger_count, COUNT(*) as cnt FROM taxi_trips GROUP BY passenger_count HAVING cnt > 1000
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 7 rows in 0.456s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 7 rows in 0.541s[0m
+
+[0;32m    ✓ Results match (7 rows)[0m
+[0;32m    ⚡ Calm is 1.19x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, AVG(trip_distance) as avg_...[0m
+SQL: SELECT passenger_count, AVG(trip_distance) as avg_dist FROM taxi_trips GROUP BY passenger_count HAVING avg_dist > 2.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 8 rows in 0.456s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 8 rows in 0.584s[0m
+
+[0;32m    ✓ Results match (8 rows)[0m
+[0;32m    ⚡ Calm is 1.28x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT payment_type, COUNT(*) as cnt FROM taxi_tri...[0m
+SQL: SELECT payment_type, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type HAVING cnt > 1000
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.447s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 0.268s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[1;33m    ⚡ MySQL is 1.67x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT pickup_location_id, COUNT(*) as cnt FROM ta...[0m
+SQL: SELECT pickup_location_id, COUNT(*) as cnt FROM taxi_trips GROUP BY pickup_location_id HAVING cnt > 100 ORDER BY cnt DESC LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.449s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.273s[0m
+
+[0;32m    ✓ Results match (20 rows)[0m
+[1;33m    ⚡ MySQL is 1.64x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT passenger_count, COUNT(*) as cnt, AVG(trip_...[0m
+SQL: SELECT passenger_count, COUNT(*) as cnt, AVG(trip_distance) as avg_dist, SUM(fare_amount) as total_fare FROM taxi_trips GROUP BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.472s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.639s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.35x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 GROUP BY: SELECT payment_type, COUNT(*) as cnt, AVG(fare_amo...[0m
+SQL: SELECT payment_type, COUNT(*) as cnt, AVG(fare_amount) as avg_fare, SUM(total_amount) as total FROM taxi_trips GROUP BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.469s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 5.007s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[0;32m    ⚡ Calm is 10.67x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 1
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.441s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.361s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.22x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 2
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.428s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.346s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.24x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 3
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.419s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.342s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.22x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE payment_type...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE payment_type = 1
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.437s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.199s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 2.20x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE payment_type...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE payment_type = 2
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.429s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.064s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 6.70x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count > 2
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.409s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.343s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.19x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count >= 2
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.419s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.348s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.20x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count < 5
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.444s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.349s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.27x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count <= 3
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.441s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.358s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.23x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count != 1
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.574s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.344s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.67x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 5.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.435s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.347s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.26x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance >= 10.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.431s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.341s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.26x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance < 1.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.431s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.348s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.24x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount ...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount > 10.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.441s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.362s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.22x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount ...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount >= 20.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.432s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.349s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.24x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount ...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount < 5.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.426s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.342s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.24x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count BETWEEN 2 AND 4
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.416s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.351s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.18x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance BETWEEN 1.0 AND 5.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.450s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.444s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.01x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount ...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount BETWEEN 10.0 AND 20.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.642s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.453s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.42x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count IN (1, 2, 3)
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.431s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.354s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.22x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count NOT IN (1, 2)
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.585s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.344s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.70x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE payment_type...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE payment_type IN (1, 2)
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.438s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.274s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.60x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 5.0 AND fare_amount > 10.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.450s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.396s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.14x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 1 AND trip_distance > 5.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.435s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.406s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.07x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count >= 2 AND fare_amount >= 20.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.432s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.392s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.10x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 1.0 AND trip_distance < 10.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.453s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.377s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.20x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count > 0 AND trip_distance > 0 AND fare_amount > 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.459s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.485s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 1.06x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 10.0 OR fare_amount > 20.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.522s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.475s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.10x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 1 OR passenger_count = 2
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.429s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.374s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.15x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE payment_type...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE payment_type = 1 OR payment_type = 2
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.439s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.289s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.52x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE NOT (passeng...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE NOT (passenger_count = 1)
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.577s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.350s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.65x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE NOT (trip_di...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE NOT (trip_distance > 10.0)
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.451s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.355s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.27x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count IS NOT NULL
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.567s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.345s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.64x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance IS NOT NULL
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.579s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.348s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.67x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount ...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount = 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.121s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.327s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 2.71x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE tip_amount =...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE tip_amount = 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.432s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.350s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.23x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance = 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.420s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.338s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.24x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.425s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.345s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.23x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE tip_amount >...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE tip_amount > 5.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.432s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.351s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.23x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE tip_amount >...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE tip_amount > 10.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.420s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.341s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.23x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 20.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.434s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.342s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.27x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 50.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.076s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.309s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 4.07x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount ...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount > 50.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.438s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.342s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.28x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 WHERE 条件: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount ...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount > 100.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.388s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.344s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.13x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY passenger_count ...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY passenger_count LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.573s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.824s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2928951', datetime.datetime(2024, 1, 23, 21, 55, 22), datetime.datetime(2024, 1, 23, 22, 12, 6), 0, '0.00', '21.60', '0.00', '25.60', 0, 230, 249]
+      [1] ['trip_2928956', datetime.datetime(2024, 1, 23, 21, 10, 12), datetime.datetime(2024, 1, 23, 21, 18, 23), 0, '0.00', '11.72', '0.00', '15.72', 0, 230, 186]
+      [2] ['trip_2928962', datetime.datetime(2024, 1, 23, 21, 20, 55), datetime.datetime(2024, 1, 23, 21, 37, 1), 0, '5.75', '24.47', '0.00', '28.47', 0, 161, 87]
+      [3] ['trip_2928965', datetime.datetime(2024, 1, 23, 21, 45, 21), datetime.datetime(2024, 1, 23, 21, 59, 53), 0, '1.98', '12.28', '0.00', '16.28', 0, 113, 170]
+      [4] ['trip_2928966', datetime.datetime(2024, 1, 23, 21, 9, 46), datetime.datetime(2024, 1, 23, 21, 29, 30), 0, '6.67', '25.18', '0.00', '26.68', 0, 40, 165]
+[0;35m    MySQL:[0m
+      [0] ['trip_1000172', '2024-01-13 01:03:42', '2024-01-13 01:08:10', 0, '0.50', '5.80', '2.45', '14.75', 1, 163, 142]
+      [1] ['trip_1000708', '2024-01-13 01:06:15', '2024-01-13 01:32:37', 0, '4.70', '27.50', '6.80', '40.80', 1, 68, 238]
+      [2] ['trip_1000053', '2024-01-13 01:09:45', '2024-01-13 01:17:52', 0, '1.10', '9.30', '3.15', '18.95', 1, 107, 162]
+      [3] ['trip_1000502', '2024-01-13 01:36:37', '2024-01-13 02:05:48', 0, '4.60', '22.60', '5.80', '34.90', 1, 163, 166]
+      [4] ['trip_1000334', '2024-01-13 01:13:00', '2024-01-13 01:25:40', 0, '2.20', '14.20', '3.50', '24.20', 1, 239, 50]
+[0;32m    ⚡ Calm is 1.44x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY passenger_count ...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY passenger_count DESC LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.587s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.831s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1398397', datetime.datetime(2024, 1, 17, 7, 17, 21), datetime.datetime(2024, 1, 17, 7, 26, 21), 9, '1.80', '11.40', '3.05', '18.45', 1, 90, 161]
+      [1] ['trip_221499', datetime.datetime(2024, 1, 3, 20, 28, 59), datetime.datetime(2024, 1, 3, 22, 16, 2), 8, '0.16', '87.00', '17.85', '107.10', 1, 132, 237]
+      [2] ['trip_71242', datetime.datetime(2024, 1, 2, 0, 47, 22), datetime.datetime(2024, 1, 2, 0, 47, 24), 8, '0.14', '87.00', '22.12', '110.62', 1, 79, 264]
+      [3] ['trip_68688', datetime.datetime(2024, 1, 1, 22, 18, 27), datetime.datetime(2024, 1, 1, 22, 18, 29), 8, '0.09', '87.00', '17.70', '106.20', 1, 264, 264]
+      [4] ['trip_581356', datetime.datetime(2024, 1, 7, 23, 46, 57), datetime.datetime(2024, 1, 7, 23, 47), 8, '0.07', '87.00', '17.70', '106.20', 1, 41, 41]
+[0;35m    MySQL:[0m
+      [0] ['trip_1398397', '2024-01-17 15:17:21', '2024-01-17 15:26:21', 9, '1.80', '11.40', '3.05', '18.45', 1, 90, 161]
+      [1] ['trip_127415', '2024-01-03 02:31:18', '2024-01-03 02:31:32', 8, '0.01', '88.00', '10.00', '102.00', 1, 164, 164]
+      [2] ['trip_1108761', '2024-01-14 02:01:57', '2024-01-14 02:44:18', 8, '15.25', '88.00', '18.40', '110.40', 1, 132, 229]
+      [3] ['trip_1076155', '2024-01-13 21:36:00', '2024-01-13 21:36:03', 8, '0.03', '87.00', '17.70', '106.20', 1, 230, 264]
+      [4] ['trip_1121050', '2024-01-14 04:55:33', '2024-01-14 04:55:36', 8, '0.09', '87.00', '10.00', '98.50', 1, 68, 264]
+[0;32m    ⚡ Calm is 1.42x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY trip_distance LI...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY trip_distance LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.578s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.813s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2945505', datetime.datetime(2024, 1, 27, 14, 59, 46), datetime.datetime(2024, 1, 27, 15, 14, 21), 0, '0.00', '17.68', '0.00', '21.68', 0, 262, 161]
+      [1] ['trip_2945510', datetime.datetime(2024, 1, 27, 14, 12, 35), datetime.datetime(2024, 1, 27, 14, 12, 58), 0, '0.00', '10.16', '0.00', '14.16', 0, 263, 263]
+      [2] ['trip_2945333', datetime.datetime(2024, 1, 27, 12, 28, 54), datetime.datetime(2024, 1, 27, 12, 44, 52), 0, '0.00', '16.05', '0.00', '20.05', 0, 75, 229]
+      [3] ['trip_2945517', datetime.datetime(2024, 1, 27, 14, 55, 37), datetime.datetime(2024, 1, 27, 15, 7, 30), 0, '0.00', '19.64', '0.00', '28.08', 0, 223, 74]
+      [4] ['trip_2945300', datetime.datetime(2024, 1, 27, 12, 8, 8), datetime.datetime(2024, 1, 27, 12, 23, 53), 0, '0.00', '16.95', '0.00', '20.95', 0, 262, 230]
+[0;35m    MySQL:[0m
+      [0] ['trip_1000017', '2024-01-13 01:58:42', '2024-01-13 02:15:34', 3, '0.00', '14.20', '4.14', '24.84', 1, 170, 48]
+      [1] ['trip_100016', '2024-01-02 21:32:00', '2024-01-02 21:32:06', 2, '0.00', '-70.00', '0.00', '-74.00', 3, 234, 234]
+      [2] ['trip_1000016', '2024-01-13 01:40:28', '2024-01-13 01:43:23', 2, '0.00', '4.40', '2.18', '13.08', 1, 79, 79]
+      [3] ['trip_100017', '2024-01-02 21:32:00', '2024-01-02 21:32:06', 2, '0.00', '70.00', '0.00', '74.00', 3, 234, 234]
+      [4] ['trip_1000131', '2024-01-13 01:04:49', '2024-01-13 01:05:00', 1, '0.00', '3.00', '0.00', '13.75', 2, 138, 138]
+[0;32m    ⚡ Calm is 1.41x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY trip_distance DE...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY trip_distance DESC LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.575s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.820s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2958079', datetime.datetime(2024, 1, 30, 6, 37), datetime.datetime(2024, 1, 30, 6, 50), 0, '312722.30', '14.46', '3.69', '22.15', 0, 151, 162]
+      [1] ['trip_2934895', datetime.datetime(2024, 1, 25, 8, 39), datetime.datetime(2024, 1, 25, 9, 6), 0, '97793.92', '29.71', '3.30', '36.31', 0, 4, 13]
+      [2] ['trip_2911232', datetime.datetime(2024, 1, 20, 8, 1), datetime.datetime(2024, 1, 20, 8, 26), 0, '82015.45', '16.56', '1.00', '21.56', 0, 40, 43]
+      [3] ['trip_2920143', datetime.datetime(2024, 1, 21, 11, 58), datetime.datetime(2024, 1, 21, 12, 12), 0, '72975.97', '12.70', '3.34', '20.04', 0, 209, 211]
+      [4] ['trip_2891991', datetime.datetime(2024, 1, 17, 8, 41), datetime.datetime(2024, 1, 17, 9, 23), 0, '71752.26', '41.06', '4.51', '49.57', 0, 33, 161]
+[0;35m    MySQL:[0m
+      [0] ['trip_2958079', '2024-01-30 14:37:00', '2024-01-30 14:50:00', 0, '312722.30', '14.46', '3.69', '22.15', 0, 151, 162]
+      [1] ['trip_2934895', '2024-01-25 16:39:00', '2024-01-25 17:06:00', 0, '97793.92', '29.71', '3.30', '36.31', 0, 4, 13]
+      [2] ['trip_2911232', '2024-01-20 16:01:00', '2024-01-20 16:26:00', 0, '82015.45', '16.56', '1.00', '21.56', 0, 40, 43]
+      [3] ['trip_2920143', '2024-01-21 19:58:00', '2024-01-21 20:12:00', 0, '72975.97', '12.70', '3.34', '20.04', 0, 209, 211]
+      [4] ['trip_2891991', '2024-01-17 16:41:00', '2024-01-17 17:23:00', 0, '71752.26', '41.06', '4.51', '49.57', 0, 33, 161]
+[0;32m    ⚡ Calm is 1.43x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY fare_amount LIMI...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY fare_amount LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.577s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.814s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1916204', datetime.datetime(2024, 1, 22, 16, 40, 43), datetime.datetime(2024, 1, 22, 19, 11, 20), 1, '157.25', '-899.00', '0.00', '-900.00', 2, 265, 265]
+      [1] ['trip_1518327', datetime.datetime(2024, 1, 18, 11, 20, 40), datetime.datetime(2024, 1, 18, 11, 20, 56), 4, '0.00', '-800.00', '0.00', '-801.00', 3, 33, 33]
+      [2] ['trip_1518329', datetime.datetime(2024, 1, 18, 11, 26, 33), datetime.datetime(2024, 1, 18, 11, 26, 42), 4, '0.00', '-800.00', '0.00', '-801.00', 3, 33, 33]
+      [3] ['trip_2354216', datetime.datetime(2024, 1, 26, 23, 59, 9), datetime.datetime(2024, 1, 27, 2, 45, 39), 1, '120.76', '-744.30', '0.00', '-753.74', 4, 143, 265]
+      [4] ['trip_1858567', datetime.datetime(2024, 1, 21, 20, 33, 50), datetime.datetime(2024, 1, 21, 20, 33, 56), 1, '0.00', '-709.00', '0.00', '-710.00', 2, 265, 265]
+[0;35m    MySQL:[0m
+      [0] ['trip_1916204', '2024-01-23 00:40:43', '2024-01-23 03:11:20', 1, '157.25', '-899.00', '0.00', '-900.00', 2, 265, 265]
+      [1] ['trip_1518327', '2024-01-18 19:20:40', '2024-01-18 19:20:56', 4, '0.00', '-800.00', '0.00', '-801.00', 3, 33, 33]
+      [2] ['trip_1518329', '2024-01-18 19:26:33', '2024-01-18 19:26:42', 4, '0.00', '-800.00', '0.00', '-801.00', 3, 33, 33]
+      [3] ['trip_2354216', '2024-01-27 07:59:09', '2024-01-27 10:45:39', 1, '120.76', '-744.30', '0.00', '-753.74', 4, 143, 265]
+      [4] ['trip_1858567', '2024-01-22 04:33:50', '2024-01-22 04:33:56', 1, '0.00', '-709.00', '0.00', '-710.00', 2, 265, 265]
+[0;32m    ⚡ Calm is 1.41x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY fare_amount DESC...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY fare_amount DESC LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.584s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.822s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1714869', datetime.datetime(2024, 1, 20, 11, 18, 47), datetime.datetime(2024, 1, 20, 11, 18, 47), 0, '0.00', '5000.00', '0.00', '5000.00', 3, 264, 264]
+      [1] ['trip_1714870', datetime.datetime(2024, 1, 20, 11, 19, 33), datetime.datetime(2024, 1, 20, 11, 19, 33), 0, '0.00', '5000.00', '0.00', '5000.00', 3, 264, 264]
+      [2] ['trip_1714873', datetime.datetime(2024, 1, 20, 11, 27, 48), datetime.datetime(2024, 1, 20, 11, 27, 48), 0, '0.00', '2500.00', '0.00', '2500.00', 1, 264, 264]
+      [3] ['trip_2084560', datetime.datetime(2024, 1, 24, 13, 44, 43), datetime.datetime(2024, 1, 24, 13, 44, 43), 0, '0.00', '2500.00', '0.00', '2500.00', 1, 264, 264]
+      [4] ['trip_1714871', datetime.datetime(2024, 1, 20, 11, 20, 15), datetime.datetime(2024, 1, 20, 11, 20, 15), 0, '0.00', '2500.00', '0.00', '2500.00', 3, 264, 264]
+[0;35m    MySQL:[0m
+      [0] ['trip_1714869', '2024-01-20 19:18:47', '2024-01-20 19:18:47', 0, '0.00', '5000.00', '0.00', '5000.00', 3, 264, 264]
+      [1] ['trip_1714870', '2024-01-20 19:19:33', '2024-01-20 19:19:33', 0, '0.00', '5000.00', '0.00', '5000.00', 3, 264, 264]
+      [2] ['trip_1714873', '2024-01-20 19:27:48', '2024-01-20 19:27:48', 0, '0.00', '2500.00', '0.00', '2500.00', 1, 264, 264]
+      [3] ['trip_2084560', '2024-01-24 21:44:43', '2024-01-24 21:44:43', 0, '0.00', '2500.00', '0.00', '2500.00', 1, 264, 264]
+      [4] ['trip_1714871', '2024-01-20 19:20:15', '2024-01-20 19:20:15', 0, '0.00', '2500.00', '0.00', '2500.00', 3, 264, 264]
+[0;32m    ⚡ Calm is 1.41x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY total_amount LIM...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY total_amount LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.576s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.812s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1916204', datetime.datetime(2024, 1, 22, 16, 40, 43), datetime.datetime(2024, 1, 22, 19, 11, 20), 1, '157.25', '-899.00', '0.00', '-900.00', 2, 265, 265]
+      [1] ['trip_1518327', datetime.datetime(2024, 1, 18, 11, 20, 40), datetime.datetime(2024, 1, 18, 11, 20, 56), 4, '0.00', '-800.00', '0.00', '-801.00', 3, 33, 33]
+      [2] ['trip_1518329', datetime.datetime(2024, 1, 18, 11, 26, 33), datetime.datetime(2024, 1, 18, 11, 26, 42), 4, '0.00', '-800.00', '0.00', '-801.00', 3, 33, 33]
+      [3] ['trip_2354216', datetime.datetime(2024, 1, 26, 23, 59, 9), datetime.datetime(2024, 1, 27, 2, 45, 39), 1, '120.76', '-744.30', '0.00', '-753.74', 4, 143, 265]
+      [4] ['trip_1858567', datetime.datetime(2024, 1, 21, 20, 33, 50), datetime.datetime(2024, 1, 21, 20, 33, 56), 1, '0.00', '-709.00', '0.00', '-710.00', 2, 265, 265]
+[0;35m    MySQL:[0m
+      [0] ['trip_1916204', '2024-01-23 00:40:43', '2024-01-23 03:11:20', 1, '157.25', '-899.00', '0.00', '-900.00', 2, 265, 265]
+      [1] ['trip_1518329', '2024-01-18 19:26:33', '2024-01-18 19:26:42', 4, '0.00', '-800.00', '0.00', '-801.00', 3, 33, 33]
+      [2] ['trip_1518327', '2024-01-18 19:20:40', '2024-01-18 19:20:56', 4, '0.00', '-800.00', '0.00', '-801.00', 3, 33, 33]
+      [3] ['trip_2354216', '2024-01-27 07:59:09', '2024-01-27 10:45:39', 1, '120.76', '-744.30', '0.00', '-753.74', 4, 143, 265]
+      [4] ['trip_1858567', '2024-01-22 04:33:50', '2024-01-22 04:33:56', 1, '0.00', '-709.00', '0.00', '-710.00', 2, 265, 265]
+[0;32m    ⚡ Calm is 1.41x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY total_amount DES...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY total_amount DESC LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.587s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.825s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1714869', datetime.datetime(2024, 1, 20, 11, 18, 47), datetime.datetime(2024, 1, 20, 11, 18, 47), 0, '0.00', '5000.00', '0.00', '5000.00', 3, 264, 264]
+      [1] ['trip_1714870', datetime.datetime(2024, 1, 20, 11, 19, 33), datetime.datetime(2024, 1, 20, 11, 19, 33), 0, '0.00', '5000.00', '0.00', '5000.00', 3, 264, 264]
+      [2] ['trip_1714873', datetime.datetime(2024, 1, 20, 11, 27, 48), datetime.datetime(2024, 1, 20, 11, 27, 48), 0, '0.00', '2500.00', '0.00', '2500.00', 1, 264, 264]
+      [3] ['trip_2084560', datetime.datetime(2024, 1, 24, 13, 44, 43), datetime.datetime(2024, 1, 24, 13, 44, 43), 0, '0.00', '2500.00', '0.00', '2500.00', 1, 264, 264]
+      [4] ['trip_1714871', datetime.datetime(2024, 1, 20, 11, 20, 15), datetime.datetime(2024, 1, 20, 11, 20, 15), 0, '0.00', '2500.00', '0.00', '2500.00', 3, 264, 264]
+[0;35m    MySQL:[0m
+      [0] ['trip_1714870', '2024-01-20 19:19:33', '2024-01-20 19:19:33', 0, '0.00', '5000.00', '0.00', '5000.00', 3, 264, 264]
+      [1] ['trip_1714869', '2024-01-20 19:18:47', '2024-01-20 19:18:47', 0, '0.00', '5000.00', '0.00', '5000.00', 3, 264, 264]
+      [2] ['trip_1714873', '2024-01-20 19:27:48', '2024-01-20 19:27:48', 0, '0.00', '2500.00', '0.00', '2500.00', 1, 264, 264]
+      [3] ['trip_2084560', '2024-01-24 21:44:43', '2024-01-24 21:44:43', 0, '0.00', '2500.00', '0.00', '2500.00', 1, 264, 264]
+      [4] ['trip_1714871', '2024-01-20 19:20:15', '2024-01-20 19:20:15', 0, '0.00', '2500.00', '0.00', '2500.00', 3, 264, 264]
+[0;32m    ⚡ Calm is 1.41x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY pickup_datetime ...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY pickup_datetime LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.583s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_53119', datetime.datetime(2002, 12, 31, 22, 59, 39), datetime.datetime(2002, 12, 31, 23, 5, 41), 1, '0.63', '-6.50', '0.00', '-10.50', 3, 170, 170]
+      [1] ['trip_53120', datetime.datetime(2002, 12, 31, 22, 59, 39), datetime.datetime(2002, 12, 31, 23, 5, 41), 1, '0.63', '6.50', '0.00', '10.50', 3, 170, 170]
+      [2] ['trip_2558056', datetime.datetime(2009, 1, 1, 0, 24, 9), datetime.datetime(2009, 1, 1, 1, 13), 2, '10.88', '50.60', '0.00', '68.29', 2, 138, 264]
+      [3] ['trip_1230169', datetime.datetime(2009, 1, 1, 23, 30, 39), datetime.datetime(2009, 1, 2, 0, 1, 39), 1, '10.99', '45.00', '0.00', '50.00', 2, 237, 264]
+      [4] ['trip_10915', datetime.datetime(2009, 1, 1, 23, 58, 40), datetime.datetime(2009, 1, 2, 0, 1, 40), 1, '0.46', '4.40', '0.00', '9.40', 2, 137, 264]
+[0;35m    MySQL:[0m
+      [0] ['trip_53119', '2003-01-01 06:59:39', '2003-01-01 07:05:41', 1, '0.63', '-6.50', '0.00', '-10.50', 3, 170, 170]
+      [1] ['trip_53120', '2003-01-01 06:59:39', '2003-01-01 07:05:41', 1, '0.63', '6.50', '0.00', '10.50', 3, 170, 170]
+      [2] ['trip_2558056', '2009-01-01 08:24:09', '2009-01-01 09:13:00', 2, '10.88', '50.60', '0.00', '68.29', 2, 138, 264]
+      [3] ['trip_1230169', '2009-01-02 07:30:39', '2009-01-02 08:01:39', 1, '10.99', '45.00', '0.00', '50.00', 2, 237, 264]
+      [4] ['trip_10915', '2009-01-02 07:58:40', '2009-01-02 08:01:40', 1, '0.46', '4.40', '0.00', '9.40', 2, 137, 264]
+[1;33m    ⚡ MySQL is 486.04x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY pickup_datetime ...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY pickup_datetime DESC LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.560s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.002s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2823026', datetime.datetime(2024, 2, 1, 0, 1, 15), datetime.datetime(2024, 2, 1, 0, 6, 30), 1, '1.10', '7.90', '2.58', '15.48', 1, 161, 234]
+      [1] ['trip_2822633', datetime.datetime(2024, 2, 1, 0, 0, 39), datetime.datetime(2024, 2, 1, 0, 12, 8), 5, '2.22', '13.50', '3.70', '22.20', 1, 186, 79]
+      [2] ['trip_2822693', datetime.datetime(2024, 2, 1, 0, 0, 17), datetime.datetime(2024, 2, 1, 0, 20, 13), 1, '8.93', '36.60', '0.00', '52.79', 2, 138, 152]
+      [3] ['trip_2823129', datetime.datetime(2024, 1, 31, 23, 59, 55), datetime.datetime(2024, 2, 1, 0, 9, 38), 1, '1.66', '12.10', '2.00', '19.10', 1, 68, 246]
+      [4] ['trip_2823379', datetime.datetime(2024, 1, 31, 23, 59, 54), datetime.datetime(2024, 2, 1, 0, 0, 6), 1, '0.00', '3.00', '0.00', '5.50', 2, 70, 70]
+[0;35m    MySQL:[0m
+      [0] ['trip_2823026', '2024-02-01 08:01:15', '2024-02-01 08:06:30', 1, '1.10', '7.90', '2.58', '15.48', 1, 161, 234]
+      [1] ['trip_2822633', '2024-02-01 08:00:39', '2024-02-01 08:12:08', 5, '2.22', '13.50', '3.70', '22.20', 1, 186, 79]
+      [2] ['trip_2822693', '2024-02-01 08:00:17', '2024-02-01 08:20:13', 1, '8.93', '36.60', '0.00', '52.79', 2, 138, 152]
+      [3] ['trip_2823129', '2024-02-01 07:59:55', '2024-02-01 08:09:38', 1, '1.66', '12.10', '2.00', '19.10', 1, 68, 246]
+      [4] ['trip_2823379', '2024-02-01 07:59:54', '2024-02-01 08:00:06', 1, '0.00', '3.00', '0.00', '5.50', 2, 70, 70]
+[1;33m    ⚡ MySQL is 251.90x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY passenger_count,...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY passenger_count, trip_distance LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.573s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.834s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2857406', datetime.datetime(2024, 1, 9, 17, 57, 4), datetime.datetime(2024, 1, 9, 18, 7, 43), 0, '0.00', '16.01', '0.00', '20.01', 0, 233, 113]
+      [1] ['trip_2857455', datetime.datetime(2024, 1, 9, 17, 47, 56), datetime.datetime(2024, 1, 9, 17, 58, 54), 0, '0.00', '15.38', '0.00', '19.38', 0, 87, 231]
+      [2] ['trip_2857323', datetime.datetime(2024, 1, 9, 17, 45, 58), datetime.datetime(2024, 1, 9, 17, 53, 56), 0, '0.00', '11.84', '0.00', '15.84', 0, 125, 144]
+      [3] ['trip_2857422', datetime.datetime(2024, 1, 9, 17, 52, 56), datetime.datetime(2024, 1, 9, 18, 0, 55), 0, '0.00', '12.22', '0.00', '16.22', 0, 163, 239]
+      [4] ['trip_2857382', datetime.datetime(2024, 1, 9, 17, 51, 16), datetime.datetime(2024, 1, 9, 18, 2, 33), 0, '0.00', '16.84', '0.00', '20.84', 0, 87, 114]
+[0;35m    MySQL:[0m
+      [0] ['trip_1036281', '2024-01-13 07:17:18', '2024-01-13 07:19:06', 0, '0.00', '3.70', '0.00', '8.70', 4, 144, 114]
+      [1] ['trip_1039814', '2024-01-13 08:06:12', '2024-01-13 08:06:19', 0, '0.00', '23.00', '0.00', '25.00', 2, 236, 236]
+      [2] ['trip_1017993', '2024-01-13 04:04:32', '2024-01-13 04:09:30', 0, '0.00', '5.80', '0.00', '10.80', 4, 233, 233]
+      [3] ['trip_1006679', '2024-01-13 02:18:26', '2024-01-13 02:18:34', 0, '0.00', '70.00', '17.15', '103.15', 1, 100, 100]
+      [4] ['trip_102007', '2024-01-02 22:35:26', '2024-01-02 22:36:41', 0, '0.00', '3.70', '0.00', '7.70', 2, 88, 261]
+[0;32m    ⚡ Calm is 1.45x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY passenger_count ...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY passenger_count DESC, trip_distance DESC LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.572s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.846s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1398397', datetime.datetime(2024, 1, 17, 7, 17, 21), datetime.datetime(2024, 1, 17, 7, 26, 21), 9, '1.80', '11.40', '3.05', '18.45', 1, 90, 161]
+      [1] ['trip_1869534', datetime.datetime(2024, 1, 22, 1, 32, 58), datetime.datetime(2024, 1, 22, 1, 57, 22), 8, '17.74', '87.00', '17.70', '106.20', 1, 132, 151]
+      [2] ['trip_1108761', datetime.datetime(2024, 1, 13, 18, 1, 57), datetime.datetime(2024, 1, 13, 18, 44, 18), 8, '15.25', '88.00', '18.40', '110.40', 1, 132, 229]
+      [3] ['trip_1015772', datetime.datetime(2024, 1, 12, 19, 13, 18), datetime.datetime(2024, 1, 12, 19, 50, 11), 8, '13.71', '87.00', '10.00', '101.00', 1, 130, 48]
+      [4] ['trip_76711', datetime.datetime(2024, 1, 2, 7, 41, 50), datetime.datetime(2024, 1, 2, 8, 4, 16), 8, '13.36', '87.00', '0.00', '97.05', 1, 145, 216]
+[0;35m    MySQL:[0m
+      [0] ['trip_1398397', '2024-01-17 15:17:21', '2024-01-17 15:26:21', 9, '1.80', '11.40', '3.05', '18.45', 1, 90, 161]
+      [1] ['trip_1869534', '2024-01-22 09:32:58', '2024-01-22 09:57:22', 8, '17.74', '87.00', '17.70', '106.20', 1, 132, 151]
+      [2] ['trip_1108761', '2024-01-14 02:01:57', '2024-01-14 02:44:18', 8, '15.25', '88.00', '18.40', '110.40', 1, 132, 229]
+      [3] ['trip_1015772', '2024-01-13 03:13:18', '2024-01-13 03:50:11', 8, '13.71', '87.00', '10.00', '101.00', 1, 130, 48]
+      [4] ['trip_76711', '2024-01-02 15:41:50', '2024-01-02 16:04:16', 8, '13.36', '87.00', '0.00', '97.05', 1, 145, 216]
+[0;32m    ⚡ Calm is 1.48x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY payment_type, fa...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY payment_type, fare_amount LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.574s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.835s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2927270', datetime.datetime(2024, 1, 23, 12, 15, 52), datetime.datetime(2024, 1, 23, 12, 16, 56), 0, '0.06', '-67.15', '9.02', '-54.13', 0, 230, 230]
+      [1] ['trip_2844756', datetime.datetime(2024, 1, 5, 23, 37, 17), datetime.datetime(2024, 1, 5, 23, 58), 0, '9.20', '-31.74', '10.13', '-10.67', 0, 137, 14]
+      [2] ['trip_2916488', datetime.datetime(2024, 1, 20, 23, 54, 12), datetime.datetime(2024, 1, 21, 0, 31, 50), 0, '17.89', '-15.45', '0.00', '9.49', 0, 246, 206]
+      [3] ['trip_2834038', datetime.datetime(2024, 1, 1, 15, 38, 48), datetime.datetime(2024, 1, 1, 16, 8, 59), 0, '11.08', '-13.89', '0.00', '3.99', 0, 206, 21]
+      [4] ['trip_2953557', datetime.datetime(2024, 1, 28, 13, 22, 21), datetime.datetime(2024, 1, 28, 13, 42, 2), 0, '1.59', '-8.49', '0.00', '2.45', 0, 145, 161]
+[0;35m    MySQL:[0m
+      [0] ['trip_2927270', '2024-01-23 20:15:52', '2024-01-23 20:16:56', 0, '0.06', '-67.15', '9.02', '-54.13', 0, 230, 230]
+      [1] ['trip_2844756', '2024-01-06 07:37:17', '2024-01-06 07:58:00', 0, '9.20', '-31.74', '10.13', '-10.67', 0, 137, 14]
+      [2] ['trip_2916488', '2024-01-21 07:54:12', '2024-01-21 08:31:50', 0, '17.89', '-15.45', '0.00', '9.49', 0, 246, 206]
+      [3] ['trip_2834038', '2024-01-01 23:38:48', '2024-01-02 00:08:59', 0, '11.08', '-13.89', '0.00', '3.99', 0, 206, 21]
+      [4] ['trip_2953557', '2024-01-28 21:22:21', '2024-01-28 21:42:02', 0, '1.59', '-8.49', '0.00', '2.45', 0, 145, 161]
+[0;32m    ⚡ Calm is 1.45x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY pickup_location_...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY pickup_location_id, trip_distance LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.581s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.834s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2156819', datetime.datetime(2024, 1, 25, 7, 48, 33), datetime.datetime(2024, 1, 25, 7, 48, 52), 1, '0.00', '95.00', '24.84', '149.03', 1, 1, 1]
+      [1] ['trip_2318768', datetime.datetime(2024, 1, 26, 17, 15, 35), datetime.datetime(2024, 1, 26, 17, 15, 44), 2, '0.00', '70.00', '0.00', '76.00', 3, 1, 1]
+      [2] ['trip_2263757', datetime.datetime(2024, 1, 26, 7, 3, 14), datetime.datetime(2024, 1, 26, 7, 3, 26), 1, '0.00', '95.00', '24.60', '147.60', 1, 1, 1]
+      [3] ['trip_2305305', datetime.datetime(2024, 1, 26, 15, 15, 56), datetime.datetime(2024, 1, 26, 15, 16, 3), 3, '0.00', '79.00', '5.00', '85.00', 1, 1, 1]
+      [4] ['trip_2193453', datetime.datetime(2024, 1, 25, 14, 56, 18), datetime.datetime(2024, 1, 25, 14, 56, 27), 1, '0.00', '120.00', '10.00', '131.00', 1, 1, 1]
+[0;35m    MySQL:[0m
+      [0] ['trip_1015774', '2024-01-13 03:28:24', '2024-01-13 03:28:38', 1, '0.00', '100.00', '25.20', '151.20', 1, 1, 1]
+      [1] ['trip_107319', '2024-01-02 23:22:24', '2024-01-02 23:22:33', 4, '0.00', '120.00', '0.00', '121.00', 1, 1, 1]
+      [2] ['trip_1008555', '2024-01-13 01:59:16', '2024-01-13 01:59:19', 3, '0.00', '120.00', '0.00', '121.00', 1, 1, 264]
+      [3] ['trip_1021582', '2024-01-13 04:48:34', '2024-01-13 04:48:52', 1, '0.00', '3.00', '0.00', '5.00', 2, 1, 1]
+      [4] ['trip_1058800', '2024-01-13 18:50:47', '2024-01-13 18:50:54', 1, '0.00', '100.00', '0.05', '101.05', 1, 1, 1]
+[0;32m    ⚡ Calm is 1.44x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT passenger_count, trip_distance FROM taxi_tr...[0m
+SQL: SELECT passenger_count, trip_distance FROM taxi_trips ORDER BY passenger_count LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.451s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.467s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [0, '0.00']
+      [1] [0, '5.36']
+      [2] [0, '0.62']
+      [3] [0, '2.31']
+      [4] [0, '0.00']
+[0;35m    MySQL:[0m
+      [0] [0, '2.20']
+      [1] [0, '0.50']
+      [2] [0, '2.00']
+      [3] [0, '1.00']
+      [4] [0, '1.50']
+[0;32m    ⚡ Calm is 1.04x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT passenger_count, fare_amount FROM taxi_trip...[0m
+SQL: SELECT passenger_count, fare_amount FROM taxi_trips ORDER BY fare_amount DESC LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.457s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.452s[0m
+
+[0;32m    ✓ Results match (20 rows)[0m
+[1;33m    ⚡ MySQL is 1.01x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT pickup_location_id, dropoff_location_id, tr...[0m
+SQL: SELECT pickup_location_id, dropoff_location_id, trip_distance FROM taxi_trips ORDER BY trip_distance DESC LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.463s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.494s[0m
+
+[0;32m    ✓ Results match (20 rows)[0m
+[0;32m    ⚡ Calm is 1.07x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT payment_type, total_amount FROM taxi_trips ...[0m
+SQL: SELECT payment_type, total_amount FROM taxi_trips ORDER BY total_amount DESC LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.453s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.454s[0m
+
+[0;32m    ✓ Results match (20 rows)[0m
+[0;32m    ⚡ Calm is 1.00x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 5...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 5
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.010s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1610000', datetime.datetime(2024, 1, 19, 8, 5, 9), datetime.datetime(2024, 1, 19, 8, 13, 18), 2, '1.04', '70.00', '0.00', '74.00', 2, 262, 236]
+      [1] ['trip_1610007', datetime.datetime(2024, 1, 19, 8, 7, 36), datetime.datetime(2024, 1, 19, 8, 37, 9), 1, '4.30', '28.20', '2.00', '34.20', 1, 263, 68]
+      [2] ['trip_1610012', datetime.datetime(2024, 1, 19, 8, 43, 28), datetime.datetime(2024, 1, 19, 9, 4, 55), 1, '4.00', '23.30', '6.82', '34.12', 1, 262, 186]
+      [3] ['trip_1610014', datetime.datetime(2024, 1, 19, 8, 15, 48), datetime.datetime(2024, 1, 19, 8, 26, 14), 1, '1.55', '11.40', '3.08', '18.48', 1, 237, 239]
+      [4] ['trip_1610017', datetime.datetime(2024, 1, 19, 8, 18, 57), datetime.datetime(2024, 1, 19, 8, 31, 12), 5, '1.74', '12.80', '0.00', '16.80', 2, 161, 113]
+[0;35m    MySQL:[0m
+      [0] ['trip_0', '2024-01-01 08:57:55', '2024-01-01 09:17:43', 1, '1.72', '17.70', '0.00', '22.70', 2, 186, 79]
+      [1] ['trip_1', '2024-01-01 08:03:00', '2024-01-01 08:09:36', 1, '1.80', '10.00', '3.75', '18.75', 1, 140, 236]
+      [2] ['trip_10', '2024-01-01 08:35:22', '2024-01-01 08:41:41', 2, '0.75', '7.90', '0.00', '12.90', 1, 107, 137]
+      [3] ['trip_100', '2024-01-01 08:18:24', '2024-01-01 08:30:39', 1, '2.16', '13.50', '0.00', '18.50', 4, 249, 232]
+      [4] ['trip_1000', '2024-01-01 08:14:22', '2024-01-01 08:21:53', 1, '1.17', '9.30', '0.00', '14.30', 4, 170, 161]
+[1;33m    ⚡ MySQL is 13.24x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 20...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.010s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2820002', datetime.datetime(2024, 1, 31, 22, 36, 17), datetime.datetime(2024, 1, 31, 22, 44, 25), 1, '1.80', '10.70', '3.10', '18.80', 1, 236, 142]
+      [1] ['trip_2820003', datetime.datetime(2024, 1, 31, 22, 56, 45), datetime.datetime(2024, 1, 31, 23, 20, 22), 1, '5.70', '28.90', '5.00', '38.90', 1, 48, 87]
+      [2] ['trip_2820013', datetime.datetime(2024, 1, 31, 22, 8, 54), datetime.datetime(2024, 1, 31, 22, 20, 2), 2, '1.66', '12.10', '3.42', '20.52', 1, 261, 211]
+      [3] ['trip_2820018', datetime.datetime(2024, 1, 31, 22, 23, 40), datetime.datetime(2024, 1, 31, 22, 28, 28), 1, '0.99', '7.90', '2.58', '15.48', 1, 239, 151]
+      [4] ['trip_2820021', datetime.datetime(2024, 1, 31, 22, 1, 18), datetime.datetime(2024, 1, 31, 22, 20, 55), 1, '4.10', '22.60', '5.00', '39.54', 1, 161, 112]
+[0;35m    MySQL:[0m
+      [0] ['trip_0', '2024-01-01 08:57:55', '2024-01-01 09:17:43', 1, '1.72', '17.70', '0.00', '22.70', 2, 186, 79]
+      [1] ['trip_1', '2024-01-01 08:03:00', '2024-01-01 08:09:36', 1, '1.80', '10.00', '3.75', '18.75', 1, 140, 236]
+      [2] ['trip_10', '2024-01-01 08:35:22', '2024-01-01 08:41:41', 2, '0.75', '7.90', '0.00', '12.90', 1, 107, 137]
+      [3] ['trip_100', '2024-01-01 08:18:24', '2024-01-01 08:30:39', 1, '2.16', '13.50', '0.00', '18.50', 4, 249, 232]
+      [4] ['trip_1000', '2024-01-01 08:14:22', '2024-01-01 08:21:53', 1, '1.17', '9.30', '0.00', '14.30', 4, 170, 161]
+[1;33m    ⚡ MySQL is 10.71x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 50...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 50 rows in 0.010s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 50 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1205000', datetime.datetime(2024, 1, 14, 18, 33, 35), datetime.datetime(2024, 1, 14, 18, 39, 42), 2, '0.90', '7.90', '2.00', '13.90', 1, 141, 236]
+      [1] ['trip_1205001', datetime.datetime(2024, 1, 14, 18, 54, 22), datetime.datetime(2024, 1, 14, 18, 57, 57), 1, '0.70', '6.50', '2.10', '12.60', 1, 43, 236]
+      [2] ['trip_1205003', datetime.datetime(2024, 1, 14, 18, 22, 19), datetime.datetime(2024, 1, 14, 18, 26, 36), 1, '0.71', '6.50', '1.05', '11.55', 1, 262, 140]
+      [3] ['trip_1205012', datetime.datetime(2024, 1, 14, 18, 55, 6), datetime.datetime(2024, 1, 14, 19, 1, 28), 1, '0.93', '7.90', '2.98', '14.88', 1, 239, 43]
+      [4] ['trip_1205021', datetime.datetime(2024, 1, 14, 18, 7, 1), datetime.datetime(2024, 1, 14, 18, 18, 54), 2, '2.44', '13.50', '2.00', '19.50', 1, 229, 75]
+[0;35m    MySQL:[0m
+      [0] ['trip_0', '2024-01-01 08:57:55', '2024-01-01 09:17:43', 1, '1.72', '17.70', '0.00', '22.70', 2, 186, 79]
+      [1] ['trip_1', '2024-01-01 08:03:00', '2024-01-01 08:09:36', 1, '1.80', '10.00', '3.75', '18.75', 1, 140, 236]
+      [2] ['trip_10', '2024-01-01 08:35:22', '2024-01-01 08:41:41', 2, '0.75', '7.90', '0.00', '12.90', 1, 107, 137]
+      [3] ['trip_100', '2024-01-01 08:18:24', '2024-01-01 08:30:39', 1, '2.16', '13.50', '0.00', '18.50', 4, 249, 232]
+      [4] ['trip_1000', '2024-01-01 08:14:22', '2024-01-01 08:21:53', 1, '1.17', '9.30', '0.00', '14.30', 4, 170, 161]
+[1;33m    ⚡ MySQL is 8.53x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 100...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 100
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 100 rows in 0.010s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 100 rows in 0.002s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2820002', datetime.datetime(2024, 1, 31, 22, 36, 17), datetime.datetime(2024, 1, 31, 22, 44, 25), 1, '1.80', '10.70', '3.10', '18.80', 1, 236, 142]
+      [1] ['trip_2820003', datetime.datetime(2024, 1, 31, 22, 56, 45), datetime.datetime(2024, 1, 31, 23, 20, 22), 1, '5.70', '28.90', '5.00', '38.90', 1, 48, 87]
+      [2] ['trip_2820013', datetime.datetime(2024, 1, 31, 22, 8, 54), datetime.datetime(2024, 1, 31, 22, 20, 2), 2, '1.66', '12.10', '3.42', '20.52', 1, 261, 211]
+      [3] ['trip_2820018', datetime.datetime(2024, 1, 31, 22, 23, 40), datetime.datetime(2024, 1, 31, 22, 28, 28), 1, '0.99', '7.90', '2.58', '15.48', 1, 239, 151]
+      [4] ['trip_2820021', datetime.datetime(2024, 1, 31, 22, 1, 18), datetime.datetime(2024, 1, 31, 22, 20, 55), 1, '4.10', '22.60', '5.00', '39.54', 1, 161, 112]
+[0;35m    MySQL:[0m
+      [0] ['trip_0', '2024-01-01 08:57:55', '2024-01-01 09:17:43', 1, '1.72', '17.70', '0.00', '22.70', 2, 186, 79]
+      [1] ['trip_1', '2024-01-01 08:03:00', '2024-01-01 08:09:36', 1, '1.80', '10.00', '3.75', '18.75', 1, 140, 236]
+      [2] ['trip_10', '2024-01-01 08:35:22', '2024-01-01 08:41:41', 2, '0.75', '7.90', '0.00', '12.90', 1, 107, 137]
+      [3] ['trip_100', '2024-01-01 08:18:24', '2024-01-01 08:30:39', 1, '2.16', '13.50', '0.00', '18.50', 4, 249, 232]
+      [4] ['trip_1000', '2024-01-01 08:14:22', '2024-01-01 08:21:53', 1, '1.17', '9.30', '0.00', '14.30', 4, 170, 161]
+[1;33m    ⚡ MySQL is 4.40x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 500...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 500
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 500 rows in 0.016s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 500 rows in 0.006s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2820002', datetime.datetime(2024, 1, 31, 22, 36, 17), datetime.datetime(2024, 1, 31, 22, 44, 25), 1, '1.80', '10.70', '3.10', '18.80', 1, 236, 142]
+      [1] ['trip_2820003', datetime.datetime(2024, 1, 31, 22, 56, 45), datetime.datetime(2024, 1, 31, 23, 20, 22), 1, '5.70', '28.90', '5.00', '38.90', 1, 48, 87]
+      [2] ['trip_2820013', datetime.datetime(2024, 1, 31, 22, 8, 54), datetime.datetime(2024, 1, 31, 22, 20, 2), 2, '1.66', '12.10', '3.42', '20.52', 1, 261, 211]
+      [3] ['trip_2820018', datetime.datetime(2024, 1, 31, 22, 23, 40), datetime.datetime(2024, 1, 31, 22, 28, 28), 1, '0.99', '7.90', '2.58', '15.48', 1, 239, 151]
+      [4] ['trip_2820021', datetime.datetime(2024, 1, 31, 22, 1, 18), datetime.datetime(2024, 1, 31, 22, 20, 55), 1, '4.10', '22.60', '5.00', '39.54', 1, 161, 112]
+[0;35m    MySQL:[0m
+      [0] ['trip_0', '2024-01-01 08:57:55', '2024-01-01 09:17:43', 1, '1.72', '17.70', '0.00', '22.70', 2, 186, 79]
+      [1] ['trip_1', '2024-01-01 08:03:00', '2024-01-01 08:09:36', 1, '1.80', '10.00', '3.75', '18.75', 1, 140, 236]
+      [2] ['trip_10', '2024-01-01 08:35:22', '2024-01-01 08:41:41', 2, '0.75', '7.90', '0.00', '12.90', 1, 107, 137]
+      [3] ['trip_100', '2024-01-01 08:18:24', '2024-01-01 08:30:39', 1, '2.16', '13.50', '0.00', '18.50', 4, 249, 232]
+      [4] ['trip_1000', '2024-01-01 08:14:22', '2024-01-01 08:21:53', 1, '1.17', '9.30', '0.00', '14.30', 4, 170, 161]
+[1;33m    ⚡ MySQL is 2.83x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 1000...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 1000
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1,000 rows in 0.020s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1,000 rows in 0.008s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2820002', datetime.datetime(2024, 1, 31, 22, 36, 17), datetime.datetime(2024, 1, 31, 22, 44, 25), 1, '1.80', '10.70', '3.10', '18.80', 1, 236, 142]
+      [1] ['trip_2820003', datetime.datetime(2024, 1, 31, 22, 56, 45), datetime.datetime(2024, 1, 31, 23, 20, 22), 1, '5.70', '28.90', '5.00', '38.90', 1, 48, 87]
+      [2] ['trip_2820013', datetime.datetime(2024, 1, 31, 22, 8, 54), datetime.datetime(2024, 1, 31, 22, 20, 2), 2, '1.66', '12.10', '3.42', '20.52', 1, 261, 211]
+      [3] ['trip_2820018', datetime.datetime(2024, 1, 31, 22, 23, 40), datetime.datetime(2024, 1, 31, 22, 28, 28), 1, '0.99', '7.90', '2.58', '15.48', 1, 239, 151]
+      [4] ['trip_2820021', datetime.datetime(2024, 1, 31, 22, 1, 18), datetime.datetime(2024, 1, 31, 22, 20, 55), 1, '4.10', '22.60', '5.00', '39.54', 1, 161, 112]
+[0;35m    MySQL:[0m
+      [0] ['trip_0', '2024-01-01 08:57:55', '2024-01-01 09:17:43', 1, '1.72', '17.70', '0.00', '22.70', 2, 186, 79]
+      [1] ['trip_1', '2024-01-01 08:03:00', '2024-01-01 08:09:36', 1, '1.80', '10.00', '3.75', '18.75', 1, 140, 236]
+      [2] ['trip_10', '2024-01-01 08:35:22', '2024-01-01 08:41:41', 2, '0.75', '7.90', '0.00', '12.90', 1, 107, 137]
+      [3] ['trip_100', '2024-01-01 08:18:24', '2024-01-01 08:30:39', 1, '2.16', '13.50', '0.00', '18.50', 4, 249, 232]
+      [4] ['trip_1000', '2024-01-01 08:14:22', '2024-01-01 08:21:53', 1, '1.17', '9.30', '0.00', '14.30', 4, 170, 161]
+[1;33m    ⚡ MySQL is 2.34x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 10 OFFSET 0...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 10 OFFSET 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.006s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2820002', datetime.datetime(2024, 1, 31, 22, 36, 17), datetime.datetime(2024, 1, 31, 22, 44, 25), 1, '1.80', '10.70', '3.10', '18.80', 1, 236, 142]
+      [1] ['trip_2820003', datetime.datetime(2024, 1, 31, 22, 56, 45), datetime.datetime(2024, 1, 31, 23, 20, 22), 1, '5.70', '28.90', '5.00', '38.90', 1, 48, 87]
+      [2] ['trip_2820013', datetime.datetime(2024, 1, 31, 22, 8, 54), datetime.datetime(2024, 1, 31, 22, 20, 2), 2, '1.66', '12.10', '3.42', '20.52', 1, 261, 211]
+      [3] ['trip_2820018', datetime.datetime(2024, 1, 31, 22, 23, 40), datetime.datetime(2024, 1, 31, 22, 28, 28), 1, '0.99', '7.90', '2.58', '15.48', 1, 239, 151]
+      [4] ['trip_2820021', datetime.datetime(2024, 1, 31, 22, 1, 18), datetime.datetime(2024, 1, 31, 22, 20, 55), 1, '4.10', '22.60', '5.00', '39.54', 1, 161, 112]
+[0;35m    MySQL:[0m
+      [0] ['trip_0', '2024-01-01 08:57:55', '2024-01-01 09:17:43', 1, '1.72', '17.70', '0.00', '22.70', 2, 186, 79]
+      [1] ['trip_1', '2024-01-01 08:03:00', '2024-01-01 08:09:36', 1, '1.80', '10.00', '3.75', '18.75', 1, 140, 236]
+      [2] ['trip_10', '2024-01-01 08:35:22', '2024-01-01 08:41:41', 2, '0.75', '7.90', '0.00', '12.90', 1, 107, 137]
+      [3] ['trip_100', '2024-01-01 08:18:24', '2024-01-01 08:30:39', 1, '2.16', '13.50', '0.00', '18.50', 4, 249, 232]
+      [4] ['trip_1000', '2024-01-01 08:14:22', '2024-01-01 08:21:53', 1, '1.17', '9.30', '0.00', '14.30', 4, 170, 161]
+[1;33m    ⚡ MySQL is 6.98x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 10 OFFSET 10...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 10 OFFSET 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.007s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2820042', datetime.datetime(2024, 1, 31, 22, 31, 21), datetime.datetime(2024, 1, 31, 22, 46, 4), 1, '5.28', '24.70', '5.94', '35.64', 1, 170, 88]
+      [1] ['trip_2820043', datetime.datetime(2024, 1, 31, 22, 17, 37), datetime.datetime(2024, 1, 31, 22, 28, 45), 1, '3.05', '15.60', '1.00', '21.60', 1, 231, 246]
+      [2] ['trip_2820047', datetime.datetime(2024, 1, 31, 22, 17, 27), datetime.datetime(2024, 1, 31, 22, 24, 13), 1, '1.13', '8.60', '2.00', '15.60', 1, 161, 140]
+      [3] ['trip_2820055', datetime.datetime(2024, 1, 31, 22, 33, 27), datetime.datetime(2024, 1, 31, 22, 36, 54), 1, '0.70', '5.10', '2.55', '12.65', 1, 48, 68]
+      [4] ['trip_2820058', datetime.datetime(2024, 1, 31, 22, 29, 28), datetime.datetime(2024, 1, 31, 22, 34, 35), 1, '0.80', '5.80', '2.15', '12.95', 1, 79, 79]
+[0;35m    MySQL:[0m
+      [0] ['trip_1000003', '2024-01-13 01:15:15', '2024-01-13 02:35:26', 3, '17.04', '70.00', '0.00', '87.69', 2, 132, 48]
+      [1] ['trip_1000004', '2024-01-13 01:40:55', '2024-01-13 02:13:52', 1, '9.06', '40.80', '12.00', '72.99', 1, 138, 107]
+      [2] ['trip_1000005', '2024-01-13 01:38:11', '2024-01-13 01:54:50', 1, '1.53', '15.60', '2.00', '24.10', 1, 161, 142]
+      [3] ['trip_1000006', '2024-01-13 01:50:19', '2024-01-13 01:50:52', 2, '0.04', '-70.00', '0.00', '-79.00', 4, 148, 148]
+      [4] ['trip_1000007', '2024-01-13 01:50:19', '2024-01-13 01:50:52', 2, '0.04', '70.00', '0.00', '79.00', 4, 148, 148]
+[1;33m    ⚡ MySQL is 10.82x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 10 OFFSET 20...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 10 OFFSET 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.008s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2820075', datetime.datetime(2024, 1, 31, 22, 17, 51), datetime.datetime(2024, 1, 31, 22, 25, 39), 1, '2.23', '11.40', '4.92', '21.32', 1, 236, 41]
+      [1] ['trip_2820083', datetime.datetime(2024, 1, 31, 22, 38, 45), datetime.datetime(2024, 1, 31, 22, 51, 59), 1, '4.07', '19.10', '0.00', '24.10', 1, 142, 74]
+      [2] ['trip_2820085', datetime.datetime(2024, 1, 31, 22, 57, 40), datetime.datetime(2024, 1, 31, 23, 7, 3), 1, '1.57', '10.70', '3.00', '18.70', 1, 186, 107]
+      [3] ['trip_2820091', datetime.datetime(2024, 1, 31, 22, 13, 40), datetime.datetime(2024, 1, 31, 22, 23, 15), 1, '1.48', '-11.40', '0.00', '-16.40', 4, 170, 224]
+      [4] ['trip_2820093', datetime.datetime(2024, 1, 31, 22, 37, 46), datetime.datetime(2024, 1, 31, 22, 48, 35), 1, '2.00', '12.10', '3.42', '20.52', 1, 161, 107]
+[0;35m    MySQL:[0m
+      [0] ['trip_1000012', '2024-01-13 01:17:34', '2024-01-13 01:31:56', 1, '1.92', '14.20', '4.14', '24.84', 1, 249, 107]
+      [1] ['trip_1000013', '2024-01-13 01:48:14', '2024-01-13 01:55:33', 1, '1.05', '8.60', '3.02', '18.12', 1, 113, 4]
+      [2] ['trip_1000014', '2024-01-13 01:51:08', '2024-01-13 02:00:48', 1, '1.31', '10.70', '0.00', '17.20', 2, 238, 239]
+      [3] ['trip_1000015', '2024-01-13 01:02:04', '2024-01-13 01:12:57', 2, '0.00', '10.00', '3.30', '19.80', 1, 229, 164]
+      [4] ['trip_1000016', '2024-01-13 01:40:28', '2024-01-13 01:43:23', 2, '0.00', '4.40', '2.18', '13.08', 1, 79, 79]
+[1;33m    ⚡ MySQL is 12.80x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 100 OFFSET 50...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 100 OFFSET 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 100 rows in 0.008s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 100 rows in 0.002s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2820219', datetime.datetime(2024, 1, 31, 22, 45, 33), datetime.datetime(2024, 1, 31, 22, 49, 33), 1, '0.56', '5.80', '2.16', '12.96', 1, 237, 262]
+      [1] ['trip_2820221', datetime.datetime(2024, 1, 31, 22, 27, 55), datetime.datetime(2024, 1, 31, 22, 40, 56), 1, '2.37', '15.60', '4.12', '24.72', 1, 162, 239]
+      [2] ['trip_2820225', datetime.datetime(2024, 1, 31, 22, 3, 2), datetime.datetime(2024, 1, 31, 22, 32, 49), 2, '19.05', '70.00', '20.23', '102.92', 1, 132, 236]
+      [3] ['trip_2820226', datetime.datetime(2024, 1, 31, 22, 18, 46), datetime.datetime(2024, 1, 31, 22, 33, 4), 1, '2.28', '14.90', '3.98', '23.88', 1, 249, 87]
+      [4] ['trip_2820227', datetime.datetime(2024, 1, 31, 22, 9, 44), datetime.datetime(2024, 1, 31, 22, 29, 7), 4, '4.80', '24.00', '2.00', '31.00', 1, 164, 7]
+[0;35m    MySQL:[0m
+      [0] ['trip_100004', '2024-01-02 21:56:20', '2024-01-02 22:10:15', 2, '2.21', '14.20', '3.64', '21.84', 1, 43, 186]
+      [1] ['trip_1000040', '2024-01-13 01:23:23', '2024-01-13 01:46:33', 1, '8.32', '35.20', '10.73', '64.37', 1, 263, 138]
+      [2] ['trip_1000041', '2024-01-13 01:15:53', '2024-01-13 01:32:10', 2, '3.04', '17.00', '5.88', '29.38', 1, 142, 75]
+      [3] ['trip_1000042', '2024-01-13 01:37:47', '2024-01-13 01:49:07', 2, '1.45', '12.10', '2.23', '20.83', 1, 43, 43]
+      [4] ['trip_1000043', '2024-01-13 01:51:55', '2024-01-13 02:01:21', 1, '1.38', '10.70', '5.00', '22.20', 1, 163, 236]
+[1;33m    ⚡ MySQL is 4.96x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips LIMIT 50 OFFSET 100...[0m
+SQL: SELECT * FROM taxi_trips LIMIT 50 OFFSET 100
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 50 rows in 0.009s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 50 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2820402', datetime.datetime(2024, 1, 31, 21, 58, 29), datetime.datetime(2024, 1, 31, 22, 0, 49), 1, '0.62', '5.10', '0.00', '10.10', 1, 140, 237]
+      [1] ['trip_2820408', datetime.datetime(2024, 1, 31, 22, 41, 6), datetime.datetime(2024, 1, 31, 23, 11, 6), 1, '5.00', '26.10', '6.20', '37.30', 1, 107, 151]
+      [2] ['trip_2820412', datetime.datetime(2024, 1, 31, 22, 47, 54), datetime.datetime(2024, 1, 31, 23, 6, 57), 2, '3.55', '20.50', '5.10', '30.60', 1, 68, 88]
+      [3] ['trip_2820414', datetime.datetime(2024, 1, 31, 22, 15, 32), datetime.datetime(2024, 1, 31, 22, 30, 14), 1, '2.87', '17.00', '4.40', '26.40', 1, 164, 140]
+      [4] ['trip_2820423', datetime.datetime(2024, 1, 31, 22, 2, 16), datetime.datetime(2024, 1, 31, 22, 14, 58), 1, '2.39', '14.90', '2.50', '22.40', 1, 113, 13]
+[0;35m    MySQL:[0m
+      [0] ['trip_1000085', '2024-01-13 01:39:07', '2024-01-13 01:40:53', 1, '0.23', '4.40', '0.00', '10.90', 2, 100, 100]
+      [1] ['trip_1000086', '2024-01-13 01:50:26', '2024-01-13 01:57:58', 1, '0.57', '7.90', '2.88', '17.28', 1, 48, 48]
+      [2] ['trip_1000087', '2024-01-13 01:30:23', '2024-01-13 01:36:38', 1, '0.54', '7.20', '0.00', '13.70', 2, 162, 229]
+      [3] ['trip_1000088', '2024-01-13 01:08:04', '2024-01-13 01:32:16', 2, '2.48', '21.90', '7.10', '35.50', 1, 239, 161]
+      [4] ['trip_1000089', '2024-01-13 01:03:25', '2024-01-13 01:12:56', 1, '0.82', '10.00', '0.00', '16.50', 1, 170, 186]
+[1;33m    ⚡ MySQL is 6.57x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY passenger_count ...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY passenger_count LIMIT 50 OFFSET 100
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 50 rows in 0.570s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 50 rows in 0.820s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2889509', datetime.datetime(2024, 1, 16, 18, 24, 15), datetime.datetime(2024, 1, 16, 18, 54, 43), 0, '2.90', '26.80', '6.66', '39.96', 0, 186, 237]
+      [1] ['trip_2889514', datetime.datetime(2024, 1, 16, 18, 2, 54), datetime.datetime(2024, 1, 16, 18, 11, 11), 0, '1.21', '14.22', '2.73', '20.95', 0, 113, 211]
+      [2] ['trip_2889521', datetime.datetime(2024, 1, 16, 18, 37, 32), datetime.datetime(2024, 1, 16, 18, 50, 53), 0, '2.14', '19.15', '4.63', '27.78', 0, 161, 68]
+      [3] ['trip_2889522', datetime.datetime(2024, 1, 16, 18, 26, 31), datetime.datetime(2024, 1, 16, 18, 30, 15), 0, '0.40', '14.22', '3.64', '21.86', 0, 239, 239]
+      [4] ['trip_2889535', datetime.datetime(2024, 1, 16, 18, 45, 16), datetime.datetime(2024, 1, 16, 19, 8, 43), 0, '4.89', '34.11', '5.72', '43.83', 0, 4, 142]
+[0;35m    MySQL:[0m
+      [0] ['trip_1007803', '2024-01-13 02:44:34', '2024-01-13 03:04:08', 0, '3.40', '19.10', '5.10', '30.70', 1, 186, 231]
+      [1] ['trip_1008365', '2024-01-13 02:31:14', '2024-01-13 03:27:57', 0, '21.50', '70.00', '0.00', '87.69', 2, 132, 163]
+      [2] ['trip_1008474', '2024-01-13 02:45:03', '2024-01-13 03:18:39', 0, '9.10', '40.80', '1.00', '55.24', 1, 262, 242]
+      [3] ['trip_1007371', '2024-01-13 02:09:31', '2024-01-13 02:12:50', 0, '0.60', '5.80', '2.45', '14.75', 1, 90, 249]
+      [4] ['trip_1009431', '2024-01-13 02:01:51', '2024-01-13 02:14:55', 0, '1.30', '10.70', '0.00', '17.20', 2, 170, 161]
+[0;32m    ⚡ Calm is 1.44x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips ORDER BY fare_amount DESC...[0m
+SQL: SELECT * FROM taxi_trips ORDER BY fare_amount DESC LIMIT 20 OFFSET 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.580s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.813s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2557947', datetime.datetime(2024, 1, 29, 9, 29, 31), datetime.datetime(2024, 1, 29, 9, 30, 23), 2, '0.00', '500.00', '0.00', '501.00', 3, 246, 246]
+      [1] ['trip_960355', datetime.datetime(2024, 1, 12, 10, 40, 28), datetime.datetime(2024, 1, 12, 13, 46, 56), 1, '210.82', '500.00', '0.00', '515.88', 2, 168, 265]
+      [2] ['trip_1711636', datetime.datetime(2024, 1, 20, 10, 8, 35), datetime.datetime(2024, 1, 20, 12, 9, 45), 1, '105.25', '500.00', '0.00', '516.13', 2, 132, 265]
+      [3] ['trip_2575784', datetime.datetime(2024, 1, 29, 13, 3, 1), datetime.datetime(2024, 1, 29, 13, 6, 54), 2, '0.00', '500.00', '0.00', '501.00', 3, 265, 265]
+      [4] ['trip_92763', datetime.datetime(2024, 1, 2, 12, 57, 32), datetime.datetime(2024, 1, 2, 12, 57, 32), 0, '0.00', '500.00', '0.00', '500.00', 1, 264, 264]
+[0;35m    MySQL:[0m
+      [0] ['trip_2443772', '2024-01-28 05:37:17', '2024-01-28 05:37:25', 1, '0.00', '500.00', '0.00', '501.00', 4, 216, 216]
+      [1] ['trip_1745602', '2024-01-21 00:25:28', '2024-01-21 00:28:15', 1, '0.00', '500.00', '0.00', '501.00', 1, 265, 265]
+      [2] ['trip_2622404', '2024-01-30 05:39:18', '2024-01-30 05:39:56', 1, '1.50', '500.00', '0.00', '501.00', 3, 100, 100]
+      [3] ['trip_1082546', '2024-01-13 23:52:58', '2024-01-13 23:53:32', 1, '0.00', '500.00', '0.00', '501.00', 2, 168, 168]
+      [4] ['trip_2575784', '2024-01-29 21:03:01', '2024-01-29 21:06:54', 2, '0.00', '500.00', '0.00', '501.00', 3, 265, 265]
+[0;32m    ⚡ Calm is 1.40x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips WHERE passenger_count > 0...[0m
+SQL: SELECT * FROM taxi_trips WHERE passenger_count > 0 ORDER BY trip_distance LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.559s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.828s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1699982', datetime.datetime(2024, 1, 20, 3, 41, 58), datetime.datetime(2024, 1, 20, 3, 42, 20), 1, '0.00', '23.00', '0.00', '24.00', 4, 125, 125]
+      [1] ['trip_1699691', datetime.datetime(2024, 1, 20, 3, 7, 7), datetime.datetime(2024, 1, 20, 3, 7, 44), 1, '0.00', '42.30', '0.00', '45.80', 1, 87, 87]
+      [2] ['trip_1655575', datetime.datetime(2024, 1, 19, 18, 0, 51), datetime.datetime(2024, 1, 19, 18, 1, 44), 1, '0.00', '3.00', '0.00', '8.75', 3, 132, 132]
+      [3] ['trip_1700361', datetime.datetime(2024, 1, 20, 4, 10, 28), datetime.datetime(2024, 1, 20, 4, 10, 33), 1, '0.00', '180.00', '0.00', '183.50', 4, 249, 249]
+      [4] ['trip_1658892', datetime.datetime(2024, 1, 19, 18, 37, 57), datetime.datetime(2024, 1, 19, 18, 41, 45), 1, '0.00', '5.10', '2.90', '14.50', 1, 263, 262]
+[0;35m    MySQL:[0m
+      [0] ['trip_1000300', '2024-01-13 01:43:15', '2024-01-13 01:55:50', 1, '0.00', '20.00', '0.00', '21.50', 1, 24, 116]
+      [1] ['trip_100017', '2024-01-02 21:32:00', '2024-01-02 21:32:06', 2, '0.00', '70.00', '0.00', '74.00', 3, 234, 234]
+      [2] ['trip_1000204', '2024-01-13 01:20:37', '2024-01-13 01:21:08', 2, '0.00', '70.00', '17.19', '104.88', 1, 132, 132]
+      [3] ['trip_100037', '2024-01-02 21:23:18', '2024-01-02 21:24:07', 1, '0.00', '3.00', '1.40', '8.40', 1, 229, 229]
+      [4] ['trip_1000393', '2024-01-13 01:48:57', '2024-01-13 01:56:39', 2, '0.00', '7.90', '2.00', '16.40', 1, 142, 141]
+[0;32m    ⚡ Calm is 1.48x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips WHERE trip_distance > 5.0...[0m
+SQL: SELECT * FROM taxi_trips WHERE trip_distance > 5.0 ORDER BY fare_amount DESC LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.575s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.734s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_1159593', datetime.datetime(2024, 1, 14, 10, 8, 11), datetime.datetime(2024, 1, 16, 13, 54, 22), 1, '31.95', '2221.30', '0.00', '2225.30', 2, 220, 220]
+      [1] ['trip_76891', datetime.datetime(2024, 1, 2, 7, 50, 8), datetime.datetime(2024, 1, 2, 11, 29, 29), 1, '233.25', '1616.50', '0.00', '1617.50', 2, 168, 265]
+      [2] ['trip_507314', datetime.datetime(2024, 1, 6, 21, 1, 38), datetime.datetime(2024, 1, 6, 23, 41, 44), 1, '142.62', '912.30', '0.00', '940.93', 2, 132, 265]
+      [3] ['trip_1916205', datetime.datetime(2024, 1, 22, 16, 40, 43), datetime.datetime(2024, 1, 22, 19, 11, 20), 1, '157.25', '899.00', '0.00', '900.00', 2, 265, 265]
+      [4] ['trip_1413328', datetime.datetime(2024, 1, 17, 10, 46, 15), datetime.datetime(2024, 1, 17, 13, 48, 11), 1, '109.75', '761.10', '0.00', '775.48', 2, 161, 265]
+[0;35m    MySQL:[0m
+      [0] ['trip_1159593', '2024-01-14 18:08:11', '2024-01-16 21:54:22', 1, '31.95', '2221.30', '0.00', '2225.30', 2, 220, 220]
+      [1] ['trip_76891', '2024-01-02 15:50:08', '2024-01-02 19:29:29', 1, '233.25', '1616.50', '0.00', '1617.50', 2, 168, 265]
+      [2] ['trip_507314', '2024-01-07 05:01:38', '2024-01-07 07:41:44', 1, '142.62', '912.30', '0.00', '940.93', 2, 132, 265]
+      [3] ['trip_1916205', '2024-01-23 00:40:43', '2024-01-23 03:11:20', 1, '157.25', '899.00', '0.00', '900.00', 2, 265, 265]
+      [4] ['trip_1413328', '2024-01-17 18:46:15', '2024-01-17 21:48:11', 1, '109.75', '761.10', '0.00', '775.48', 2, 161, 265]
+[0;32m    ⚡ Calm is 1.28x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 ORDER BY & LIMIT: SELECT * FROM taxi_trips WHERE fare_amount > 10.0 ...[0m
+SQL: SELECT * FROM taxi_trips WHERE fare_amount > 10.0 ORDER BY fare_amount LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.570s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.799s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_2847436', datetime.datetime(2024, 1, 6, 19, 57, 7), datetime.datetime(2024, 1, 6, 20, 6, 50), 0, '1.36', '10.01', '0.00', '14.01', 0, 100, 234]
+      [1] ['trip_2843549', datetime.datetime(2024, 1, 5, 17, 38, 50), datetime.datetime(2024, 1, 5, 17, 51, 28), 0, '1.01', '10.01', '0.00', '14.01', 0, 75, 262]
+      [2] ['trip_2929510', datetime.datetime(2024, 1, 23, 21, 30, 48), datetime.datetime(2024, 1, 23, 21, 38, 52), 0, '1.78', '10.01', '0.00', '14.01', 0, 162, 107]
+      [3] ['trip_2925351', datetime.datetime(2024, 1, 22, 19, 30, 1), datetime.datetime(2024, 1, 22, 19, 38, 16), 0, '0.00', '10.01', '0.00', '14.01', 0, 158, 186]
+      [4] ['trip_2898014', datetime.datetime(2024, 1, 17, 21, 43, 47), datetime.datetime(2024, 1, 17, 21, 48, 34), 0, '0.90', '10.01', '0.00', '14.01', 0, 164, 68]
+[0;35m    MySQL:[0m
+      [0] ['trip_2932762', '2024-01-25 04:40:57', '2024-01-25 04:47:08', 0, '0.86', '10.01', '0.00', '14.01', 0, 162, 161]
+      [1] ['trip_2863601', '2024-01-10 21:35:10', '2024-01-10 21:42:13', 0, '1.51', '10.01', '0.00', '14.01', 0, 125, 90]
+      [2] ['trip_2862818', '2024-01-10 15:32:17', '2024-01-10 15:42:27', 0, '1.84', '10.01', '0.00', '11.51', 0, 116, 41]
+      [3] ['trip_2919609', '2024-01-21 13:53:33', '2024-01-21 13:58:47', 0, '1.56', '10.01', '0.00', '11.51', 0, 74, 42]
+      [4] ['trip_2862792', '2024-01-10 15:44:45', '2024-01-10 15:57:20', 0, '1.62', '10.01', '0.00', '14.01', 0, 75, 140]
+[0;32m    ⚡ Calm is 1.40x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT passenger_count FROM taxi_trips...[0m
+SQL: SELECT DISTINCT passenger_count FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.454s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.463s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.02x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT passenger_count FROM taxi_trips OR...[0m
+SQL: SELECT DISTINCT passenger_count FROM taxi_trips ORDER BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.449s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.463s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.03x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT payment_type FROM taxi_trips...[0m
+SQL: SELECT DISTINCT payment_type FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.458s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 0.000s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[1;33m    ⚡ MySQL is 1311.63x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT payment_type FROM taxi_trips ORDER...[0m
+SQL: SELECT DISTINCT payment_type FROM taxi_trips ORDER BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.439s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 0.000s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[1;33m    ⚡ MySQL is 1651.50x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT pickup_location_id FROM taxi_trips...[0m
+SQL: SELECT DISTINCT pickup_location_id FROM taxi_trips LIMIT 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 50 rows in 0.425s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 50 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [140]
+      [1] [137]
+      [2] [125]
+      [3] [241]
+      [4] [49]
+[0;35m    MySQL:[0m
+      [0] [1]
+      [1] [2]
+      [2] [3]
+      [3] [4]
+      [4] [6]
+[1;33m    ⚡ MySQL is 427.79x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT dropoff_location_id FROM taxi_trip...[0m
+SQL: SELECT DISTINCT dropoff_location_id FROM taxi_trips LIMIT 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 50 rows in 0.425s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 50 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [137]
+      [1] [140]
+      [2] [26]
+      [3] [125]
+      [4] [49]
+[0;35m    MySQL:[0m
+      [0] [1]
+      [1] [2]
+      [2] [3]
+      [3] [4]
+      [4] [5]
+[1;33m    ⚡ MySQL is 511.10x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT passenger_count, payment_type FROM...[0m
+SQL: SELECT DISTINCT passenger_count, payment_type FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 35 rows in 0.440s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 35 rows in 0.552s[0m
+
+[0;32m    ✓ Results match (35 rows)[0m
+[0;32m    ⚡ Calm is 1.25x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT passenger_count, payment_type FROM...[0m
+SQL: SELECT DISTINCT passenger_count, payment_type FROM taxi_trips ORDER BY passenger_count, payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 35 rows in 0.462s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 35 rows in 0.545s[0m
+
+[0;32m    ✓ Results match (35 rows)[0m
+[0;32m    ⚡ Calm is 1.18x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT pickup_location_id, dropoff_locati...[0m
+SQL: SELECT DISTINCT pickup_location_id, dropoff_location_id FROM taxi_trips LIMIT 100
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 100 rows in 0.454s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 100 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [230, 68]
+      [1] [17, 71]
+      [2] [129, 157]
+      [3] [17, 138]
+      [4] [159, 79]
+[0;35m    MySQL:[0m
+      [0] [186, 79]
+      [1] [140, 236]
+      [2] [107, 137]
+      [3] [249, 232]
+      [4] [170, 161]
+[1;33m    ⚡ MySQL is 639.40x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT COUNT(DISTINCT passenger_count) FROM taxi_t...[0m
+SQL: SELECT COUNT(DISTINCT passenger_count) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.455s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.525s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 1.15x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT COUNT(DISTINCT payment_type) FROM taxi_trip...[0m
+SQL: SELECT COUNT(DISTINCT payment_type) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.435s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.000s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1111.45x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT COUNT(DISTINCT pickup_location_id) FROM tax...[0m
+SQL: SELECT COUNT(DISTINCT pickup_location_id) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.431s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.005s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 81.65x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT COUNT(DISTINCT dropoff_location_id) FROM ta...[0m
+SQL: SELECT COUNT(DISTINCT dropoff_location_id) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.432s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.032s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 13.34x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT passenger_count FROM taxi_trips WH...[0m
+SQL: SELECT DISTINCT passenger_count FROM taxi_trips WHERE trip_distance > 5.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 9 rows in 0.442s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 9 rows in 0.432s[0m
+
+[0;32m    ✓ Results match (9 rows)[0m
+[1;33m    ⚡ MySQL is 1.02x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT DISTINCT payment_type FROM taxi_trips WHERE...[0m
+SQL: SELECT DISTINCT payment_type FROM taxi_trips WHERE fare_amount > 10.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.473s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 5.297s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[0;32m    ⚡ Calm is 11.19x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 DISTINCT: SELECT COUNT(DISTINCT passenger_count) FROM taxi_t...[0m
+SQL: SELECT COUNT(DISTINCT passenger_count) FROM taxi_trips WHERE trip_distance > 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.472s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.493s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 1.04x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT COUNT(*) FROM taxi_trips WHERE (passenger_c...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE (passenger_count = 1 OR passenger_count = 2) AND trip_distance > 5.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.436s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.432s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.01x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT COUNT(*) FROM taxi_trips WHERE (passenger_c...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE (passenger_count = 1 OR passenger_count = 2) AND fare_amount > 10.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.440s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.440s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 1.00x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count IN (1, 2, 3) AND fare_amount BETWEEN 10.0 AND 50.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.450s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.527s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 1.17x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count IN (2, 3, 4) AND trip_distance BETWEEN 1.0 AND 10.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.437s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.411s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.06x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT COUNT(*) FROM taxi_trips WHERE trip_distanc...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 0 AND fare_amount > 0 AND tip_amount > 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.481s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.466s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.03x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT COUNT(*) FROM taxi_trips WHERE passenger_co...[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count > 0 AND trip_distance > 0 AND fare_amount > 0 AND tip_amount > 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.481s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.541s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 1.12x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT passenger_count, COUNT(*) as cnt, AVG(trip_...[0m
+SQL: SELECT passenger_count, COUNT(*) as cnt, AVG(trip_distance) as avg_dist, SUM(fare_amount) as total_fare FROM taxi_trips GROUP BY passenger_count HAVING cnt > 50 ORDER BY total_fare DESC
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 8 rows in 0.493s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 8 rows in 0.629s[0m
+
+[0;32m    ✓ Results match (8 rows)[0m
+[0;32m    ⚡ Calm is 1.28x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT passenger_count, COUNT(*) as cnt, AVG(trip_...[0m
+SQL: SELECT passenger_count, COUNT(*) as cnt, AVG(trip_distance) as avg_dist, SUM(fare_amount) as total_fare FROM taxi_trips GROUP BY passenger_count HAVING cnt > 100
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 7 rows in 0.467s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 7 rows in 0.653s[0m
+
+[0;32m    ✓ Results match (7 rows)[0m
+[0;32m    ⚡ Calm is 1.40x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT payment_type, COUNT(*) as cnt, AVG(fare_amo...[0m
+SQL: SELECT payment_type, COUNT(*) as cnt, AVG(fare_amount) as avg_fare, SUM(total_amount) as total FROM taxi_trips GROUP BY payment_type HAVING cnt > 100 ORDER BY total DESC
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.491s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 5.259s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[0;32m    ⚡ Calm is 10.70x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT payment_type, COUNT(*) as cnt, AVG(fare_amo...[0m
+SQL: SELECT payment_type, COUNT(*) as cnt, AVG(fare_amount) as avg_fare FROM taxi_trips GROUP BY payment_type HAVING cnt > 1000
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.466s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 5.238s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[0;32m    ⚡ Calm is 11.24x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT pickup_location_id, COUNT(*) as cnt, AVG(tr...[0m
+SQL: SELECT pickup_location_id, COUNT(*) as cnt, AVG(trip_distance) as avg_dist FROM taxi_trips GROUP BY pickup_location_id HAVING cnt > 50 ORDER BY avg_dist DESC LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.473s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 10.062s[0m
+
+[0;32m    ✓ Results match (20 rows)[0m
+[0;32m    ⚡ Calm is 21.29x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT pickup_location_id, COUNT(*) as cnt, AVG(tr...[0m
+SQL: SELECT pickup_location_id, COUNT(*) as cnt, AVG(trip_distance) as avg_dist FROM taxi_trips GROUP BY pickup_location_id HAVING cnt > 100 LIMIT 30
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 30 rows in 0.460s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 30 rows in 0.390s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [161, 143471, '2.56']
+      [1] [113, 40530, '2.02']
+      [2] [162, 106717, '2.23']
+      [3] [1, 295, '1.08']
+      [4] [231, 37050, '2.97']
+[0;35m    MySQL:[0m
+      [0] [1, 295, '1.08']
+      [1] [3, 105, '7.55']
+      [2] [4, 3568, '29.95']
+      [3] [7, 1811, '3.45']
+      [4] [10, 999, '11.09']
+[1;33m    ⚡ MySQL is 1.18x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT passenger_count, payment_type, COUNT(*) as ...[0m
+SQL: SELECT passenger_count, payment_type, COUNT(*) as cnt, AVG(fare_amount) as avg_fare FROM taxi_trips GROUP BY passenger_count, payment_type HAVING cnt > 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 30 rows in 0.469s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 30 rows in 0.738s[0m
+
+[0;32m    ✓ Results match (30 rows)[0m
+[0;32m    ⚡ Calm is 1.58x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT passenger_count, payment_type, COUNT(*) as ...[0m
+SQL: SELECT passenger_count, payment_type, COUNT(*) as cnt, SUM(fare_amount) as total_fare FROM taxi_trips GROUP BY passenger_count, payment_type HAVING cnt > 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 27 rows in 0.464s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 27 rows in 0.726s[0m
+
+[0;32m    ✓ Results match (27 rows)[0m
+[0;32m    ⚡ Calm is 1.56x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT pickup_location_id, dropoff_location_id, CO...[0m
+SQL: SELECT pickup_location_id, dropoff_location_id, COUNT(*) as cnt, AVG(trip_distance) as avg_dist FROM taxi_trips GROUP BY pickup_location_id, dropoff_location_id HAVING cnt > 10 LIMIT 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 50 rows in 0.476s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 50 rows in 0.806s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [249, 13, 1088, '1.98']
+      [1] [249, 236, 770, '4.62']
+      [2] [107, 230, 945, '2.03']
+      [3] [234, 230, 2368, '1.58']
+      [4] [261, 231, 748, '0.87']
+[0;35m    MySQL:[0m
+      [0] [186, 79, 2666, '2.23']
+      [1] [140, 236, 6099, '1.31']
+      [2] [107, 137, 2490, '0.72']
+      [3] [249, 232, 459, '2.17']
+      [4] [170, 161, 3796, '0.91']
+[0;32m    ⚡ Calm is 1.69x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT passenger_count, SUM(fare_amount) as total_...[0m
+SQL: SELECT passenger_count, SUM(fare_amount) as total_fare, COUNT(*) as trip_count FROM taxi_trips GROUP BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.460s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.592s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.29x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT passenger_count, SUM(trip_distance) as tota...[0m
+SQL: SELECT passenger_count, SUM(trip_distance) as total_distance, COUNT(*) as trip_count FROM taxi_trips GROUP BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.469s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.592s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.26x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT payment_type, SUM(fare_amount) as total_far...[0m
+SQL: SELECT payment_type, SUM(fare_amount) as total_fare, COUNT(*) as trip_count FROM taxi_trips GROUP BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.455s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 5.558s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[0;32m    ⚡ Calm is 12.21x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT passenger_count, trip_distance, fare_amount...[0m
+SQL: SELECT passenger_count, trip_distance, fare_amount FROM taxi_trips WHERE trip_distance > 10.0 ORDER BY fare_amount DESC LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.451s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.469s[0m
+
+[0;32m    ✓ Results match (20 rows)[0m
+[0;32m    ⚡ Calm is 1.04x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT passenger_count, trip_distance, fare_amount...[0m
+SQL: SELECT passenger_count, trip_distance, fare_amount FROM taxi_trips WHERE fare_amount > 50.0 ORDER BY trip_distance DESC LIMIT 20
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 20 rows in 0.446s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 20 rows in 0.455s[0m
+
+[0;32m    ✓ Results match (20 rows)[0m
+[0;32m    ⚡ Calm is 1.02x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT pickup_location_id, dropoff_location_id, tr...[0m
+SQL: SELECT pickup_location_id, dropoff_location_id, trip_distance FROM taxi_trips WHERE trip_distance > 20.0 ORDER BY trip_distance DESC LIMIT 30
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 30 rows in 0.449s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 30 rows in 0.450s[0m
+
+[0;32m    ✓ Results match (30 rows)[0m
+[0;32m    ⚡ Calm is 1.00x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 复杂查询: SELECT payment_type, fare_amount, tip_amount FROM ...[0m
+SQL: SELECT payment_type, fare_amount, tip_amount FROM taxi_trips WHERE tip_amount > 5.0 ORDER BY tip_amount DESC LIMIT 50
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 50 rows in 0.457s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 50 rows in 0.465s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] [1, '0.01', '428.00']
+      [1] [1, '22.60', '422.70']
+      [2] [1, '17.70', '303.00']
+      [3] [1, '281.60', '300.00']
+      [4] [1, '3.00', '280.00']
+[0;35m    MySQL:[0m
+      [0] [1, '0.01', '428.00']
+      [1] [1, '22.60', '422.70']
+      [2] [1, '17.70', '303.00']
+      [3] [1, '281.60', '300.00']
+      [4] [1, '3.00', '280.00']
+[0;32m    ⚡ Calm is 1.02x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 1. Simple COUNT[0m
+SQL: SELECT COUNT(*) FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.581s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.210s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 2.77x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 2. Simple SELECT with LIMIT[0m
+SQL: SELECT * FROM taxi_trips LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.014s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.001s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_0', datetime.datetime(2024, 1, 1, 0, 57, 55), datetime.datetime(2024, 1, 1, 1, 17, 43), 1, '1.72', '17.70', '0.00', '22.70', 2, 186, 79]
+      [1] ['trip_1', datetime.datetime(2024, 1, 1, 0, 3), datetime.datetime(2024, 1, 1, 0, 9, 36), 1, '1.80', '10.00', '3.75', '18.75', 1, 140, 236]
+      [2] ['trip_6', datetime.datetime(2024, 1, 1, 0, 49, 44), datetime.datetime(2024, 1, 1, 1, 15, 47), 2, '10.82', '45.70', '10.00', '64.95', 1, 138, 181]
+      [3] ['trip_10', datetime.datetime(2024, 1, 1, 0, 35, 22), datetime.datetime(2024, 1, 1, 0, 41, 41), 2, '0.75', '7.90', '0.00', '12.90', 1, 107, 137]
+      [4] ['trip_11', datetime.datetime(2024, 1, 1, 0, 25), datetime.datetime(2024, 1, 1, 0, 34, 3), 2, '1.20', '14.90', '3.95', '23.85', 1, 158, 246]
+[0;35m    MySQL:[0m
+      [0] ['trip_0', '2024-01-01 08:57:55', '2024-01-01 09:17:43', 1, '1.72', '17.70', '0.00', '22.70', 2, 186, 79]
+      [1] ['trip_1', '2024-01-01 08:03:00', '2024-01-01 08:09:36', 1, '1.80', '10.00', '3.75', '18.75', 1, 140, 236]
+      [2] ['trip_10', '2024-01-01 08:35:22', '2024-01-01 08:41:41', 2, '0.75', '7.90', '0.00', '12.90', 1, 107, 137]
+      [3] ['trip_100', '2024-01-01 08:18:24', '2024-01-01 08:30:39', 1, '2.16', '13.50', '0.00', '18.50', 4, 249, 232]
+      [4] ['trip_1000', '2024-01-01 08:14:22', '2024-01-01 08:21:53', 1, '1.17', '9.30', '0.00', '14.30', 4, 170, 161]
+[1;33m    ⚡ MySQL is 14.02x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 3. Time range query (Jan 1, 2024)[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= 1704067200000 AND pickup_datetime < 1704153600000
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.068s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.046s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.46x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 4. Filter by passenger count[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE passenger_count = 2
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.415s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.349s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.19x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 5. COUNT by passenger count[0m
+SQL: SELECT passenger_count, COUNT(*) as count FROM taxi_trips GROUP BY passenger_count ORDER BY passenger_count
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.450s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.546s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.21x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 6. Average fare by payment type[0m
+SQL: SELECT payment_type, AVG(fare_amount) as avg_fare, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type ORDER BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.680s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 5.783s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[0;32m    ⚡ Calm is 8.50x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 7. SUM by payment type[0m
+SQL: SELECT payment_type, SUM(total_amount) as total FROM taxi_trips GROUP BY payment_type ORDER BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.462s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 5.817s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[0;32m    ⚡ Calm is 12.59x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 8. MIN/MAX statistics[0m
+SQL: SELECT MIN(fare_amount) as min_fare, MAX(fare_amount) as max_fare FROM taxi_trips
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.444s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.394s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.12x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 9. COUNT by pickup location (Top 10)[0m
+SQL: SELECT pickup_location_id, COUNT(*) as count FROM taxi_trips GROUP BY pickup_location_id ORDER BY count DESC LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.450s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.271s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[1;33m    ⚡ MySQL is 1.66x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 10. Complex filter (time + passenger + distance)[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= 1704067200000 AND pickup_datetime < 1704672000000 AND passenger_count >= 2 AND trip_distance > 5.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.158s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.459s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 2.91x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 11. High tip trips[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE tip_amount > 10.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.430s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.341s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[1;33m    ⚡ MySQL is 1.26x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 12. Zero fare trips[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE fare_amount = 0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.126s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.320s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 2.55x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 13. Long distance trips[0m
+SQL: SELECT COUNT(*) FROM taxi_trips WHERE trip_distance > 50.0
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 1 rows in 0.072s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 1 rows in 0.313s[0m
+
+[0;32m    ✓ Results match (1 rows)[0m
+[0;32m    ⚡ Calm is 4.33x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 14. Multiple GROUP BY fields[0m
+SQL: SELECT pickup_location_id, dropoff_location_id, COUNT(*) as cnt FROM taxi_trips GROUP BY pickup_location_id, dropoff_location_id ORDER BY cnt DESC LIMIT 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.474s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.745s[0m
+
+[0;32m    ✓ Results match (10 rows)[0m
+[0;32m    ⚡ Calm is 1.57x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 15. HAVING clause[0m
+SQL: SELECT payment_type, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type HAVING cnt > 1000 ORDER BY payment_type
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 5 rows in 0.452s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 5 rows in 0.270s[0m
+
+[0;32m    ✓ Results match (5 rows)[0m
+[1;33m    ⚡ MySQL is 1.67x faster[0m
+[1;33m
+================================================================================[0m
+[1;33m📊 16. Date range + LIKE pattern + ORDER BY + OFFSET[0m
+SQL: SELECT id, pickup_datetime, passenger_count FROM taxi_trips WHERE pickup_datetime >= 1704067200000 AND pickup_datetime < 1704153600000 AND id LIKE '%1%' ORDER BY pickup_datetime DESC LIMIT 10 OFFSET 10
+
+[0;36m  [Calm] Executing...[0m
+[0;32m  [Calm] ✓ 10 rows in 0.109s[0m
+[0;35m  [MySQL] Executing...[0m
+[0;32m  [MySQL] ✓ 10 rows in 0.015s[0m
+
+[0;31m    ❌ Results differ![0m
+[1;33m    First 5 rows from each:[0m
+[0;36m    Calm:[0m
+      [0] ['trip_70103', datetime.datetime(2024, 1, 1, 23, 57, 34), 2]
+      [1] ['trip_69261', datetime.datetime(2024, 1, 1, 23, 57, 33), 1]
+      [2] ['trip_69107', datetime.datetime(2024, 1, 1, 23, 57, 23), 1]
+      [3] ['trip_69718', datetime.datetime(2024, 1, 1, 23, 57, 18), 2]
+      [4] ['trip_70167', datetime.datetime(2024, 1, 1, 23, 57, 13), 1]
+[0;35m    MySQL:[0m
+      [0] ['trip_70103', '2024-01-02 07:57:34', 2]
+      [1] ['trip_69261', '2024-01-02 07:57:33', 1]
+      [2] ['trip_69107', '2024-01-02 07:57:23', 1]
+      [3] ['trip_69718', '2024-01-02 07:57:18', 2]
+      [4] ['trip_70167', '2024-01-02 07:57:13', 1]
+[1;33m    ⚡ MySQL is 7.29x faster[0m
+[0;34m
+================================================================================[0m
+[0;34m=== Test Summary ===[0m
+[0;34m================================================================================[0m
+Total tests: 186
+[0;32mPassed: 141[0m
+[0;31mFailed: 45[0m
+[1;33m
+⚠️  45 test(s) failed. Please investigate differences.[0m
+[0;34m
+✓ Connections closed[0m

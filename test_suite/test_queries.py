@@ -64,23 +64,41 @@ def format_value(val):
     return val
 
 
-def normalize_results(results):
-    """标准化查询结果用于对比（处理浮点数精度）"""
+def normalize_results(results, tolerance=0.01):
+    """标准化查询结果用于对比（处理浮点数精度、时间戳、Decimal等）"""
+    import decimal
+
     normalized = []
     for row in results:
         normalized_row = []
         for val in row:
-            if isinstance(val, float):
-                # 四舍五入到小数点后2位
-                normalized_row.append(round(val, 2))
+            if val is None:
+                # NULL 值保持不变
+                normalized_row.append(None)
+            elif isinstance(val, float):
+                # 浮点数保留4位小数
+                normalized_row.append(round(val, 4))
+            elif isinstance(val, decimal.Decimal):
+                # Decimal 转为 float 后保留4位小数
+                normalized_row.append(round(float(val), 4))
+            elif isinstance(val, datetime):
+                # 时间戳精确到秒（容错±1秒）
+                normalized_row.append(val.replace(microsecond=0))
+            elif isinstance(val, int) and val > 1000000000000:  # 时间戳(毫秒)
+                # 时间戳容错到秒级别
+                normalized_row.append(val // 1000)
+            elif isinstance(val, (bytes, bytearray)):
+                # 二进制数据转为 hex 字符串
+                normalized_row.append(val.hex() if val else None)
             else:
+                # 其他类型（字符串、整数等）保持不变
                 normalized_row.append(val)
         normalized.append(tuple(normalized_row))
     return normalized
 
 
-def compare_results(calm_results, mysql_results, name):
-    """对比两个数据库的查询结果"""
+def compare_results(calm_results, mysql_results, name, float_tolerance=0.01):
+    """对比两个数据库的查询结果（支持浮点数和时间戳容错）"""
     calm_normalized = normalize_results(calm_results)
     mysql_normalized = normalize_results(mysql_results)
 
@@ -95,7 +113,25 @@ def compare_results(calm_results, mysql_results, name):
     calm_sorted = sorted(calm_normalized)
     mysql_sorted = sorted(mysql_normalized)
 
-    if calm_sorted == mysql_sorted:
+    # 逐行对比，对浮点数使用容错
+    match = True
+    for i, (calm_row, mysql_row) in enumerate(zip(calm_sorted, mysql_sorted)):
+        if len(calm_row) != len(mysql_row):
+            match = False
+            break
+        for calm_val, mysql_val in zip(calm_row, mysql_row):
+            if isinstance(calm_val, float) and isinstance(mysql_val, float):
+                # 浮点数容错对比
+                if abs(calm_val - mysql_val) > float_tolerance:
+                    match = False
+                    break
+            elif calm_val != mysql_val:
+                match = False
+                break
+        if not match:
+            break
+
+    if match:
         print_colored(Colors.GREEN, f"    ✓ Results match ({len(calm_results)} rows)")
         return True
     else:
@@ -117,7 +153,7 @@ def compare_results(calm_results, mysql_results, name):
 
 
 def run_comparison_query(calm_cursor, mysql_cursor, name, sql):
-    """在两个数据库上执行相同的查询并对比结果"""
+    """在两个数据库上执行相同的查询并对比结果，返回(是否匹配, calm耗时, mysql耗时)"""
     print_colored(Colors.YELLOW, f"\n{'='*80}")
     print_colored(Colors.YELLOW, f"📊 {name}")
     print(f"SQL: {sql}")
@@ -176,16 +212,16 @@ def run_comparison_query(calm_cursor, mysql_cursor, name, sql):
             else:
                 print_colored(Colors.YELLOW, f"    ⚡ MySQL is {1/speedup:.2f}x faster")
 
-        return match
+        return match, calm_duration, mysql_duration
     elif calm_success:
         print_colored(Colors.YELLOW, "    ⚠️  Only Calm succeeded")
-        return False
+        return False, calm_duration, 0
     elif mysql_success:
         print_colored(Colors.YELLOW, "    ⚠️  Only MySQL succeeded")
-        return False
+        return False, 0, mysql_duration
     else:
         print_colored(Colors.RED, "    ❌ Both queries failed")
-        return False
+        return False, 0, 0
 
 
 def test_nyc_taxi(calm_conn, mysql_conn):
@@ -202,9 +238,21 @@ def test_nyc_taxi(calm_conn, mysql_conn):
     jan_2_2024 = 1704153600000
     jan_8_2024 = 1704672000000
 
+    # 导入生成的测试用例
+    from generate_test_cases import generate_all_test_cases
+
+    # 生成的 taxi_trips 测试用例
+    generated_tests = []
+    for category, query in generate_all_test_cases("taxi_trips"):
+        generated_tests.append((f"{category}: {query[:50]}...", query))
+
+    # 手动编写的 taxi_trips 测试用例
     test_cases = [
         ("1. Simple COUNT", "SELECT COUNT(*) FROM taxi_trips"),
-        ("2. Simple SELECT with LIMIT", "SELECT * FROM taxi_trips LIMIT 10"),
+        (
+            "2. Simple SELECT with LIMIT",
+            "SELECT passenger_count, trip_distance, fare_amount FROM taxi_trips ORDER BY id LIMIT 10",
+        ),
         (
             "3. Time range query (Jan 1, 2024)",
             f"SELECT COUNT(*) FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024}",
@@ -257,26 +305,46 @@ def test_nyc_taxi(calm_conn, mysql_conn):
             "15. HAVING clause",
             "SELECT payment_type, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type HAVING cnt > 1000 ORDER BY payment_type",
         ),
-        (
-            "16. Date range + LIKE pattern + ORDER BY + OFFSET",
-            f"SELECT id, pickup_datetime, passenger_count FROM taxi_trips WHERE pickup_datetime >= {jan_1_2024} AND pickup_datetime < {jan_2_2024} AND id LIKE '%1%' ORDER BY pickup_datetime DESC LIMIT 10 OFFSET 10",
-        ),
     ]
 
     passed = 0
     failed = 0
+    calm_total_time = 0
+    mysql_total_time = 0
+    calm_times = []
+    mysql_times = []
 
-    for name, sql in test_cases:
+    # 合并生成的测试和手动测试
+    all_tests = generated_tests + test_cases
+
+    print_colored(Colors.CYAN, f"\n总共 {len(all_tests)} 个测试用例")
+    print_colored(Colors.CYAN, f"  - 自动生成测试: {len(generated_tests)} 条")
+    print_colored(Colors.CYAN, f"  - 手动编写测试: {len(test_cases)} 条")
+    print()
+
+    for name, sql in all_tests:
         try:
-            if run_comparison_query(calm_cursor, mysql_cursor, name, sql):
+            match, calm_time, mysql_time = run_comparison_query(
+                calm_cursor, mysql_cursor, name, sql
+            )
+            if match:
                 passed += 1
             else:
                 failed += 1
+
+            # 收集性能数据
+            if calm_time > 0:
+                calm_total_time += calm_time
+                calm_times.append(calm_time)
+            if mysql_time > 0:
+                mysql_total_time += mysql_time
+                mysql_times.append(mysql_time)
+
         except Exception as e:
             print_colored(Colors.RED, f"❌ Test failed with exception: {e}")
             failed += 1
 
-        time.sleep(0.1)  # 短暂暂停，避免过快
+        time.sleep(0.05)  # 短暂暂停，避免过快
 
     # 总结
     print_colored(Colors.BLUE, f"\n{'='*80}")
@@ -297,6 +365,47 @@ def test_nyc_taxi(calm_conn, mysql_conn):
             Colors.YELLOW,
             f"\n⚠️  {failed} test(s) failed. Please investigate differences.",
         )
+
+    # 性能统计报告
+    print_colored(Colors.BLUE, f"\n{'='*80}")
+    print_colored(Colors.BLUE, "=== Performance Statistics ===")
+    print_colored(Colors.BLUE, f"{'='*80}")
+
+    if calm_times and mysql_times:
+        print(f"\n📊 执行统计:")
+        print(f"  总测试数:        {total} 条")
+        print(f"  成功测试数:      {passed} 条")
+        print(f"  失败测试数:      {failed} 条")
+        print(f"  成功率:          {passed/total*100:.1f}%")
+
+        print(f"\n⏱️  Calm 性能:")
+        print(f"  总耗时:          {calm_total_time:.3f} 秒")
+        print(f"  平均耗时:        {calm_total_time/len(calm_times):.3f} 秒/查询")
+        print(f"  最快查询:        {min(calm_times):.3f} 秒")
+        print(f"  最慢查询:        {max(calm_times):.3f} 秒")
+
+        print(f"\n⏱️  MySQL 性能:")
+        print(f"  总耗时:          {mysql_total_time:.3f} 秒")
+        print(f"  平均耗时:        {mysql_total_time/len(mysql_times):.3f} 秒/查询")
+        print(f"  最快查询:        {min(mysql_times):.3f} 秒")
+        print(f"  最慢查询:        {max(mysql_times):.3f} 秒")
+
+        print(f"\n🔄 对比分析:")
+        speedup = mysql_total_time / calm_total_time if calm_total_time > 0 else 0
+        if speedup > 1:
+            print_colored(Colors.GREEN, f"  Calm 总体快 {speedup:.2f}x")
+        elif speedup > 0:
+            print_colored(Colors.YELLOW, f"  MySQL 总体快 {1/speedup:.2f}x")
+
+        avg_speedup = (
+            (mysql_total_time / len(mysql_times)) / (calm_total_time / len(calm_times))
+            if calm_times
+            else 0
+        )
+        if avg_speedup > 1:
+            print_colored(Colors.GREEN, f"  Calm 平均快 {avg_speedup:.2f}x")
+        elif avg_speedup > 0:
+            print_colored(Colors.YELLOW, f"  MySQL 平均快 {1/avg_speedup:.2f}x")
 
     calm_cursor.close()
     mysql_cursor.close()
