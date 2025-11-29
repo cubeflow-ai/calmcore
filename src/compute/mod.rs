@@ -43,6 +43,7 @@ pub struct QueryResult {
 /// - 执行逻辑由专门的 executor 负责
 pub struct Executor {
     datafusion_executor: DataFusionExecutor,
+    #[allow(dead_code)]
     engine: Arc<Engine>,
 }
 

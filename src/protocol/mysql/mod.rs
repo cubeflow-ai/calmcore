@@ -281,8 +281,6 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             || query_lower == "begin"
             || query_lower.starts_with("start transaction")
         {
-            log::info!("📨 [MySQL] Received query: {}", query_trimmed);
-
             // 特殊处理: SET TRACING 命令
             if query_lower.starts_with("set tracing") {
                 use crate::utils::tracing::{disable_tracing, enable_tracing, toggle_tracing};
@@ -305,35 +303,22 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                 }
             }
 
-            log::info!("📨 [MySQL] Received query: {}", query_trimmed);
-
             // 返回空结果或默认值
-            log::info!(
-                "🔍 [MySQL] Checking query_lower: starts_with('select @@')={}",
-                query_lower.starts_with("select @@")
-            );
             if query_lower.starts_with("select @@")
                 || query_lower.starts_with("select version()")
                 || query_lower.starts_with("select database()")
             {
                 // 处理多列的 @@variable 查询 (JDBC 初始化查询)
-                log::info!(
-                    "🔧 [MySQL] Handling @@variable query via handle_session_variables_query"
-                );
-                log::info!("📝 [MySQL] Full query: {}", query_without_comment);
                 return self.handle_session_variables_query(query_without_comment, results);
             }
 
             // 处理 SHOW VARIABLES 查询
             if query_lower.starts_with("show variables") {
-                log::info!("🔧 [MySQL] Handling SHOW VARIABLES query");
-                log::info!("📝 [MySQL] Full query: {}", query_without_comment);
                 return self.handle_show_variables(query_without_comment, results);
             }
 
             // select $$ 和其他初始化命令直接返回成功
             // 避免发送复杂的结果集导致协议问题
-            log::info!("🔧 [MySQL] Ignoring query (completed 0,0): {}", query_lower);
             return results.completed(0, 0);
         }
 
@@ -1310,21 +1295,7 @@ fn write_query_result<W: io::Read + io::Write>(
         })
         .collect();
 
-    log::debug!(
-        "🔧 write_query_result: Calling results.start() with {} columns",
-        columns.len()
-    );
-    for (idx, col) in columns.iter().enumerate() {
-        log::debug!(
-            "  Column {}: name='{}', type={:?}",
-            idx,
-            col.column,
-            col.coltype
-        );
-    }
-
     let mut row_writer = results.start(&columns)?;
-    log::debug!("🔧 write_query_result: RowWriter created successfully");
 
     const FLUSH_INTERVAL: usize = 1000; // 每 1000 行 flush 一次,实现背压
     let mut rows_written = 0;
@@ -1362,13 +1333,7 @@ fn write_query_result<W: io::Read + io::Write>(
     }
 
     log::debug!("Finished sending {} rows", rows_written);
-    log::debug!("🔧 write_query_result: Calling row_writer.finish()");
-    let result = row_writer.finish();
-    log::debug!(
-        "🔧 write_query_result: finish() returned {:?}",
-        result.as_ref().map(|_| "Ok").unwrap_or("Err")
-    );
-    result
+    row_writer.finish()
 }
 
 /// 格式化 Arrow 数组值为字符串

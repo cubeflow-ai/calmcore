@@ -349,11 +349,7 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
             auth_context.auth_response = handshake.auth_response.map(|x| x.to_vec());
             auth_context.scramble = Some(&full_scramble);
 
-            eprintln!(
-                "🔐 [Handshake] Client handshake packet seq={}, setting server seq={}",
-                seq,
-                seq + 1
-            );
+            // Client handshake received
             self.rw.set_seq(seq + 1);
 
             #[cfg(not(feature = "tls"))]

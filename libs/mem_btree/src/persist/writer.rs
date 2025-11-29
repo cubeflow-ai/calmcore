@@ -104,6 +104,7 @@ impl TreeWriter {
 
 #[derive(Clone)]
 struct Chunk<K, V> {
+    #[allow(dead_code)]
     chunk_size: usize,
     keys: Vec<K>,
     offsets: Vec<i64>,
@@ -124,6 +125,7 @@ impl<K: Clone, V> Chunk<K, V> {
         }
     }
 
+    #[allow(dead_code)]
     fn is_finish(&self) -> bool {
         self.keys.len() >= self.chunk_size
     }

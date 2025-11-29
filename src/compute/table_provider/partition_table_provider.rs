@@ -44,6 +44,7 @@ impl PartitionTableProvider {
 
     /// Create SegmentScanner for a segment
     /// Simply extracts the needed data from Segment and constructs SegmentScanner
+    #[allow(dead_code)]
     fn create_segment_scanner(&self, segment: &crate::segment::Segment) -> Result<SegmentScanner> {
         // Get cloned index readers from segment (fast - Arc internally)
         let index_readers = segment.get_index_readers();
