@@ -1310,7 +1310,21 @@ fn write_query_result<W: io::Read + io::Write>(
         })
         .collect();
 
+    log::debug!(
+        "🔧 write_query_result: Calling results.start() with {} columns",
+        columns.len()
+    );
+    for (idx, col) in columns.iter().enumerate() {
+        log::debug!(
+            "  Column {}: name='{}', type={:?}",
+            idx,
+            col.column,
+            col.coltype
+        );
+    }
+
     let mut row_writer = results.start(&columns)?;
+    log::debug!("🔧 write_query_result: RowWriter created successfully");
 
     const FLUSH_INTERVAL: usize = 1000; // 每 1000 行 flush 一次,实现背压
     let mut rows_written = 0;
@@ -1348,7 +1362,13 @@ fn write_query_result<W: io::Read + io::Write>(
     }
 
     log::debug!("Finished sending {} rows", rows_written);
-    row_writer.finish()
+    log::debug!("🔧 write_query_result: Calling row_writer.finish()");
+    let result = row_writer.finish();
+    log::debug!(
+        "🔧 write_query_result: finish() returned {:?}",
+        result.as_ref().map(|_| "Ok").unwrap_or("Err")
+    );
+    result
 }
 
 /// 格式化 Arrow 数组值为字符串
