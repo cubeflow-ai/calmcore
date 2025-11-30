@@ -60,50 +60,89 @@ pub enum FieldOption {
         persist_option: Option<PersistOption>,
         /// 是否区分大小写，默认 true（区分）。如果为 false，所有值和查询都会转为小写
         case_sensitive: bool,
+        /// 字段描述/注释
+        description: Option<String>,
+        /// 默认值（JSON 字符串格式）
+        default_value: Option<String>,
+        /// 是否可为空，默认 true
+        nullable: bool,
     },
     I8 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     I16 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     I32 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     I64 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     U8 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     U16 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     U32 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     U64 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     F32 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     F64 {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     Boolean {
         name: String,
         index: bool,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
     Timestamp {
         name: String,
@@ -114,6 +153,9 @@ pub enum FieldOption {
         /// - 自定义格式如 "yyyy-MM-dd HH:mm:ss"
         /// None 表示只接受数值型时间戳
         format: Option<String>,
+        description: Option<String>,
+        default_value: Option<String>,
+        nullable: bool,
     },
 }
 
@@ -243,6 +285,63 @@ impl FieldOption {
         match self {
             FieldOption::Timestamp { format, .. } => format.as_deref(),
             _ => None,
+        }
+    }
+
+    /// 获取字段描述
+    pub fn description(&self) -> Option<&str> {
+        match self {
+            FieldOption::Keyword { description, .. } => description.as_deref(),
+            FieldOption::I8 { description, .. } => description.as_deref(),
+            FieldOption::I16 { description, .. } => description.as_deref(),
+            FieldOption::I32 { description, .. } => description.as_deref(),
+            FieldOption::I64 { description, .. } => description.as_deref(),
+            FieldOption::U8 { description, .. } => description.as_deref(),
+            FieldOption::U16 { description, .. } => description.as_deref(),
+            FieldOption::U32 { description, .. } => description.as_deref(),
+            FieldOption::U64 { description, .. } => description.as_deref(),
+            FieldOption::F32 { description, .. } => description.as_deref(),
+            FieldOption::F64 { description, .. } => description.as_deref(),
+            FieldOption::Boolean { description, .. } => description.as_deref(),
+            FieldOption::Timestamp { description, .. } => description.as_deref(),
+        }
+    }
+
+    /// 获取默认值
+    pub fn default_value(&self) -> Option<&str> {
+        match self {
+            FieldOption::Keyword { default_value, .. } => default_value.as_deref(),
+            FieldOption::I8 { default_value, .. } => default_value.as_deref(),
+            FieldOption::I16 { default_value, .. } => default_value.as_deref(),
+            FieldOption::I32 { default_value, .. } => default_value.as_deref(),
+            FieldOption::I64 { default_value, .. } => default_value.as_deref(),
+            FieldOption::U8 { default_value, .. } => default_value.as_deref(),
+            FieldOption::U16 { default_value, .. } => default_value.as_deref(),
+            FieldOption::U32 { default_value, .. } => default_value.as_deref(),
+            FieldOption::U64 { default_value, .. } => default_value.as_deref(),
+            FieldOption::F32 { default_value, .. } => default_value.as_deref(),
+            FieldOption::F64 { default_value, .. } => default_value.as_deref(),
+            FieldOption::Boolean { default_value, .. } => default_value.as_deref(),
+            FieldOption::Timestamp { default_value, .. } => default_value.as_deref(),
+        }
+    }
+
+    /// 获取是否可为空
+    pub fn nullable(&self) -> bool {
+        match self {
+            FieldOption::Keyword { nullable, .. } => *nullable,
+            FieldOption::I8 { nullable, .. } => *nullable,
+            FieldOption::I16 { nullable, .. } => *nullable,
+            FieldOption::I32 { nullable, .. } => *nullable,
+            FieldOption::I64 { nullable, .. } => *nullable,
+            FieldOption::U8 { nullable, .. } => *nullable,
+            FieldOption::U16 { nullable, .. } => *nullable,
+            FieldOption::U32 { nullable, .. } => *nullable,
+            FieldOption::U64 { nullable, .. } => *nullable,
+            FieldOption::F32 { nullable, .. } => *nullable,
+            FieldOption::F64 { nullable, .. } => *nullable,
+            FieldOption::Boolean { nullable, .. } => *nullable,
+            FieldOption::Timestamp { nullable, .. } => *nullable,
         }
     }
 }

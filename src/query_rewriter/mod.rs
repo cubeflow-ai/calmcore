@@ -172,10 +172,16 @@ mod tests {
                 FieldOption::I64 {
                     name: "updateTime".to_string(),
                     index: true,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
                 FieldOption::I64 {
                     name: "createTime".to_string(),
                     index: true,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
                 FieldOption::Keyword {
                     name: "name".to_string(),
@@ -183,13 +189,20 @@ mod tests {
                     is_array: false,
                     persist_option: None,
                     case_sensitive: true,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
                 FieldOption::I32 {
                     name: "age".to_string(),
                     index: true,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
             ],
             Default::default(),
+            None, // description
         )
     }
 

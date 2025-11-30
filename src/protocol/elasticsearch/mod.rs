@@ -7,7 +7,7 @@ use poem::{
     handler,
     http::StatusCode,
     middleware::{AddData, SetHeader},
-    web::{Data, Json, Path},
+    web::{Data, Json, Path, Query},
     EndpointExt, Response, Route, Server,
 };
 use poem_openapi::types::ToJSON;
@@ -220,23 +220,38 @@ async fn create_index(
                     is_array: false,
                     persist_option: None,
                     case_sensitive: true,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
                 "long" | "integer" => FieldOption::I64 {
                     name: field_name_lower.clone(),
                     index: should_index,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
                 "float" | "double" => FieldOption::F64 {
                     name: field_name_lower.clone(),
                     index: should_index,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
                 "boolean" => FieldOption::Boolean {
                     name: field_name_lower.clone(),
                     index: should_index,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
                 "date" => FieldOption::Timestamp {
                     name: field_name_lower.clone(),
                     index: should_index,
                     format: Some("iso8601".to_string()),
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
                 _ => FieldOption::Keyword {
                     name: field_name_lower.clone(),
@@ -244,6 +259,9 @@ async fn create_index(
                     is_array: false,
                     persist_option: None,
                     case_sensitive: true,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
             };
 
@@ -259,6 +277,9 @@ async fn create_index(
             is_array: false,
             persist_option: None,
             case_sensitive: true,
+            description: None,
+            default_value: None,
+            nullable: true,
         });
     }
 
@@ -269,6 +290,7 @@ async fn create_index(
         true,
         fields,
         crate::schema::PersistPolicy::default(),
+        None, // description
     );
 
     // 创建表（索引）
@@ -387,6 +409,7 @@ async fn list_indices(
 async fn index_document_with_id(
     Data(server): Data<&Arc<ElasticsearchServer>>,
     Path((index, id)): Path<(String, String)>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     Json(document): Json<Value>,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     // 添加 _id 字段到文档
@@ -395,17 +418,39 @@ async fn index_document_with_id(
         map.insert("_id".to_string(), Value::String(id.clone()));
     }
 
-    // 获取 partition
-    let partition_id = server
-        .engine
-        .route_partition(&index, &id)
-        .map_err(|e| not_found(e.to_string()))?;
+    // 检查是否指定了 routing 参数(对应我们的 partition)
+    let partition_id = if let Some(routing) = query.get("routing") {
+        // 使用指定的 routing 作为 partition_id
+        routing.clone()
+    } else {
+        // 使用默认路由策略
+        server
+            .engine
+            .route_partition(&index, &id)
+            .map_err(|e| not_found(e.to_string()))?
+    };
 
-    let partition = server
-        .engine
-        .get_partition(&index, &partition_id)
-        .await
-        .ok_or_else(|| internal_error("Partition not found".to_string()))?;
+    // 获取或创建 partition
+    let partition = match server.engine.get_partition(&index, &partition_id).await {
+        Some(p) => p,
+        None => {
+            // 分区不存在,自动创建
+            log::info!(
+                "Partition '{}' not found for index '{}', creating new partition",
+                partition_id,
+                index
+            );
+            let meta = server
+                .engine
+                .get_table_meta(&index)
+                .map_err(|e| not_found(e.to_string()))?;
+            server
+                .engine
+                .load_partition(&index, partition_id.clone(), meta.schema.clone())
+                .await
+                .map_err(|e| internal_error(format!("Failed to create partition: {}", e)))?
+        }
+    };
 
     // 插入文档
     let result_ids = partition
@@ -433,6 +478,7 @@ async fn index_document_with_id(
 async fn index_document(
     Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     Json(document): Json<Value>,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
     // 生成唯一 ID
@@ -444,17 +490,39 @@ async fn index_document(
         map.insert("_id".to_string(), Value::String(id.clone()));
     }
 
-    // 获取 partition
-    let partition_id = server
-        .engine
-        .route_partition(&index, &id)
-        .map_err(|e| not_found(e.to_string()))?;
+    // 检查是否指定了 routing 参数(对应我们的 partition)
+    let partition_id = if let Some(routing) = query.get("routing") {
+        // 使用指定的 routing 作为 partition_id
+        routing.clone()
+    } else {
+        // 使用默认路由策略
+        server
+            .engine
+            .route_partition(&index, &id)
+            .map_err(|e| not_found(e.to_string()))?
+    };
 
-    let partition = server
-        .engine
-        .get_partition(&index, &partition_id)
-        .await
-        .ok_or_else(|| internal_error("Partition not found".to_string()))?;
+    // 获取或创建 partition
+    let partition = match server.engine.get_partition(&index, &partition_id).await {
+        Some(p) => p,
+        None => {
+            // 分区不存在,自动创建
+            log::info!(
+                "Partition '{}' not found for index '{}', creating new partition",
+                partition_id,
+                index
+            );
+            let meta = server
+                .engine
+                .get_table_meta(&index)
+                .map_err(|e| not_found(e.to_string()))?;
+            server
+                .engine
+                .load_partition(&index, partition_id.clone(), meta.schema.clone())
+                .await
+                .map_err(|e| internal_error(format!("Failed to create partition: {}", e)))?
+        }
+    };
 
     // 插入文档
     let result_ids = partition
@@ -607,7 +675,7 @@ async fn bulk_operation_impl(
             return Err(bad_request("Unknown action type".to_string()).into());
         };
 
-        // 获取索引和 ID
+        // 获取索引、ID 和 routing
         let index_name = action_meta
             .get("_index")
             .and_then(|v| v.as_str())
@@ -619,6 +687,12 @@ async fn bulk_operation_impl(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        // 获取 routing 参数(对应我们的 partition)
+        let routing = action_meta
+            .get("routing")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         // 处理不同操作类型
         match action_type {
@@ -637,8 +711,9 @@ async fn bulk_operation_impl(
 
                 i += 1;
 
-                // 插入文档
-                match insert_document(&server, index_name, &doc_id, doc).await {
+                // 插入文档(支持 routing)
+                match insert_document_with_routing(&server, index_name, &doc_id, doc, routing).await
+                {
                     Ok(_) => {
                         // 严格按照 ES 8.x 响应格式，包含 _type 字段（虽然已废弃但客户端需要）
                         items.push(json!({
@@ -1611,31 +1686,61 @@ async fn insert_document(
     _id: &str,
     doc: Value,
 ) -> Result<(), CoreError> {
-    // 获取表的元数据以确定分区策略
-    let table_meta = server
-        .engine
-        .get_table_meta(index)
-        .map_err(|e| not_found(e.to_string()))?;
+    insert_document_with_routing(server, index, _id, doc, None).await
+}
 
-    // 根据分区策略提取分区字段的值
+async fn insert_document_with_routing(
+    server: &Arc<ElasticsearchServer>,
+    index: &str,
+    _id: &str,
+    doc: Value,
+    routing: Option<String>,
+) -> Result<(), CoreError> {
+    // 如果指定了 routing,直接使用它作为 partition_id
+    let partition_id = if let Some(r) = routing {
+        r
+    } else {
+        // 获取表的元数据以确定分区策略
+        let table_meta = server
+            .engine
+            .get_table_meta(index)
+            .map_err(|e| not_found(e.to_string()))?;
 
-    let partition_value = table_meta
-        .partition_strategy
-        .router_field()
-        .map(|f| doc.get(f).to_json_string())
-        .unwrap_or_default();
+        // 根据分区策略提取分区字段的值
+        let partition_value = table_meta
+            .partition_strategy
+            .router_field()
+            .map(|f| doc.get(f).to_json_string())
+            .unwrap_or_default();
 
-    // 使用分区字段的值来路由
-    let partition_id = server
-        .engine
-        .route_partition(index, &partition_value)
-        .map_err(|e| not_found(e.to_string()))?;
+        // 使用分区字段的值来路由
+        server
+            .engine
+            .route_partition(index, &partition_value)
+            .map_err(|e| not_found(e.to_string()))?
+    };
 
-    let partition = server
-        .engine
-        .get_partition(index, &partition_id)
-        .await
-        .ok_or_else(|| internal_error("Partition not found".to_string()))?;
+    // 获取或创建 partition
+    let partition = match server.engine.get_partition(index, &partition_id).await {
+        Some(p) => p,
+        None => {
+            // 分区不存在,自动创建
+            log::info!(
+                "Partition '{}' not found for index '{}', creating new partition",
+                partition_id,
+                index
+            );
+            let meta = server
+                .engine
+                .get_table_meta(index)
+                .map_err(|e| not_found(e.to_string()))?;
+            server
+                .engine
+                .load_partition(index, partition_id.clone(), meta.schema.clone())
+                .await
+                .map_err(|e| internal_error(format!("Failed to create partition: {}", e)))?
+        }
+    };
 
     partition
         .upsert_json(&[doc])

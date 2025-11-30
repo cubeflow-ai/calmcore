@@ -2,6 +2,7 @@
 name = "calm"
 version = "0.1.0"
 edition = "2021"
+default-run = "calm"
 
 [dependencies]
 version_macro = "0.1.0"

@@ -50,6 +50,8 @@ pub struct Schema {
     pub store_source: bool,
     pub fields: Vec<field::FieldOption>,
     pub persist_policy: PersistPolicy,
+    /// 表描述/注释
+    pub description: Option<String>,
 }
 
 impl Schema {
@@ -60,6 +62,7 @@ impl Schema {
         store_source: bool,
         mut fields: Vec<field::FieldOption>,
         persist_policy: PersistPolicy,
+        description: Option<String>,
     ) -> Self {
         // 规范化所有字段名为小写
         for field in &mut fields {
@@ -71,6 +74,7 @@ impl Schema {
             store_source,
             fields,
             persist_policy,
+            description,
         }
     }
 

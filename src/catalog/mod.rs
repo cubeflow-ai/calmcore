@@ -292,6 +292,9 @@ mod tests {
                 FieldOption::U64 {
                     name: "id".to_string(),
                     index: true,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
                 FieldOption::Keyword {
                     name: "name".to_string(),
@@ -299,9 +302,13 @@ mod tests {
                     is_array: false,
                     persist_option: None,
                     case_sensitive: true,
+                    description: None,
+                    default_value: None,
+                    nullable: true,
                 },
             ],
             Default::default(),
+            None, // description
         );
 
         let meta = TableMeta::new(

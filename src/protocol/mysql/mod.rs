@@ -1020,51 +1020,87 @@ async fn handle_create_table(
             "INT" | "INTEGER" | "INT32" => FieldOption::I32 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "TINYINT" | "INT8" => FieldOption::I8 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "SMALLINT" | "INT16" => FieldOption::I16 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "BIGINT" | "INT64" => FieldOption::I64 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "TINYINT UNSIGNED" | "UINT8" => FieldOption::U8 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "SMALLINT UNSIGNED" | "UINT16" => FieldOption::U16 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "INT UNSIGNED" | "UINT32" => FieldOption::U32 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "BIGINT UNSIGNED" | "UINT64" => FieldOption::U64 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "FLOAT" | "FLOAT32" => FieldOption::F32 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "DOUBLE" | "FLOAT64" => FieldOption::F64 {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "BOOL" | "BOOLEAN" => FieldOption::Boolean {
                 name: col_name,
                 index: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "TIMESTAMP" | "DATETIME" => FieldOption::Timestamp {
                 name: col_name,
                 index: true,
                 format: Some("iso8601".to_string()),
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             "TEXT" | "STRING" | "VARCHAR" | "CHAR" => FieldOption::Keyword {
                 name: col_name,
@@ -1072,6 +1108,9 @@ async fn handle_create_table(
                 is_array: false,
                 persist_option: None,
                 case_sensitive: true,
+                description: None,
+                default_value: None,
+                nullable: true,
             },
             _ => {
                 return Err(format!("Unsupported column type: {}", col_type));
@@ -1092,6 +1131,7 @@ async fn handle_create_table(
         true,
         fields,
         Default::default(),
+        None, // description
     );
 
     // 创建表 (使用 Hash 分区策略)
