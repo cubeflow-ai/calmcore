@@ -1,6 +1,7 @@
 // Executor 层
 mod ballista_executor;
 mod natural_order_executor;
+mod information_schema_executor;
 
 // Table Provider 层
 pub mod table_provider;

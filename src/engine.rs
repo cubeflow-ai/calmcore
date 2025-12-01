@@ -339,6 +339,12 @@ impl Engine {
         self.catalog.list_tables()
     }
 
+    /// 获取表的 Schema（用于 INFORMATION_SCHEMA 查询）
+    pub async fn get_table_schema(&self, table_name: &str) -> CoreResult<Arc<crate::schema::Schema>> {
+        let table_meta = self.catalog.get_table(table_name)?;
+        Ok(Arc::new(table_meta.schema.clone()))
+    }
+
     /// 删除表
     pub async fn drop_table(&self, table_name: &str) -> CoreResult<()> {
         // 直接扫描磁盘上的 partitions 子目录，不依赖分区策略

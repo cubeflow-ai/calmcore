@@ -10,7 +10,10 @@ use std::sync::Arc;
 
 use datafusion::prelude::*;
 
-use super::{natural_order_executor::NaturalOrderExecutor, QueryResult};
+use super::{
+    information_schema_executor::InformationSchemaExecutor,
+    natural_order_executor::NaturalOrderExecutor, QueryResult,
+};
 use crate::compute::{SqlNormalizer, UnionTableProvider};
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
@@ -24,12 +27,14 @@ use crate::utils::error::{CoreError, CoreResult};
 pub struct DataFusionExecutor {
     engine: Arc<Engine>,
     natural_order_executor: NaturalOrderExecutor,
+    information_schema_executor: InformationSchemaExecutor,
 }
 
 impl DataFusionExecutor {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self {
             natural_order_executor: NaturalOrderExecutor::new(engine.clone()),
+            information_schema_executor: InformationSchemaExecutor::new(engine.clone()),
             engine,
         }
     }
@@ -61,14 +66,25 @@ impl DataFusionExecutor {
             return self.execute_natural_order(&normalized_sql).await;
         }
 
-        // 从 SQL 中提取表名 (简化版本,生产环境需要更健壮的解析)
-        let table_name = self.extract_table_name(&normalized_sql)?;
-
         // 创建 DataFusion SessionContext
         // 自动使用所有 CPU 核心进行并行执行
         let config = SessionConfig::new().with_target_partitions(32); // 32 路并行 (4 partition × 8 segment)
 
         let ctx = SessionContext::new_with_config(config);
+
+        // 从 SQL 中提取表名 (简化版本,生产环境需要更健壮的解析)
+        let table_name = self.extract_table_name(&normalized_sql)?;
+
+        // 🔍 特殊处理: INFORMATION_SCHEMA 查询
+        if table_name.to_lowercase().contains("information")
+            || table_name.to_lowercase().contains("schema")
+        {
+            log::info!("🔍 [INFORMATION_SCHEMA] Routing to InformationSchemaExecutor");
+            return self
+                .information_schema_executor
+                .execute(&normalized_sql)
+                .await;
+        }
 
         // 获取所有 partition
         let partition_names = self.engine.list_partitions(&table_name).await;
@@ -176,12 +192,12 @@ impl DataFusionExecutor {
         if let Some(from_pos) = sql_upper.find(" FROM ") {
             let after_from = &sql[from_pos + 6..].trim();
 
-            // 提取第一个单词作为表名
+            // 提取表名（可能包含 schema.table 格式）
             let table_name = after_from
                 .split_whitespace()
                 .next()
                 .unwrap_or("")
-                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
 
             if !table_name.is_empty() {
                 return Ok(table_name.to_string());
@@ -200,7 +216,9 @@ mod tests {
 
     #[test]
     fn test_extract_table_name() {
-        let executor = DataFusionExecutor::new(Arc::new(Engine::new()));
+        use crate::engine::EngineConfig;
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let executor = DataFusionExecutor::new(engine);
 
         assert_eq!(
             executor.extract_table_name("SELECT * FROM users").unwrap(),
