@@ -1774,8 +1774,7 @@ impl SegmentStream {
             );
         }
 
-        // 2. 批量读取这一批的 storage batches
-        let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
+        // 2. 处理空投影（COUNT）- 不读取任何数据
         let is_empty_projection = self.projection.as_ref().is_some_and(|p| p.is_empty());
 
         log::debug!(
@@ -1784,67 +1783,56 @@ impl SegmentStream {
             is_empty_projection
         );
 
-        // 🚨 修复: 即使是空投影(COUNT),也必须读取数据来验证行的存在性
-        // 原因: bitmap 中的 doc_id 可能在 parquet 中已被删除或不存在
-        // 解决方案: 对于空投影,读取所有列(因为需要确认行的完整性)
-        let source_batches = if is_empty_projection {
-            log::debug!("🔧 [SegmentStream] Empty projection (COUNT), reading all columns to verify row existence");
-            // 必须读取所有列(projection=None)来确保 row schema 正确
-            self.raw_data.get_batch_with_projection(&batch_keys, None)
-        } else {
+        if is_empty_projection {
+            // ⚡ COUNT 优化：空投影时直接使用 bitmap 计数，不读取任何数据
             log::debug!(
-                "🔧 [SegmentStream] Reading {} batches with projection",
-                batch_keys.len()
+                "⚡ [SegmentStream] Empty projection (COUNT), using bitmap only - NO data read"
             );
-            let proj_to_use = self.projection.as_deref();
-            self.raw_data
-                .get_batch_with_projection(&batch_keys, proj_to_use)
-        };
 
-        // 3. 生成 RecordBatches
+            let mut result_batches = Vec::new();
+
+            // 直接根据 doc_ids 数量创建空 batch
+            for (_batch_start_id, doc_ids_in_batch) in batch_groups {
+                let row_count = doc_ids_in_batch.len();
+
+                if row_count > 0 {
+                    if let Ok(batch) = RecordBatch::try_new_with_options(
+                        self.schema.clone(),
+                        vec![],
+                        &datafusion::arrow::record_batch::RecordBatchOptions::new()
+                            .with_row_count(Some(row_count)),
+                    ) {
+                        result_batches.push(batch);
+                    } else {
+                        log::warn!("  [SegmentStream] Failed to create empty projection batch with {} rows", row_count);
+                    }
+                }
+            }
+
+            // 更新已返回的行数（用于 LIMIT 下推）
+            let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+            self.rows_returned += total_rows;
+
+            return Ok(result_batches);
+        }
+
+        // 3. 正常投影：读取实际数据
+        let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
+
+        log::debug!(
+            "🔧 [SegmentStream] Reading {} batches with projection",
+            batch_keys.len()
+        );
+
+        let proj_to_use = self.projection.as_deref();
+        let source_batches = self
+            .raw_data
+            .get_batch_with_projection(&batch_keys, proj_to_use);
+
+        // 4. 生成 RecordBatches
         let mut result_batches = Vec::new();
 
         for (batch_start_id, doc_ids_in_batch) in batch_groups {
-            // 🚨 修复: 空投影处理 - 必须读取实际数据并验证行存在性
-            // 不能直接使用 bitmap 大小,因为:
-            // 1. bitmap 中的 doc_id 可能在 parquet 中已被删除
-            // 2. 可能有 unsupported_filters 需要在 DataFusion 层面过滤
-            // 因此即使是空投影(COUNT),也必须确认实际行数
-            if is_empty_projection {
-                // 对于空投影,仍需要从 source_batch 中确认行的存在性
-                if let Some(source_batch) = source_batches.get(&batch_start_id) {
-                    // 计算有效的行索引(确保在 source_batch 范围内)
-                    let valid_row_count = doc_ids_in_batch
-                        .iter()
-                        .filter(|&&doc_id| {
-                            let row_idx = (doc_id - batch_start_id) as usize;
-                            row_idx < source_batch.num_rows()
-                        })
-                        .count();
-
-                    if valid_row_count > 0 {
-                        if let Ok(batch) = RecordBatch::try_new_with_options(
-                            self.schema.clone(),
-                            vec![],
-                            &datafusion::arrow::record_batch::RecordBatchOptions::new()
-                                .with_row_count(Some(valid_row_count)),
-                        ) {
-                            result_batches.push(batch);
-                        } else {
-                            log::warn!("  [SegmentStream] Failed to create empty projection batch with {} rows", valid_row_count);
-                        }
-                    }
-                } else {
-                    // source_batch 不存在,说明这个 batch 已被删除,跳过
-                    log::debug!(
-                        "  [SegmentStream] Batch {} not found (deleted), skipping {} doc_ids",
-                        batch_start_id,
-                        doc_ids_in_batch.len()
-                    );
-                }
-                continue;
-            }
-
             // 正常投影处理
             if let Some(source_batch) = source_batches.get(&batch_start_id) {
                 log::debug!("  [SegmentStream] Processing batch_start_id={}, source_batch has {} rows, {} doc_ids to process",
