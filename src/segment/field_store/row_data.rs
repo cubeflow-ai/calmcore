@@ -67,8 +67,8 @@ impl ParquetRowDataReader {
         // Fallback: if no metadata, calculate cumulative row counts as keys
         // For external Parquet files, doc_id = row_index (0-based)
         if key_to_rowgroup.is_empty() {
-            log::warn!(
-                "  Warning: No row_group_keys metadata found, using cumulative row counts..."
+            log::debug!(
+                "  No row_group_keys metadata found, using cumulative row counts (fallback)"
             );
             let mut cumulative_rows = 0u32;
             for rg_idx in 0..num_row_groups {

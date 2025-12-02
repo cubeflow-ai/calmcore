@@ -179,6 +179,7 @@ where
                 result = temp | item.1.clone();
                 keys_scanned += 1;
             }
+            log::debug!("Range union (fallback): scanned {} keys", keys_scanned);
             return Ok(result);
         }
 
@@ -192,6 +193,12 @@ where
             &mut chunks_scanned,
             &mut keys_scanned,
         )?;
+
+        log::debug!(
+            "Range union: scanned {} chunks, {} keys",
+            chunks_scanned,
+            keys_scanned
+        );
 
         Ok(result)
     }

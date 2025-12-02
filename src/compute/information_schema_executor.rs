@@ -3,7 +3,9 @@
 //! 专门处理 INFORMATION_SCHEMA.TABLES 等元数据查询
 //! 完全独立的逻辑，不影响现有的查询执行流程
 
-use datafusion::arrow::array::{Int64Array, RecordBatch, StringArray, TimestampSecondArray};
+use datafusion::arrow::array::{
+    Int32Array, Int64Array, RecordBatch, StringArray, TimestampSecondArray,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::prelude::*;
@@ -26,22 +28,32 @@ impl InformationSchemaExecutor {
     pub async fn execute_stream(&self, sql: &str) -> CoreResult<SendableRecordBatchStream> {
         log::info!("🔍 [INFORMATION_SCHEMA] Executing query");
 
-        // 🎯 特殊处理：JDBC getTables() 查询（避免 DataFusion 的 CASE/HAVING bug）
-        // 使用快速路径的条件（满足任一即可）：
-        // 1. 包含 JDBC 标准字段（TABLE_CAT, TABLE_SCHEM, REMARKS 等）
-        // 2. 包含 CASE 表达式（嵌套 CASE 会导致 DataFusion 挂起）
-        // 3. 包含 HAVING 子句（HAVING 不带 GROUP BY 是 MySQL 非标准语法）
+        // 🎯 特殊处理：JDBC 元数据查询（避免 DataFusion 的 CASE/HAVING bug）
         let sql_upper = sql.to_uppercase();
+        let is_tables_query = sql_upper.contains("FROM INFORMATION_SCHEMA.TABLES");
+        let is_columns_query = sql_upper.contains("FROM INFORMATION_SCHEMA.COLUMNS");
         let has_jdbc_fields = (sql_upper.contains("TABLE_CAT")
             || sql_upper.contains("TABLE_SCHEM"))
             && (sql_upper.contains("REMARKS") || sql_upper.contains("REF_GENERATION"));
         let has_case = sql_upper.contains("CASE WHEN");
         let has_having = sql_upper.contains(" HAVING ");
 
-        if has_jdbc_fields || has_case || has_having {
-            log::info!("🎯 [INFORMATION_SCHEMA] Using JDBC fast path");
+        // JDBC getTables() 快速路径
+        if is_tables_query && (has_jdbc_fields || has_case || has_having) {
+            log::info!("🎯 [INFORMATION_SCHEMA] Using JDBC getTables() fast path");
             let result = self.execute_jdbc_get_tables(sql).await?;
             // 转换为 Stream
+            use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+            let schema = result.schema();
+            let stream = stream::once(async move { Ok(result) });
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
+        }
+
+        // JDBC getColumns() 快速路径 - 返回空结果
+        // TODO: 实现完整的列信息支持
+        if is_columns_query && has_case {
+            log::info!("🎯 [INFORMATION_SCHEMA] Using JDBC getColumns() fast path (empty result)");
+            let result = self.execute_jdbc_get_columns_empty().await?;
             use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
             let schema = result.schema();
             let stream = stream::once(async move { Ok(result) });
@@ -321,5 +333,204 @@ impl InformationSchemaExecutor {
         log::info!("✅ [JDBC getTables] Returning {} rows", row_count);
 
         Ok(batch)
+    }
+
+    /// 快速路径：返回 JDBC getColumns() 结果，包含真实的列信息
+    async fn execute_jdbc_get_columns_empty(&self) -> CoreResult<RecordBatch> {
+        log::info!("🎯 [JDBC getColumns] Fetching column information");
+
+        // 从 Engine 获取所有表的 schema
+        let tables = self.engine.list_tables();
+
+        // 准备结果数据
+        let mut table_cats: Vec<Option<String>> = Vec::new();
+        let mut table_schems: Vec<Option<String>> = Vec::new();
+        let mut table_names: Vec<String> = Vec::new();
+        let mut column_names: Vec<String> = Vec::new();
+        let mut data_types: Vec<i32> = Vec::new();
+        let mut type_names: Vec<String> = Vec::new();
+        let mut column_sizes: Vec<Option<i32>> = Vec::new();
+        let mut buffer_lengths: Vec<Option<i32>> = Vec::new();
+        let mut decimal_digits_vec: Vec<Option<i32>> = Vec::new();
+        let mut num_prec_radixes: Vec<Option<i32>> = Vec::new();
+        let mut nullables: Vec<i32> = Vec::new();
+        let mut remarks_vec: Vec<Option<String>> = Vec::new();
+        let mut column_defs: Vec<Option<String>> = Vec::new();
+        let mut sql_data_types: Vec<Option<i32>> = Vec::new();
+        let mut sql_datetime_subs: Vec<Option<i32>> = Vec::new();
+        let mut char_octet_lengths: Vec<Option<i32>> = Vec::new();
+        let mut ordinal_positions: Vec<i32> = Vec::new();
+        let mut is_nullables: Vec<String> = Vec::new();
+        let mut scope_catalogs: Vec<Option<String>> = Vec::new();
+        let mut scope_schemas: Vec<Option<String>> = Vec::new();
+        let mut scope_tables: Vec<Option<String>> = Vec::new();
+        let mut source_data_types: Vec<Option<i32>> = Vec::new();
+        let mut is_autoincrements: Vec<String> = Vec::new();
+        let mut is_generatedcolumns: Vec<String> = Vec::new();
+
+        // 遍历所有表并获取列信息
+        for table_name in &tables {
+            // 获取表的 schema
+            let table_schema = match self.engine.get_table_schema(table_name).await {
+                Ok(schema) => schema,
+                Err(_) => continue, // 跳过无法获取 schema 的表
+            };
+
+            // 遍历所有字段
+            for (ordinal, field) in table_schema.fields.iter().enumerate() {
+                // 使用表名作为数据库名（CalmCore 是单数据库系统）
+                let db_name = table_name.to_string();
+
+                table_cats.push(Some(db_name));
+                table_schems.push(None); // MySQL 不使用 schema
+                table_names.push(table_name.to_string());
+                column_names.push(field.name().to_string());
+
+                // 映射 CalmCore FieldType 到 JDBC SQL Types
+                let (sql_type, type_name, column_size, decimal_digits) =
+                    self.map_field_type_to_jdbc(&field.field_type());
+
+                data_types.push(sql_type);
+                type_names.push(type_name);
+                column_sizes.push(column_size);
+                buffer_lengths.push(None);
+                decimal_digits_vec.push(decimal_digits);
+                num_prec_radixes.push(Some(10)); // 数值类型使用十进制
+
+                // Nullable: 1 = nullable, 0 = not null
+                let is_nullable = field.nullable();
+                nullables.push(if is_nullable { 1 } else { 0 });
+                is_nullables.push(if is_nullable {
+                    "YES".to_string()
+                } else {
+                    "NO".to_string()
+                });
+
+                remarks_vec.push(None);
+                column_defs.push(None);
+                sql_data_types.push(None);
+                sql_datetime_subs.push(None);
+
+                // 字符类型的字节长度
+                char_octet_lengths.push(match field.field_type() {
+                    crate::schema::field::FieldType::Keyword => Some(65535),
+                    _ => None,
+                });
+
+                ordinal_positions.push((ordinal + 1) as i32);
+                scope_catalogs.push(None);
+                scope_schemas.push(None);
+                scope_tables.push(None);
+                source_data_types.push(None);
+                is_autoincrements.push("NO".to_string());
+                is_generatedcolumns.push("NO".to_string());
+            }
+        }
+
+        // 构建结果 schema - 匹配 MySQL JDBC getColumns() 格式
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("TABLE_SCHEMA", DataType::Utf8, true),
+            Field::new("NULL", DataType::Utf8, true),
+            Field::new("TABLE_NAME", DataType::Utf8, false),
+            Field::new("COLUMN_NAME", DataType::Utf8, false),
+            Field::new("DATA_TYPE", DataType::Int32, false),
+            Field::new("TYPE_NAME", DataType::Utf8, false),
+            Field::new("COLUMN_SIZE", DataType::Int32, true),
+            Field::new("BUFFER_LENGTH", DataType::Int32, true),
+            Field::new("DECIMAL_DIGITS", DataType::Int32, true),
+            Field::new("NUM_PREC_RADIX", DataType::Int32, true),
+            Field::new("NULLABLE", DataType::Int32, false),
+            Field::new("REMARKS", DataType::Utf8, true),
+            Field::new("COLUMN_DEF", DataType::Utf8, true),
+            Field::new("SQL_DATA_TYPE", DataType::Int32, true),
+            Field::new("SQL_DATETIME_SUB", DataType::Int32, true),
+            Field::new("CHAR_OCTET_LENGTH", DataType::Int32, true),
+            Field::new("ORDINAL_POSITION", DataType::Int32, false),
+            Field::new("IS_NULLABLE", DataType::Utf8, false),
+            Field::new("SCOPE_CATALOG", DataType::Utf8, true),
+            Field::new("SCOPE_SCHEMA", DataType::Utf8, true),
+            Field::new("SCOPE_TABLE", DataType::Utf8, true),
+            Field::new("SOURCE_DATA_TYPE", DataType::Int32, true),
+            Field::new("IS_AUTOINCREMENT", DataType::Utf8, false),
+            Field::new("IS_GENERATEDCOLUMN", DataType::Utf8, false),
+        ]));
+
+        let row_count = column_names.len();
+
+        // 构建 RecordBatch
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(table_cats)),
+                Arc::new(StringArray::from(table_schems)),
+                Arc::new(StringArray::from(table_names)),
+                Arc::new(StringArray::from(column_names)),
+                Arc::new(Int32Array::from(data_types)),
+                Arc::new(StringArray::from(type_names)),
+                Arc::new(Int32Array::from(column_sizes)),
+                Arc::new(Int32Array::from(buffer_lengths)),
+                Arc::new(Int32Array::from(decimal_digits_vec)),
+                Arc::new(Int32Array::from(num_prec_radixes)),
+                Arc::new(Int32Array::from(nullables)),
+                Arc::new(StringArray::from(remarks_vec)),
+                Arc::new(StringArray::from(column_defs)),
+                Arc::new(Int32Array::from(sql_data_types)),
+                Arc::new(Int32Array::from(sql_datetime_subs)),
+                Arc::new(Int32Array::from(char_octet_lengths)),
+                Arc::new(Int32Array::from(ordinal_positions)),
+                Arc::new(StringArray::from(is_nullables)),
+                Arc::new(StringArray::from(scope_catalogs)),
+                Arc::new(StringArray::from(scope_schemas)),
+                Arc::new(StringArray::from(scope_tables)),
+                Arc::new(Int32Array::from(source_data_types)),
+                Arc::new(StringArray::from(is_autoincrements)),
+                Arc::new(StringArray::from(is_generatedcolumns)),
+            ],
+        )
+        .map_err(|e| CoreError::Internal(format!("Failed to create columns batch: {}", e)))?;
+
+        log::info!("✅ [JDBC getColumns] Returning {} rows", row_count);
+
+        Ok(batch)
+    }
+
+    /// 映射 CalmCore FieldType 到 JDBC SQL Types
+    /// 返回: (sql_type_code, type_name, column_size, decimal_digits)
+    ///
+    /// JDBC SQL Type 常量参考 java.sql.Types:
+    /// CHAR=1, NUMERIC=2, DECIMAL=3, INTEGER=4, SMALLINT=5, FLOAT=6, REAL=7, DOUBLE=8,
+    /// VARCHAR=12, BOOLEAN=16, TINYINT=-6, BIGINT=-5, VARBINARY=-2, TIMESTAMP=93
+    fn map_field_type_to_jdbc(
+        &self,
+        field_type: &crate::schema::field::FieldType,
+    ) -> (i32, String, Option<i32>, Option<i32>) {
+        use crate::schema::field::FieldType;
+
+        match field_type {
+            // 字符串类型
+            FieldType::Keyword => (12, "VARCHAR".to_string(), Some(65535), None),
+
+            // 整数类型
+            FieldType::I8 => (-6, "TINYINT".to_string(), Some(3), Some(0)),
+            FieldType::I16 => (5, "SMALLINT".to_string(), Some(5), Some(0)),
+            FieldType::I32 => (4, "INTEGER".to_string(), Some(10), Some(0)),
+            FieldType::I64 => (-5, "BIGINT".to_string(), Some(19), Some(0)),
+
+            // 无符号整数
+            FieldType::U8 => (-6, "TINYINT UNSIGNED".to_string(), Some(3), Some(0)),
+            FieldType::U16 => (5, "SMALLINT UNSIGNED".to_string(), Some(5), Some(0)),
+            FieldType::U32 => (4, "INTEGER UNSIGNED".to_string(), Some(10), Some(0)),
+            FieldType::U64 => (-5, "BIGINT UNSIGNED".to_string(), Some(20), Some(0)),
+
+            // 浮点类型
+            FieldType::F32 => (7, "REAL".to_string(), Some(7), Some(31)),
+            FieldType::F64 => (8, "DOUBLE".to_string(), Some(15), Some(31)),
+
+            // 布尔类型
+            FieldType::Boolean => (16, "BOOLEAN".to_string(), Some(1), None),
+
+            // 时间戳类型（存储为 i64 毫秒）
+            FieldType::Timestamp => (93, "TIMESTAMP".to_string(), Some(23), Some(3)),
+        }
     }
 }
