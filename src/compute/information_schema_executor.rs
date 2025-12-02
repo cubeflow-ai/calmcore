@@ -24,7 +24,23 @@ impl InformationSchemaExecutor {
     /// 执行 INFORMATION_SCHEMA 查询
     pub async fn execute(&self, sql: &str) -> CoreResult<QueryResult> {
         log::info!("🔍 [INFORMATION_SCHEMA] Executing query");
-        log::info!("🔍 [INFORMATION_SCHEMA] Original SQL: {}", sql);
+
+        // 🎯 特殊处理：JDBC getTables() 查询（避免 DataFusion 的 CASE/HAVING bug）
+        // 使用快速路径的条件（满足任一即可）：
+        // 1. 包含 JDBC 标准字段（TABLE_CAT, TABLE_SCHEM, REMARKS 等）
+        // 2. 包含 CASE 表达式（嵌套 CASE 会导致 DataFusion 挂起）
+        // 3. 包含 HAVING 子句（HAVING 不带 GROUP BY 是 MySQL 非标准语法）
+        let sql_upper = sql.to_uppercase();
+        let has_jdbc_fields = (sql_upper.contains("TABLE_CAT")
+            || sql_upper.contains("TABLE_SCHEM"))
+            && (sql_upper.contains("REMARKS") || sql_upper.contains("REF_GENERATION"));
+        let has_case = sql_upper.contains("CASE WHEN");
+        let has_having = sql_upper.contains(" HAVING ");
+
+        if has_jdbc_fields || has_case || has_having {
+            log::info!("🎯 [INFORMATION_SCHEMA] Using JDBC fast path");
+            return self.execute_jdbc_get_tables(sql).await;
+        }
 
         // 提取数据库名
         let db_name = Self::extract_database_name(sql);
@@ -213,24 +229,108 @@ impl InformationSchemaExecutor {
         sql.replace(" HAVING ", " AND ")
     }
 
-    /// 提取数据库名
+    /// 提取数据库名（从 WHERE 子句中提取）
     fn extract_database_name(sql: &str) -> String {
-        let patterns = [
-            "table_schema = '",
-            "table_schema='",
-            "TABLE_SCHEMA = '",
-            "TABLE_SCHEMA='",
-        ];
+        let sql_upper = sql.to_uppercase();
 
-        for pattern in &patterns {
-            if let Some(pos) = sql.find(pattern) {
-                let after = &sql[pos + pattern.len()..];
-                if let Some(end_pos) = after.find('\'') {
-                    return after[..end_pos].to_string();
+        // 找到 WHERE 子句的位置
+        if let Some(where_pos) = sql_upper.find(" WHERE ") {
+            // 只在 WHERE 子句后面查找
+            let after_where = &sql[where_pos + 7..];
+            let after_where_upper = &sql_upper[where_pos + 7..];
+
+            // 找到第一个 TABLE_SCHEMA = '...'
+            let patterns = [("TABLE_SCHEMA = '", 16), ("TABLE_SCHEMA='", 15)];
+
+            for (pattern, pattern_len) in &patterns {
+                if let Some(pos) = after_where_upper.find(pattern) {
+                    let after_pattern = &after_where[pos + pattern_len..];
+                    if let Some(end_pos) = after_pattern.find('\'') {
+                        let db_name = &after_pattern[..end_pos];
+                        return db_name.to_string();
+                    }
                 }
             }
         }
-
         "calm".to_string()
+    }
+
+    /// 快速路径：直接处理 JDBC getTables() 查询
+    /// 避免 DataFusion 嵌套 CASE 表达式的 bug
+    async fn execute_jdbc_get_tables(&self, sql: &str) -> CoreResult<QueryResult> {
+        // 提取数据库名（schema）
+        let db_name = Self::extract_database_name(sql);
+        log::info!("🎯 [JDBC getTables] Schema: {}", db_name);
+
+        // 获取所有表名
+        let table_names = self.engine.list_tables();
+
+        // 过滤：只返回匹配 schema 的表
+        // 注意：这里假设 table_name 本身就是 schema 名（taxi_trips）
+        // 或者 db_name 是表名的一部分
+        let filtered_tables: Vec<String> = if db_name == "calm" {
+            // 返回所有表
+            table_names
+        } else {
+            // 只返回匹配的表
+            table_names
+                .into_iter()
+                .filter(|t| t == &db_name || t.contains(&db_name))
+                .collect()
+        };
+
+        log::info!("🎯 [JDBC getTables] Found {} tables", filtered_tables.len());
+
+        // 构建 JDBC 标准结果
+        let row_count = filtered_tables.len();
+
+        // 创建 Schema：JDBC getTables() 标准字段
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("table_cat", DataType::Utf8, true), // TABLE_SCHEMA AS TABLE_CAT
+            Field::new("table_schem", DataType::Utf8, true), // NULL AS TABLE_SCHEM
+            Field::new("table_name", DataType::Utf8, false), // TABLE_NAME
+            Field::new("table_type", DataType::Utf8, false), // 'TABLE'
+            Field::new("remarks", DataType::Utf8, true),   // TABLE_COMMENT AS REMARKS
+            Field::new("type_cat", DataType::Utf8, true),  // NULL AS TYPE_CAT
+            Field::new("type_schem", DataType::Utf8, true), // NULL AS TYPE_SCHEM
+            Field::new("type_name", DataType::Utf8, true), // NULL AS TYPE_NAME
+            Field::new("self_referencing_col_name", DataType::Utf8, true), // NULL
+            Field::new("ref_generation", DataType::Utf8, true), // NULL
+        ]));
+
+        // 构建数据
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                // TABLE_CAT: 使用数据库名
+                Arc::new(StringArray::from(vec![db_name.as_str(); row_count])),
+                // TABLE_SCHEM: NULL
+                Arc::new(StringArray::from(vec![None::<String>; row_count])),
+                // TABLE_NAME: 实际表名
+                Arc::new(StringArray::from(filtered_tables)),
+                // TABLE_TYPE: 全部返回 'TABLE' (因为 HAVING 过滤了 TABLE_TYPE IN ('TABLE','VIEW'))
+                Arc::new(StringArray::from(vec!["TABLE"; row_count])),
+                // REMARKS: NULL
+                Arc::new(StringArray::from(vec![None::<String>; row_count])),
+                // TYPE_CAT: NULL
+                Arc::new(StringArray::from(vec![None::<String>; row_count])),
+                // TYPE_SCHEM: NULL
+                Arc::new(StringArray::from(vec![None::<String>; row_count])),
+                // TYPE_NAME: NULL
+                Arc::new(StringArray::from(vec![None::<String>; row_count])),
+                // SELF_REFERENCING_COL_NAME: NULL
+                Arc::new(StringArray::from(vec![None::<String>; row_count])),
+                // REF_GENERATION: NULL
+                Arc::new(StringArray::from(vec![None::<String>; row_count])),
+            ],
+        )
+        .map_err(|e| CoreError::Internal(format!("Failed to create result batch: {}", e)))?;
+
+        log::info!("✅ [JDBC getTables] Returning {} rows", row_count);
+
+        Ok(QueryResult {
+            batch,
+            matched_docs: row_count,
+        })
     }
 }
