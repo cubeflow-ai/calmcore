@@ -50,10 +50,10 @@ impl InformationSchemaExecutor {
             return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
         }
 
-        // JDBC getColumns() 快速路径 - 返回空结果
-        // TODO: 实现完整的列信息支持
-        if is_columns_query && has_case {
-            log::info!("🎯 [INFORMATION_SCHEMA] Using JDBC getColumns() fast path (empty result)");
+        // JDBC getColumns() 快速路径 - 返回完整列信息
+        // 检测条件：查询 COLUMNS 表（无论是否有 CASE）
+        if is_columns_query {
+            log::info!("🎯 [INFORMATION_SCHEMA] Using JDBC getColumns() fast path");
             let result = self.execute_jdbc_get_columns_empty().await?;
             use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
             let schema = result.schema();
@@ -381,6 +381,8 @@ impl InformationSchemaExecutor {
         let mut source_data_types: Vec<Option<i32>> = Vec::new();
         let mut is_autoincrements: Vec<String> = Vec::new();
         let mut is_generatedcolumns: Vec<String> = Vec::new();
+        let mut column_comments: Vec<Option<String>> = Vec::new();
+        let mut extras: Vec<String> = Vec::new();
 
         // 遍历所有表并获取列信息
         for table_name in &tables {
@@ -438,35 +440,39 @@ impl InformationSchemaExecutor {
                 source_data_types.push(None);
                 is_autoincrements.push("NO".to_string());
                 is_generatedcolumns.push("NO".to_string());
+                column_comments.push(None);
+                extras.push("".to_string()); // 空字符串，表示没有特殊属性
             }
         }
 
-        // 构建结果 schema - 匹配 MySQL JDBC getColumns() 格式
+        // 构建结果 schema - 使用小写字段名匹配 INFORMATION_SCHEMA 标准
         let schema = Arc::new(Schema::new(vec![
-            Field::new("TABLE_SCHEMA", DataType::Utf8, true),
-            Field::new("NULL", DataType::Utf8, true),
-            Field::new("TABLE_NAME", DataType::Utf8, false),
-            Field::new("COLUMN_NAME", DataType::Utf8, false),
-            Field::new("DATA_TYPE", DataType::Int32, false),
-            Field::new("TYPE_NAME", DataType::Utf8, false),
-            Field::new("COLUMN_SIZE", DataType::Int32, true),
-            Field::new("BUFFER_LENGTH", DataType::Int32, true),
-            Field::new("DECIMAL_DIGITS", DataType::Int32, true),
-            Field::new("NUM_PREC_RADIX", DataType::Int32, true),
-            Field::new("NULLABLE", DataType::Int32, false),
-            Field::new("REMARKS", DataType::Utf8, true),
-            Field::new("COLUMN_DEF", DataType::Utf8, true),
-            Field::new("SQL_DATA_TYPE", DataType::Int32, true),
-            Field::new("SQL_DATETIME_SUB", DataType::Int32, true),
-            Field::new("CHAR_OCTET_LENGTH", DataType::Int32, true),
-            Field::new("ORDINAL_POSITION", DataType::Int32, false),
-            Field::new("IS_NULLABLE", DataType::Utf8, false),
-            Field::new("SCOPE_CATALOG", DataType::Utf8, true),
-            Field::new("SCOPE_SCHEMA", DataType::Utf8, true),
-            Field::new("SCOPE_TABLE", DataType::Utf8, true),
-            Field::new("SOURCE_DATA_TYPE", DataType::Int32, true),
-            Field::new("IS_AUTOINCREMENT", DataType::Utf8, false),
-            Field::new("IS_GENERATEDCOLUMN", DataType::Utf8, false),
+            Field::new("table_schema", DataType::Utf8, true),
+            Field::new("table_catalog", DataType::Utf8, true),
+            Field::new("table_name", DataType::Utf8, false),
+            Field::new("column_name", DataType::Utf8, false),
+            Field::new("data_type", DataType::Int32, false),
+            Field::new("type_name", DataType::Utf8, false),
+            Field::new("column_size", DataType::Int32, true),
+            Field::new("buffer_length", DataType::Int32, true),
+            Field::new("decimal_digits", DataType::Int32, true),
+            Field::new("num_prec_radix", DataType::Int32, true),
+            Field::new("nullable", DataType::Int32, false),
+            Field::new("remarks", DataType::Utf8, true),
+            Field::new("column_def", DataType::Utf8, true),
+            Field::new("sql_data_type", DataType::Int32, true),
+            Field::new("sql_datetime_sub", DataType::Int32, true),
+            Field::new("char_octet_length", DataType::Int32, true),
+            Field::new("ordinal_position", DataType::Int32, false),
+            Field::new("is_nullable", DataType::Utf8, false),
+            Field::new("scope_catalog", DataType::Utf8, true),
+            Field::new("scope_schema", DataType::Utf8, true),
+            Field::new("scope_table", DataType::Utf8, true),
+            Field::new("source_data_type", DataType::Int32, true),
+            Field::new("is_autoincrement", DataType::Utf8, false),
+            Field::new("is_generatedcolumn", DataType::Utf8, false),
+            Field::new("column_comment", DataType::Utf8, true),
+            Field::new("extra", DataType::Utf8, false),
         ]));
 
         let row_count = column_names.len();
@@ -499,6 +505,8 @@ impl InformationSchemaExecutor {
                 Arc::new(Int32Array::from(source_data_types)),
                 Arc::new(StringArray::from(is_autoincrements)),
                 Arc::new(StringArray::from(is_generatedcolumns)),
+                Arc::new(StringArray::from(column_comments)),
+                Arc::new(StringArray::from(extras)),
             ],
         )
         .map_err(|e| CoreError::Internal(format!("Failed to create columns batch: {}", e)))?;
