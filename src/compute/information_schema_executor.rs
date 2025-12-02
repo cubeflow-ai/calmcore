@@ -32,6 +32,7 @@ impl InformationSchemaExecutor {
         let sql_upper = sql.to_uppercase();
         let is_tables_query = sql_upper.contains("FROM INFORMATION_SCHEMA.TABLES");
         let is_columns_query = sql_upper.contains("FROM INFORMATION_SCHEMA.COLUMNS");
+        let is_statistics_query = sql_upper.contains("FROM INFORMATION_SCHEMA.STATISTICS");
         let has_jdbc_fields = (sql_upper.contains("TABLE_CAT")
             || sql_upper.contains("TABLE_SCHEM"))
             && (sql_upper.contains("REMARKS") || sql_upper.contains("REF_GENERATION"));
@@ -54,6 +55,19 @@ impl InformationSchemaExecutor {
         if is_columns_query && has_case {
             log::info!("🎯 [INFORMATION_SCHEMA] Using JDBC getColumns() fast path (empty result)");
             let result = self.execute_jdbc_get_columns_empty().await?;
+            use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+            let schema = result.schema();
+            let stream = stream::once(async move { Ok(result) });
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
+        }
+
+        // JDBC getPrimaryKeys() 快速路径 - 返回空结果
+        // TODO: 实现完整的主键信息支持
+        if is_statistics_query {
+            log::info!(
+                "🎯 [INFORMATION_SCHEMA] Using JDBC getPrimaryKeys() fast path (empty result)"
+            );
+            let result = self.execute_jdbc_get_primary_keys_empty().await?;
             use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
             let schema = result.schema();
             let stream = stream::once(async move { Ok(result) });
@@ -532,5 +546,41 @@ impl InformationSchemaExecutor {
             // 时间戳类型（存储为 i64 毫秒）
             FieldType::Timestamp => (93, "TIMESTAMP".to_string(), Some(23), Some(3)),
         }
+    }
+
+    /// 快速路径：返回空的 JDBC getPrimaryKeys() 结果
+    /// TODO: 实现完整的主键信息查询
+    async fn execute_jdbc_get_primary_keys_empty(&self) -> CoreResult<RecordBatch> {
+        log::info!("🎯 [JDBC getPrimaryKeys] Returning empty result (not implemented yet)");
+
+        // JDBC getPrimaryKeys() 标准字段（对应 INFORMATION_SCHEMA.STATISTICS）
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("TABLE_CAT", DataType::Utf8, true), // TABLE_SCHEMA
+            Field::new("TABLE_SCHEM", DataType::Utf8, true), // NULL
+            Field::new("TABLE_NAME", DataType::Utf8, false), // TABLE_NAME
+            Field::new("COLUMN_NAME", DataType::Utf8, false), // COLUMN_NAME
+            Field::new("KEY_SEQ", DataType::Int32, false), // SEQ_IN_INDEX
+            Field::new("PK_NAME", DataType::Utf8, true),   // 'PRIMARY'
+        ]));
+
+        // 返回空结果集（0行）
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(Vec::<Option<String>>::new())),
+                Arc::new(StringArray::from(Vec::<Option<String>>::new())),
+                Arc::new(StringArray::from(Vec::<String>::new())),
+                Arc::new(StringArray::from(Vec::<String>::new())),
+                Arc::new(Int32Array::from(Vec::<i32>::new())),
+                Arc::new(StringArray::from(Vec::<Option<String>>::new())),
+            ],
+        )
+        .map_err(|e| {
+            CoreError::Internal(format!("Failed to create empty primary keys batch: {}", e))
+        })?;
+
+        log::info!("✅ [JDBC getPrimaryKeys] Returning 0 rows");
+
+        Ok(batch)
     }
 }
