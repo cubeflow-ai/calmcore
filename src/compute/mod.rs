@@ -1,7 +1,7 @@
 // Executor 层
 mod ballista_executor;
-mod natural_order_executor;
 mod information_schema_executor;
+pub mod natural_order_executor; // 公开给 MySQL protocol 层使用
 
 // Table Provider 层
 pub mod table_provider;
@@ -11,8 +11,6 @@ pub mod sql_normalizer;
 
 use std::sync::Arc;
 
-use datafusion::arrow::record_batch::RecordBatch;
-
 use crate::engine::Engine;
 use crate::utils::error::CoreResult;
 
@@ -21,15 +19,6 @@ use ballista_executor::DataFusionExecutor;
 // Re-exports
 pub use sql_normalizer::SqlNormalizer;
 pub use table_provider::{PartitionTableProvider, UnionTableProvider};
-
-/// 查询结果
-#[derive(Debug)]
-pub struct QueryResult {
-    /// 查询结果数据
-    pub batch: RecordBatch,
-    /// 命中的文档数量（在索引中匹配的记录数）
-    pub matched_docs: usize,
-}
 
 /// 查询执行器（路由器）
 ///
@@ -44,24 +33,23 @@ pub struct QueryResult {
 /// - 执行逻辑由专门的 executor 负责
 pub struct Executor {
     datafusion_executor: DataFusionExecutor,
-    #[allow(dead_code)]
-    engine: Arc<Engine>,
 }
 
 impl Executor {
     /// 创建新的查询执行器
     pub fn new(engine: Arc<Engine>) -> Self {
         Self {
-            datafusion_executor: DataFusionExecutor::new(engine.clone()),
-            engine,
+            datafusion_executor: DataFusionExecutor::new(engine),
         }
     }
 
-    /// 执行 SQL 查询
+    /// 执行 SQL 查询（流式版本）
     ///
-    /// 所有查询都通过 DataFusion 执行
-    pub async fn execute_sql(&self, sql: &str) -> CoreResult<QueryResult> {
-        // 直接使用 DataFusion executor
-        self.datafusion_executor.execute_sql(sql).await
+    /// 返回 DataFusion 的原生 Stream，避免全部加载到内存
+    pub async fn execute_sql_stream(
+        &self,
+        sql: &str,
+    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
+        self.datafusion_executor.execute_sql_stream(sql).await
     }
 }

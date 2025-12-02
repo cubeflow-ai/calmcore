@@ -8,12 +8,11 @@
 
 use std::sync::Arc;
 
+use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::*;
 
-use super::{
-    information_schema_executor::InformationSchemaExecutor,
-    natural_order_executor::NaturalOrderExecutor, QueryResult,
-};
+use super::natural_order_executor::NaturalOrderExecutor;
+use crate::compute::information_schema_executor::InformationSchemaExecutor;
 use crate::compute::{SqlNormalizer, UnionTableProvider};
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
@@ -39,54 +38,80 @@ impl DataFusionExecutor {
         }
     }
 
-    /// 执行 SQL 查询
+    /// 执行 SQL 查询（流式版本）
     ///
-    /// 简单到令人惊讶:
-    /// 1. 检查是否是特殊查询 (ORDER BY _nature)
-    /// 2. 标准化 SQL (修复时间戳比较等)
-    /// 3. 创建 DataFusion SessionContext
-    /// 4. 注册我们的 TableProvider
-    /// 5. 执行查询 - DataFusion 自动处理一切!
-    pub async fn execute_sql(&self, sql: &str) -> CoreResult<QueryResult> {
-        log::info!("🚀 [DataFusion Executor] Executing SQL: {}", sql);
+    /// 返回 DataFusion 的原生 Stream，避免全部加载到内存
+    ///
+    /// # 优势
+    /// - DataFusion 本身就是流式的（迭代器模式）
+    /// - 避免 collect() 带来的内存峰值
+    /// - Ballista 分布式执行也是流式的
+    pub async fn execute_sql_stream(&self, sql: &str) -> CoreResult<SendableRecordBatchStream> {
+        log::info!("🚀 [DataFusion Executor] Executing SQL (stream): {}", sql);
 
-        // 🔧 标准化 SQL：修复 MySQL 特有语法和类型不匹配
+        // 🔧 标准化 SQL
         let (_statement, normalized_sql) = SqlNormalizer::normalize(sql)?;
 
         if normalized_sql != sql {
             log::info!("🔄 [SQL Normalized] {} -> {}", sql, normalized_sql);
         }
 
-        // 🌿 特殊处理: ORDER BY _nature (深度分页优化)
+        // 🗂️ 特殊处理: INFORMATION_SCHEMA 查询
         let normalized_upper = normalized_sql.to_uppercase();
-        if normalized_upper.contains("ORDER BY _NATURE")
-            || normalized_upper.contains("ORDER BY `_NATURE`")
-        {
-            log::info!("🌿 [Natural Order] Detected ORDER BY _nature, using optimized executor");
-            return self.execute_natural_order(&normalized_sql).await;
-        }
-
-        // 创建 DataFusion SessionContext
-        // 自动使用所有 CPU 核心进行并行执行
-        let config = SessionConfig::new().with_target_partitions(32); // 32 路并行 (4 partition × 8 segment)
-
-        let ctx = SessionContext::new_with_config(config);
-
-        // 从 SQL 中提取表名 (简化版本,生产环境需要更健壮的解析)
-        let table_name = self.extract_table_name(&normalized_sql)?;
-
-        // 🔍 特殊处理: INFORMATION_SCHEMA 查询
-        if table_name.to_lowercase().contains("information")
-            || table_name.to_lowercase().contains("schema")
-        {
-            log::info!("🔍 [INFORMATION_SCHEMA] Routing to InformationSchemaExecutor");
+        if normalized_upper.contains("INFORMATION_SCHEMA") {
+            log::info!("🗂️ [INFORMATION_SCHEMA] Detected metadata query");
             return self
                 .information_schema_executor
-                .execute(&normalized_sql)
+                .execute_stream(&normalized_sql)
                 .await;
         }
 
-        // 获取所有 partition
+        // 🌿 特殊处理: ORDER BY _nature (深度分页优化)
+        if normalized_upper.contains("ORDER BY _NATURE")
+            || normalized_upper.contains("ORDER BY `_NATURE`")
+        {
+            log::info!("🌿 [Natural Order] Detected ORDER BY _nature, using streaming cursor");
+
+            // 使用 execute_natural_cursor 获取流式结果
+            let stream_result = self
+                .natural_order_executor
+                .execute_natural_cursor(&normalized_sql)
+                .await?;
+
+            // 将 mpsc::Receiver<CoreResult<RecordBatch>> 转换为 SendableRecordBatchStream
+            use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+            use futures::stream;
+
+            let schema = stream_result.schema.clone();
+            let mut receiver = stream_result.receiver;
+
+            // 创建 futures Stream
+            let stream = stream::poll_fn(move |cx| {
+                use std::task::Poll;
+
+                match receiver.poll_recv(cx) {
+                    Poll::Ready(Some(Ok(batch))) => Poll::Ready(Some(Ok(batch))),
+                    Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(
+                        datafusion::error::DataFusionError::External(Box::new(e)),
+                    ))),
+                    Poll::Ready(None) => Poll::Ready(None),
+                    Poll::Pending => Poll::Pending,
+                }
+            });
+
+            // 包装成 RecordBatchStreamAdapter
+            let adapter = RecordBatchStreamAdapter::new(schema, stream);
+            return Ok(Box::pin(adapter));
+        }
+
+        // 创建 DataFusion SessionContext
+        let config = SessionConfig::new().with_target_partitions(32);
+        let ctx = SessionContext::new_with_config(config);
+
+        // 提取表名
+        let table_name = self.extract_table_name(&normalized_sql)?;
+
+        // 获取 partitions 并注册表
         let partition_names = self.engine.list_partitions(&table_name).await;
         let mut partitions = Vec::new();
 
@@ -107,81 +132,26 @@ impl DataFusionExecutor {
             )));
         }
 
-        log::info!(
-            "📦 [DataFusion Executor] Found {} partitions for table '{}'",
-            partitions.len(),
-            table_name
-        );
-
-        // 创建 UnionTableProvider (包含所有优化!)
         let union_table = UnionTableProvider::new(partitions)
             .map_err(|e| CoreError::Internal(format!("Failed to create UnionTable: {}", e)))?;
 
-        // 注册到 DataFusion
         ctx.register_table(&table_name, Arc::new(union_table))
             .map_err(|e| CoreError::Internal(format!("Failed to register table: {}", e)))?;
 
-        log::info!("✅ [DataFusion Executor] Table registered, executing query...");
-
-        // 执行查询 - DataFusion 自动:
-        // - 分析查询计划
-        // - 下推 filter/projection/limit 到我们的 TableProvider
-        // - 并行执行 (调用我们的 SegmentScanner 优化)
-        // - 处理 shuffle 和聚合
-        // - 返回结果
+        // 执行查询，返回 Stream
         let df = ctx
             .sql(&normalized_sql)
             .await
             .map_err(|e| CoreError::Internal(format!("Query execution error: {}", e)))?;
 
-        // 收集结果
-        let batches = df
-            .collect()
+        // 🔑 关键：返回 Stream 而不是 collect()
+        let stream = df
+            .execute_stream()
             .await
-            .map_err(|e| CoreError::Internal(format!("Failed to collect results: {}", e)))?;
+            .map_err(|e| CoreError::Internal(format!("Failed to execute stream: {}", e)))?;
 
-        log::info!(
-            "✅ [DataFusion Executor] Query completed, {} batches returned",
-            batches.len()
-        );
-
-        // 合并所有 batches 成单个 RecordBatch
-        use datafusion::arrow::compute::concat_batches;
-
-        let batch = if batches.is_empty() {
-            // 返回空结果
-            use datafusion::arrow::array::RecordBatch as ArrowRecordBatch;
-            use datafusion::arrow::datatypes::Schema;
-            ArrowRecordBatch::new_empty(std::sync::Arc::new(Schema::empty()))
-        } else if batches.len() == 1 {
-            batches.into_iter().next().unwrap()
-        } else {
-            let schema = batches[0].schema();
-            concat_batches(&schema, &batches)
-                .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))?
-        };
-
-        // TODO: 实现 matched_docs 统计 (需要从 SegmentScanner 传递上来)
-        let matched_docs = batch.num_rows();
-
-        Ok(QueryResult {
-            batch,
-            matched_docs,
-        })
-    }
-
-    /// 执行 ORDER BY _nature 查询 (深度分页优化)
-    async fn execute_natural_order(&self, sql: &str) -> CoreResult<QueryResult> {
-        // 直接调用 natural_order_executor，它会自己解析 SQL
-        let result = self
-            .natural_order_executor
-            .execute_natural_order(sql)
-            .await?;
-
-        Ok(QueryResult {
-            batch: result.batch,
-            matched_docs: result.matched_docs,
-        })
+        log::info!("✅ [DataFusion Executor] Stream ready");
+        Ok(stream)
     }
 
     /// 从 SQL 中提取表名 (简化版本)

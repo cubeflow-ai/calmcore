@@ -1087,17 +1087,22 @@ impl Engine {
     /// 此方法现在委托给 `Executor`，保持向后兼容。
     /// 由于需要 Arc<Engine>，建议协议层直接使用 Executor。
     ///
-    /// 如果协议层需要总行数（如 ES 分页），应该：
-    /// 1. 先执行 COUNT 查询获取总数
-    /// 2. 再执行实际查询获取数据
-    pub async fn execute_sql(
+    /// 执行 SQL 查询（流式版本）
+    /// 
+    /// 返回 DataFusion 的原生 Stream，避免全部加载到内存
+    /// 
+    /// # 优势
+    /// - 内存占用可控（不会一次性 collect 所有结果）
+    /// - 适合大数据量查询
+    /// - 支持 Ballista 分布式执行
+    pub async fn execute_sql_stream(
         self: &Arc<Self>,
         sql: &str,
-    ) -> CoreResult<crate::compute::QueryResult> {
+    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
         use crate::compute::Executor;
 
         let executor = Executor::new(self.clone());
-        executor.execute_sql(sql).await
+        executor.execute_sql_stream(sql).await
     }
 
     /// 加载外部文件到 segment

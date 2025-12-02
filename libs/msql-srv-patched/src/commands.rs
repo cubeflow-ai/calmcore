@@ -51,7 +51,8 @@ pub fn client_handshake(i: &[u8], after_tls: bool) -> nom::IResult<&[u8], Client
                 } else {
                     (i, None)
                 }
-            } else if capabilities.contains(CapabilityFlags::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) {
+            } else if capabilities.contains(CapabilityFlags::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA)
+            {
                 // Length-encoded string (不太常用)
                 let (i, len) = nom::number::complete::le_u8(i)?;
                 if len > 0 && len < 251 {
@@ -132,6 +133,7 @@ pub enum Command<'a> {
     Init(&'a [u8]),
     Execute {
         stmt: u32,
+        flags: u8, // CURSOR_TYPE_NO_CURSOR=0, CURSOR_TYPE_READ_ONLY=1, etc.
         params: &'a [u8],
     },
     SendLongData {
@@ -145,9 +147,17 @@ pub enum Command<'a> {
 
 pub fn execute(i: &[u8]) -> nom::IResult<&[u8], Command<'_>> {
     let (i, stmt) = nom::number::complete::le_u32(i)?;
-    let (i, _flags) = nom::bytes::complete::take(1u8)(i)?;
+    let (i, flags_bytes) = nom::bytes::complete::take(1u8)(i)?;
+    let flags = flags_bytes[0]; // 提取 flags 值
     let (i, _iterations) = nom::number::complete::le_u32(i)?;
-    Ok((&[], Command::Execute { stmt, params: i }))
+    Ok((
+        &[],
+        Command::Execute {
+            stmt,
+            flags,
+            params: i,
+        },
+    ))
 }
 
 pub fn send_long_data(i: &[u8]) -> nom::IResult<&[u8], Command<'_>> {

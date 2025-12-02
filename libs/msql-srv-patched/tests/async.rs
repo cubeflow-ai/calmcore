@@ -47,6 +47,7 @@ where
     fn on_execute(
         &mut self,
         id: u32,
+        _flags: u8,
         params: ParamParser,
         results: QueryResultWriter<net::TcpStream>,
     ) -> io::Result<()> {

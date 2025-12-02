@@ -23,6 +23,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for Backend {
     fn on_execute(
         &mut self,
         _: u32,
+        _flags: u8,
         _: msql_srv::ParamParser,
         results: QueryResultWriter<W>,
     ) -> io::Result<()> {

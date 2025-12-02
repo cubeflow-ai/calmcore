@@ -78,6 +78,7 @@ where
     fn on_execute(
         &mut self,
         id: u32,
+        _flags: u8,
         params: ParamParser,
         results: QueryResultWriter<net::TcpStream>,
     ) -> io::Result<()> {
@@ -387,6 +388,7 @@ fn it_connects_tls_both_with_delayed_server_read() {
         fn on_execute(
             &mut self,
             _: u32,
+            _flags: u8,
             _: ParamParser<'_>,
             _: QueryResultWriter<'_, RW>,
         ) -> Result<(), Self::Error> {

@@ -5,10 +5,11 @@
 
 use datafusion::arrow::array::{Int64Array, RecordBatch, StringArray, TimestampSecondArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use datafusion::execution::SendableRecordBatchStream;
 use datafusion::prelude::*;
+use futures::stream;
 use std::sync::Arc;
 
-use crate::compute::QueryResult;
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
@@ -21,8 +22,8 @@ impl InformationSchemaExecutor {
         Self { engine }
     }
 
-    /// 执行 INFORMATION_SCHEMA 查询
-    pub async fn execute(&self, sql: &str) -> CoreResult<QueryResult> {
+    /// 执行 INFORMATION_SCHEMA 查询（流式）
+    pub async fn execute_stream(&self, sql: &str) -> CoreResult<SendableRecordBatchStream> {
         log::info!("🔍 [INFORMATION_SCHEMA] Executing query");
 
         // 🎯 特殊处理：JDBC getTables() 查询（避免 DataFusion 的 CASE/HAVING bug）
@@ -39,7 +40,12 @@ impl InformationSchemaExecutor {
 
         if has_jdbc_fields || has_case || has_having {
             log::info!("🎯 [INFORMATION_SCHEMA] Using JDBC fast path");
-            return self.execute_jdbc_get_tables(sql).await;
+            let result = self.execute_jdbc_get_tables(sql).await?;
+            // 转换为 Stream
+            use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+            let schema = result.schema();
+            let stream = stream::once(async move { Ok(result) });
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
         }
 
         // 提取数据库名
@@ -63,28 +69,14 @@ impl InformationSchemaExecutor {
             .await
             .map_err(|e| CoreError::Internal(format!("Query execution error: {}", e)))?;
 
-        let batches = df
-            .collect()
+        // 🔑 返回 Stream
+        let stream = df
+            .execute_stream()
             .await
-            .map_err(|e| CoreError::Internal(format!("Failed to collect results: {}", e)))?;
+            .map_err(|e| CoreError::Internal(format!("Failed to execute stream: {}", e)))?;
 
-        // 合并结果
-        let batch = if batches.is_empty() {
-            RecordBatch::new_empty(Arc::new(Schema::empty()))
-        } else if batches.len() == 1 {
-            batches.into_iter().next().unwrap()
-        } else {
-            use datafusion::arrow::compute::concat_batches;
-            let schema = batches[0].schema();
-            concat_batches(&schema, &batches)
-                .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))?
-        };
-
-        let matched_docs = batch.num_rows();
-        Ok(QueryResult {
-            batch,
-            matched_docs,
-        })
+        log::info!("✅ [INFORMATION_SCHEMA] Stream ready");
+        Ok(stream)
     }
 
     /// 注册虚拟表
@@ -257,7 +249,7 @@ impl InformationSchemaExecutor {
 
     /// 快速路径：直接处理 JDBC getTables() 查询
     /// 避免 DataFusion 嵌套 CASE 表达式的 bug
-    async fn execute_jdbc_get_tables(&self, sql: &str) -> CoreResult<QueryResult> {
+    async fn execute_jdbc_get_tables(&self, sql: &str) -> CoreResult<RecordBatch> {
         // 提取数据库名（schema）
         let db_name = Self::extract_database_name(sql);
         log::info!("🎯 [JDBC getTables] Schema: {}", db_name);
@@ -328,9 +320,6 @@ impl InformationSchemaExecutor {
 
         log::info!("✅ [JDBC getTables] Returning {} rows", row_count);
 
-        Ok(QueryResult {
-            batch,
-            matched_docs: row_count,
-        })
+        Ok(batch)
     }
 }

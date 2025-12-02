@@ -68,6 +68,7 @@ impl MysqlServer {
                                     engine,
                                     username,
                                     password,
+                                    prepared_stmts: std::collections::HashMap::new(),
                                 };
 
                                 // 处理连接
@@ -104,6 +105,8 @@ struct CalmBackend {
     engine: Arc<Engine>,
     username: String,
     password: String,
+    // 存储 prepared statement 的 SQL（用于流式游标支持）
+    prepared_stmts: std::collections::HashMap<u32, String>,
 }
 
 /// MySQL 密码验证 - mysql_native_password 插件
@@ -200,26 +203,156 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         Ok(())
     }
 
-    fn on_prepare(&mut self, _query: &str, info: StatementMetaWriter<W>) -> io::Result<()> {
-        // 简单返回,暂不支持 prepared statement
-        info.reply(0, &[], &[])
+    fn on_prepare(&mut self, query: &str, info: StatementMetaWriter<W>) -> io::Result<()> {
+        // 生成一个简单的 statement ID
+        let stmt_id = self.prepared_stmts.len() as u32;
+
+        // 保存 SQL 用于后续流式执行
+        self.prepared_stmts.insert(stmt_id, query.to_string());
+
+        log::debug!("📝 [MySQL] Prepared statement {}: {}", stmt_id, query);
+
+        // 返回 statement metadata（暂时不指定参数和列）
+        info.reply(stmt_id, &[], &[])
     }
 
     fn on_execute(
         &mut self,
-        _id: u32,
+        id: u32,
+        flags: u8,
         _params: ParamParser,
         results: QueryResultWriter<W>,
     ) -> io::Result<()> {
-        // 暂不支持 prepared statement execution
-        results.error(
-            ErrorKind::ER_NOT_SUPPORTED_YET,
-            b"Prepared statements not fully supported. Use regular queries with LIMIT/OFFSET for pagination.",
-        )
+        const CURSOR_TYPE_READ_ONLY: u8 = 1;
+
+        // 如果客户端请求流式游标，直接走 natural_order_executor（不通过 on_query）
+        if flags == CURSOR_TYPE_READ_ONLY {
+            log::info!(
+                "🌊 [MySQL] Client requested streaming cursor (flags={})",
+                flags
+            );
+
+            // 获取之前准备的 SQL
+            let sql = match self.prepared_stmts.get(&id) {
+                Some(sql) => sql.clone(),
+                None => {
+                    return results.error(
+                        ErrorKind::ER_UNKNOWN_STMT_HANDLER,
+                        format!("Unknown statement ID: {}", id).as_bytes(),
+                    );
+                }
+            };
+
+            log::info!("🌿 [MySQL] Streaming execution (direct path): {}", sql);
+
+            // 直接调用 natural_order_executor 的流式版本
+            // 使用 channel 传输数据，避免全部加载到内存
+            return tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    use crate::compute::natural_order_executor::NaturalOrderExecutor;
+
+                    let executor = NaturalOrderExecutor::new(self.engine.clone());
+
+                    match executor.execute_natural_cursor(&sql).await {
+                        Ok(mut stream_result) => {
+                            let schema = stream_result.schema.clone();
+
+                            // 准备列定义
+                            let columns: Vec<msql_srv::Column> = schema
+                                .fields()
+                                .iter()
+                                .map(|field| {
+                                    let col_type = get_arrow_type(field.data_type());
+                                    msql_srv::Column {
+                                        table: "".to_string(),
+                                        column: field.name().clone(),
+                                        coltype: col_type,
+                                        colflags: ColumnFlags::empty(),
+                                    }
+                                })
+                                .collect();
+
+                            let mut row_writer = match results.start(&columns) {
+                                Ok(w) => w,
+                                Err(e) => {
+                                    log::error!("Failed to start row writer: {}", e);
+                                    return Err(e);
+                                }
+                            };
+
+                            let mut total_rows = 0;
+                            const FLUSH_INTERVAL: usize = 10000;
+
+                            // 从 channel 逐批次接收数据
+                            while let Some(batch_result) = stream_result.receiver.recv().await {
+                                let batch = match batch_result {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        log::error!("❌ [MySQL] Stream error: {}", e);
+                                        return row_writer.finish();
+                                    }
+                                };
+
+                                log::debug!(
+                                    "📦 [MySQL] Received batch with {} rows",
+                                    batch.num_rows()
+                                );
+
+                                // 写入这个 batch 的所有行
+                                for row_idx in 0..batch.num_rows() {
+                                    for col_idx in 0..batch.num_columns() {
+                                        let array = batch.column(col_idx);
+                                        let value = format_arrow_value(array, row_idx);
+
+                                        if let Err(e) = row_writer.write_col(value) {
+                                            log::debug!("Client disconnected: {}", e);
+                                            return Err(e);
+                                        }
+                                    }
+
+                                    if let Err(e) = row_writer.end_row() {
+                                        log::debug!(
+                                            "Client disconnected at row {}: {}",
+                                            total_rows,
+                                            e
+                                        );
+                                        return Err(e);
+                                    }
+
+                                    total_rows += 1;
+
+                                    // 每 10000 行记录进度
+                                    if total_rows % FLUSH_INTERVAL == 0 {
+                                        log::debug!("🌊 [MySQL] Streamed {} rows", total_rows);
+                                    }
+                                }
+                            }
+
+                            log::info!("✅ [MySQL] Stream completed: {} rows sent", total_rows);
+                            row_writer.finish()
+                        }
+                        Err(e) => {
+                            let msg = format!("Streaming query failed: {}", e);
+                            log::error!("{}", msg);
+                            results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes())
+                        }
+                    }
+                })
+            });
+        } else {
+            log::debug!("📦 [MySQL] Standard execute (flags={})", flags);
+            results.error(
+                ErrorKind::ER_NOT_SUPPORTED_YET,
+                b"Non-streaming prepared statements not supported. Use text queries with LIMIT/OFFSET.",
+            )
+        }
     }
 
-    fn on_close(&mut self, _stmt: u32) {
-        // No-op
+    fn on_close(&mut self, stmt: u32) {
+        // 清理 prepared statement
+        if self.prepared_stmts.remove(&stmt).is_some() {
+            log::debug!("🗑️  [MySQL] Closed prepared statement {}", stmt);
+        }
     }
 
     fn on_query(&mut self, query: &str, results: QueryResultWriter<W>) -> io::Result<()> {
@@ -911,16 +1044,18 @@ async fn execute_query<W: io::Read + io::Write>(
         None
     };
 
-    // SQL 解析和执行
-    let result = {
+    // SQL 解析和执行（流式版本）
+    use futures::StreamExt;
+
+    let mut stream = {
         let _span = trace_ctx.as_ref().map(|ctx| {
             let guard = ctx.span("SQL Execution");
             guard.metadata("query", query);
             guard
         });
 
-        match engine.clone().execute_sql(query).await {
-            Ok(result) => result,
+        match engine.clone().execute_sql_stream(query).await {
+            Ok(stream) => stream,
             Err(e) => {
                 let msg = format!("SQL execution failed: {}", e);
                 log::error!("SQL Error: {}", msg);
@@ -929,32 +1064,58 @@ async fn execute_query<W: io::Read + io::Write>(
         }
     };
 
-    log::debug!("MySQL Query: {}", query);
-    log::debug!(
-        "MySQL Result: matched_docs={}, result_rows={}",
-        result.matched_docs,
-        result.batch.num_rows()
-    );
+    log::debug!("MySQL Query (streaming): {}", query);
 
-    // 即使返回 0 行,也要返回空结果集(而不是 completed)
-    // 否则 JDBC 会认为这不是一个 SELECT 查询
+    // 🌊 流式发送结果
+    let mut total_rows = 0;
+    let mut batches = Vec::new();
+
+    while let Some(batch_result) = stream.next().await {
+        let batch = match batch_result {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("Stream error: {}", e);
+                log::error!("{}", msg);
+                return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
+            }
+        };
+
+        total_rows += batch.num_rows();
+        batches.push(batch);
+
+        // 每 100 个 batch 记录一次进度
+        if batches.len() % 100 == 0 {
+            log::debug!(
+                "🌊 [MySQL Stream] Received {} batches, {} total rows",
+                batches.len(),
+                total_rows
+            );
+        }
+    }
+
     log::debug!(
-        "Returning {} rows (matched {} docs)",
-        result.batch.num_rows(),
-        result.matched_docs
+        "✅ [MySQL Stream] Completed: {} batches, {} total rows",
+        batches.len(),
+        total_rows
     );
 
     // 序列化结果
-    let schema = result.batch.schema();
+    let schema = if batches.is_empty() {
+        use datafusion::arrow::datatypes::Schema;
+        std::sync::Arc::new(Schema::empty())
+    } else {
+        batches[0].schema()
+    };
+
     let write_result = {
         let _span = trace_ctx.as_ref().map(|ctx| {
             let guard = ctx.span("Write Result");
-            guard.metadata("rows", result.batch.num_rows().to_string());
-            guard.metadata("columns", result.batch.num_columns().to_string());
+            guard.metadata("rows", total_rows.to_string());
+            guard.metadata("batches", batches.len().to_string());
             guard
         });
 
-        write_query_result(results, &schema, &[result.batch])
+        write_query_result(results, &schema, &batches)
     };
 
     // 打印追踪报告
@@ -1242,15 +1403,48 @@ async fn handle_delete<W: io::Read + io::Write>(
     let where_clause = &query_clean[where_pos.unwrap() + 6..];
     let select_query = format!("SELECT * FROM {} WHERE {}", table_name, where_clause);
 
-    let result = match engine.clone().execute_sql(&select_query).await {
-        Ok(result) => result,
+    // 使用流式查询然后 collect
+    use futures::StreamExt;
+    let mut stream = match engine.clone().execute_sql_stream(&select_query).await {
+        Ok(s) => s,
         Err(e) => {
             let msg = format!("Query execution failed: {}", e);
             return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
         }
     };
 
-    if result.batch.num_rows() == 0 {
+    let mut batches = Vec::new();
+    while let Some(batch_result) = stream.next().await {
+        let batch = match batch_result {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("Stream error: {}", e);
+                return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
+            }
+        };
+        batches.push(batch);
+    }
+
+    if batches.is_empty() {
+        return results.completed(0, 0);
+    }
+
+    // 合并 batches
+    use datafusion::arrow::compute::concat_batches;
+    let result = if batches.len() == 1 {
+        batches.into_iter().next().unwrap()
+    } else {
+        let schema = batches[0].schema();
+        match concat_batches(&schema, &batches) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("Failed to concat batches: {}", e);
+                return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
+            }
+        }
+    };
+
+    if result.num_rows() == 0 {
         return results.completed(0, 0);
     }
 
@@ -1262,7 +1456,7 @@ async fn handle_delete<W: io::Read + io::Write>(
 
     let mut total_deleted = 0u64;
 
-    let batch = result.batch;
+    let batch = result;
     let pk_array = batch
         .column_by_name(pk_field)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Primary key column not found"))?;

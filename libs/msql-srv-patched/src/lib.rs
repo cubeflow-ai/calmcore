@@ -32,6 +32,7 @@
 //!     fn on_execute(
 //!         &mut self,
 //!         _: u32,
+//!         _flags: u8,
 //!         _: ParamParser,
 //!         results: QueryResultWriter<W>,
 //!     ) -> io::Result<()> {
@@ -161,11 +162,17 @@ pub trait MysqlShim<W: Read + Write> {
     /// Called when the client executes a previously prepared statement.
     ///
     /// Any parameters included with the client's command is given in `params`.
+    /// The `flags` parameter contains the cursor type flags from the client:
+    /// - 0 = CURSOR_TYPE_NO_CURSOR (default, return all rows at once)
+    /// - 1 = CURSOR_TYPE_READ_ONLY (streaming cursor, use COM_STMT_FETCH)
+    /// - 2 = CURSOR_TYPE_FOR_UPDATE
+    /// - 4 = CURSOR_TYPE_SCROLLABLE
     /// A response to the query should be given using the provided
     /// [`QueryResultWriter`](struct.QueryResultWriter.html).
     fn on_execute(
         &mut self,
         id: u32,
+        flags: u8,
         params: ParamParser<'_>,
         results: QueryResultWriter<'_, W>,
     ) -> Result<(), Self::Error>;
@@ -475,7 +482,11 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
                         w,
                     )?;
                 }
-                Command::Execute { stmt, params } => {
+                Command::Execute {
+                    stmt,
+                    flags,
+                    params,
+                } => {
                     let state = stmts.get_mut(&stmt).ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -485,7 +496,7 @@ impl<B: MysqlShim<RW>, RW: Read + Write> MysqlIntermediary<B, RW> {
                     {
                         let params = params::ParamParser::new(params, state);
                         let w = QueryResultWriter::new(&mut self.rw, true);
-                        self.shim.on_execute(stmt, params, w)?;
+                        self.shim.on_execute(stmt, flags, params, w)?;
                     }
                     state.long_data.clear();
                 }

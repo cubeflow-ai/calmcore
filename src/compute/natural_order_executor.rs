@@ -17,12 +17,9 @@ use std::sync::Arc;
 
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
-use roaring::RoaringBitmap;
-use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 use crate::engine::Engine;
-use crate::segment::field_store::row_data::RowDataStore;
-use crate::segment::field_store::IndexReader;
 use crate::utils::error::{CoreError, CoreResult};
 
 /// 查询结果
@@ -30,6 +27,16 @@ use crate::utils::error::{CoreError, CoreResult};
 pub struct QueryResult {
     pub batch: RecordBatch,
     pub matched_docs: usize,
+}
+
+/// 流式查询结果 (通过 channel 传输)
+pub struct StreamingQueryResult {
+    /// 接收 RecordBatch 的 channel
+    pub receiver: mpsc::Receiver<CoreResult<RecordBatch>>,
+    /// Schema (第一个 batch 之前就知道)
+    pub schema: Arc<ArrowSchema>,
+    /// 总匹配文档数 (可能在流式传输过程中更新)
+    pub matched_docs: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Segment 元数据
@@ -254,134 +261,120 @@ impl NaturalOrderExecutor {
         }
     }
 
-    /// 执行自然顺序查询
+    /// 执行自然顺序查询 (流式版本，通过 channel 传输数据)
     ///
     /// # 参数
-    /// * `sql` - 完整的 SQL 查询 (包含 ORDER BY _nature)
+    /// * `sql` - 完整的 SQL 查询
+    ///
+    /// # 返回
+    /// * `StreamingQueryResult` - 包含 receiver channel 和 schema
     ///
     /// # 示例
-    /// ```sql
-    /// SELECT app_name, timestamp FROM table WHERE app_name='test' ORDER BY _nature LIMIT 1000 OFFSET 1000000;
+    /// ```rust
+    /// let result = executor.execute_natural_cursor(sql).await?;
+    /// while let Some(batch_result) = result.receiver.recv().await {
+    ///     let batch = batch_result?;
+    ///     // 处理每个 batch
+    /// }
     /// ```
-    pub async fn execute_natural_order(&self, sql: &str) -> CoreResult<QueryResult> {
-        let total_start = std::time::Instant::now();
-
+    pub async fn execute_natural_cursor(&self, sql: &str) -> CoreResult<StreamingQueryResult> {
         // 解析 SQL 提取参数
-        let (table_name, limit, offset, where_clause, projection_fields, is_select_star) =
+        let (table_name, limit, offset, _where_clause, projection_fields, is_select_star) =
             self.parse_sql(sql)?;
 
-        let filter_exprs = if let Some(where_sql) = &where_clause {
-            self.parse_where_filters(where_sql)?
-        } else {
-            Vec::new()
-        };
-        let force_full_projection = !filter_exprs.is_empty();
-
         log::info!(
-            "🌿 [NaturalOrder] Executing natural order query: table={}, limit={}, offset={}, where={:?}, projection={:?}, is_select_star={}",
+            "🌊 [NaturalCursor] Streaming query: table={}, limit={}, offset={}",
             table_name,
             limit,
-            offset,
-            where_clause,
-            projection_fields,
-            is_select_star
+            offset
         );
 
-        // 第一步：构建元数据索引
-        let step1_start = std::time::Instant::now();
+        // 构建元数据索引
         let segment_metas = self.build_segment_metadata(&table_name).await?;
-        log::info!(
-            "⏱️  [NaturalOrder] Step 1 (metadata): {:?}",
-            step1_start.elapsed()
-        );
 
-        log::info!(
-            "📊 [NaturalOrder] Built metadata index: {} segments, total docs: {}",
-            segment_metas.len(),
-            segment_metas
-                .last()
-                .map(|m| m.cumulative_count)
-                .unwrap_or(0)
-        );
-
-        // 第二步：计算需要读取的 segments
-        let step2_start = std::time::Instant::now();
-
-        // 🔑 关键：ORDER BY _nature 始终使用物理 offset/limit
-        // 先定位到物理位置，读取固定数量的物理行，然后过滤
+        // 计算需要读取的 segments
         let target_segments = self.calculate_target_segments(&segment_metas, offset, limit)?;
 
         log::info!(
-            "⏱️  [NaturalOrder] Step 2 (calculate): {:?}",
-            step2_start.elapsed()
+            "🎯 [NaturalCursor] Will stream from {} segments",
+            target_segments.len()
         );
 
-        log::info!(
-            "🎯 [NaturalOrder] Target segments: {:?}",
-            target_segments
-                .iter()
-                .map(|(p, s, _, _)| format!("{}/{}", p, s))
-                .collect::<Vec<_>>()
-        );
+        // 获取 schema
+        let schema = self.get_table_schema(&table_name).await?;
 
-        // 第三步：从 segments 读取数据（带 skip）
-        let step3_start = std::time::Instant::now();
-        let batches = self
-            .read_from_segments(
-                &table_name,
-                sql,
-                &target_segments,
-                &projection_fields,
-                is_select_star,
-                force_full_projection,
-            )
-            .await?;
-        log::info!(
-            "⏱️  [NaturalOrder] Step 3 (read segments): {:?}",
-            step3_start.elapsed()
-        );
+        // 创建 channel (缓冲 10 个 batch，避免生产者过快)
+        let (tx, rx) = mpsc::channel::<CoreResult<RecordBatch>>(10);
+        let matched_docs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let matched_docs_clone = matched_docs.clone();
 
-        let step4_start = std::time::Instant::now();
-        let final_batch = if batches.is_empty() {
-            self.create_empty_batch(&table_name).await?
-        } else {
-            self.concat_batches(batches)?
-        };
+        // 克隆需要的数据
+        let engine = self.engine.clone();
+        let table_name = table_name.clone();
+        let sql = sql.to_string();
+        let projection_fields = projection_fields.to_vec();
 
-        // 应用过滤器（如果有）
-        let final_batch = if filter_exprs.is_empty() {
-            // 无过滤器，直接返回
-            final_batch
-        } else {
-            // 对物理行应用过滤
-            let filtered = self.apply_filters_to_batch(final_batch, &filter_exprs)?;
+        // 在后台任务中流式发送数据
+        tokio::spawn(async move {
+            let executor = NaturalOrderExecutor::new(engine);
 
-            // 投影（如果需要）
-            if is_select_star || projection_fields.is_empty() {
-                filtered
-            } else {
-                self.project_batch(filtered, &projection_fields)?
+            for (partition_name, segment_id, skip, read_count) in target_segments {
+                log::debug!(
+                    "📦 [NaturalCursor] Streaming segment {}/{}: skip={}, read={}",
+                    partition_name,
+                    segment_id,
+                    skip,
+                    read_count
+                );
+
+                // 读取这个 segment 的数据
+                match executor
+                    .read_single_segment(
+                        &table_name,
+                        &sql,
+                        &partition_name,
+                        &segment_id,
+                        skip,
+                        read_count,
+                        &projection_fields,
+                        is_select_star,
+                        false, // force_full_projection
+                        &[],   // filter_exprs
+                    )
+                    .await
+                {
+                    Ok(batch) => {
+                        let rows = batch.num_rows();
+                        matched_docs_clone.fetch_add(rows, std::sync::atomic::Ordering::Relaxed);
+
+                        // 发送 batch (如果 channel 满了会阻塞，实现背压)
+                        if tx.send(Ok(batch)).await.is_err() {
+                            log::warn!("🚫 [NaturalCursor] Receiver dropped, stopping stream");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("❌ [NaturalCursor] Segment read failed: {}", e);
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                }
             }
-        };
 
-        let matched_docs = final_batch.num_rows();
-        log::info!(
-            "⏱️  [NaturalOrder] Step 4 (merge batches): {:?}",
-            step4_start.elapsed()
-        );
+            log::info!("✅ [NaturalCursor] Stream completed");
+        });
 
-        log::info!(
-            "✅ [NaturalOrder] Total time: {:?}, Returned {} rows",
-            total_start.elapsed(),
-            final_batch.num_rows()
-        );
-
-        Ok(QueryResult {
-            batch: final_batch,
+        Ok(StreamingQueryResult {
+            receiver: rx,
+            schema,
             matched_docs,
         })
     }
 
+    /// 执行自然顺序查询 (兼容旧版本，一次性返回所有数据)
+    ///
+    /// # 参数
+    /// * `sql` - 完整的 SQL 查询 (包含 ORDER BY _nature)
     /// 构建 Segment 元数据索引
     ///
     /// 遍历所有 partition 和 segment，收集元数据并排序
@@ -538,171 +531,87 @@ impl NaturalOrderExecutor {
         Ok(result)
     }
 
-    /// 从指定的 segments 读取数据
-    ///
-    /// # 参数
-    /// * `target_segments` - Vec<(partition_name, segment_id, skip, read_count)>
-    /// * `where_clause` - WHERE 条件的 SQL 文本（可选）
-    /// * `projection_fields` - 投影字段列表
-    /// * `is_select_star` - 是否是 SELECT *
-    async fn read_from_segments(
-        &self,
-        table_name: &str,
-        sql: &str,
-        target_segments: &[(String, String, usize, usize)],
-        projection_fields: &[String],
-        is_select_star: bool,
-        force_full_projection: bool,
-    ) -> CoreResult<Vec<RecordBatch>> {
-        // 清理 SQL：移除 ORDER BY _nature 和 LIMIT/OFFSET
-        let _cleaned_sql = self.clean_sql_for_segment_query(sql)?;
+    /// 获取表的 Arrow Schema
+    async fn get_table_schema(&self, table_name: &str) -> CoreResult<Arc<ArrowSchema>> {
+        let partition_names = self.engine.list_partitions(table_name).await;
+        let first_partition_name = partition_names.into_iter().next().ok_or_else(|| {
+            CoreError::NotExisted(format!("No partitions found for table '{}'", table_name))
+        })?;
 
-        let mut all_batches = Vec::new();
+        let partition = self
+            .engine
+            .get_partition(table_name, &first_partition_name)
+            .await
+            .ok_or_else(|| {
+                CoreError::NotExisted(format!("Partition {} not found", first_partition_name))
+            })?;
 
-        for (partition_name, segment_id, skip, read_count) in target_segments {
-            let segment_start = std::time::Instant::now();
-
-            log::info!(
-                "📖 [NaturalOrder] Reading {}/{}: skip={}, read={}",
-                partition_name,
-                segment_id,
-                skip,
-                read_count
-            );
-
-            let get_partition_start = std::time::Instant::now();
-            let partition = self
-                .engine
-                .get_partition(table_name, partition_name)
-                .await
-                .ok_or_else(|| {
-                    CoreError::NotExisted(format!("Partition {} not found", partition_name))
-                })?;
-            log::debug!("  ⏱️  get_partition: {:?}", get_partition_start.elapsed());
-
-            // 获取 segment 数据并立即释放锁
-            let get_segment_start = std::time::Instant::now();
-            let (schema, index_readers, doc_count, deleted, row_data) = if segment_id == "current" {
-                let current_segment = partition.get_current_segment();
-                let schema = partition.arrow_schema.clone();
-                let index_readers = current_segment.get_index_readers();
-                let doc_count = current_segment.doc_count();
-                let deleted = Arc::new(current_segment.get_deleted());
-                let row_data = Arc::new(current_segment.get_row_data());
-                // 锁在这里被释放
-                drop(current_segment);
-                (schema, index_readers, doc_count, deleted, row_data)
-            } else {
-                let segment_id_u64: u64 = segment_id.parse().map_err(|_| {
-                    CoreError::Internal(format!("Invalid segment ID: {}", segment_id))
-                })?;
-
-                let frozen_segments = partition.get_frozen_segments();
-                let segment_arc = frozen_segments
-                    .iter()
-                    .find(|(id, _)| *id == segment_id_u64)
-                    .ok_or_else(|| {
-                        CoreError::NotExisted(format!("Segment {} not found", segment_id))
-                    })?
-                    .1
-                    .clone();
-                // 释放 frozen_segments 的锁
-                drop(frozen_segments);
-
-                let schema = partition.arrow_schema.clone();
-                let index_readers = segment_arc.get_index_readers();
-                let doc_count = segment_arc.doc_count();
-                let deleted = Arc::new(segment_arc.get_deleted());
-                let row_data = Arc::new(segment_arc.get_row_data());
-
-                // ⚠️ 检查 row_data 类型,只处理 Parquet
-                match &*row_data {
-                    RowDataStore::Memory(_) => {
-                        log::warn!(
-                            "⏭️  [NaturalOrder] Skipping frozen segment {}/{} (still Memory type)",
-                            partition_name,
-                            segment_id
-                        );
-                        continue; // 跳过这个 segment
-                    }
-                    RowDataStore::Parquet(_) => {
-                        // OK, 继续处理
-                    }
-                }
-
-                (schema, index_readers, doc_count, deleted, row_data)
-            };
-
-            log::debug!("  ⏱️  get_segment_data: {:?}", get_segment_start.elapsed());
-
-            // 读取数据（已经没有锁）
-            let read_data_start = std::time::Instant::now();
-            let batch = self
-                .read_from_segment_data(
-                    schema,
-                    index_readers,
-                    doc_count,
-                    deleted,
-                    row_data,
-                    *skip,
-                    *read_count,
-                    projection_fields,
-                    is_select_star,
-                    force_full_projection,
-                )
-                .await?;
-            log::debug!(
-                "  ⏱️  read_from_segment_data: {:?}",
-                read_data_start.elapsed()
-            );
-
-            if batch.num_rows() > 0 {
-                all_batches.push(batch);
-            }
-
-            log::info!(
-                "  ⏱️  Total for segment {}/{}: {:?}",
-                partition_name,
-                segment_id,
-                segment_start.elapsed()
-            );
-        }
-
-        Ok(all_batches)
+        Ok(partition.schema().to_arrow_schema())
     }
 
-    /// 从 segment 数据读取（带 skip）
-    ///
-    /// 核心优化：通过 bitmap 跳过不需要的行，支持列裁剪
-    async fn read_from_segment_data(
+    /// 读取单个 segment 的数据 (用于流式查询)
+    async fn read_single_segment(
         &self,
-        schema: Arc<ArrowSchema>,
-        index_readers: HashMap<String, Box<dyn IndexReader>>,
-        doc_count: u32,
-        deleted: Arc<RoaringBitmap>,
-        row_data: Arc<RowDataStore>,
+        table_name: &str,
+        _sql: &str,
+        partition_name: &str,
+        segment_id: &str,
         skip: usize,
         read_count: usize,
         projection_fields: &[String],
         is_select_star: bool,
-        force_full_projection: bool,
+        _force_full_projection: bool,
+        _filter_exprs: &[datafusion::logical_expr::Expr],
     ) -> CoreResult<RecordBatch> {
         use crate::compute::table_provider::segment_scanner::SegmentScanner;
 
-        // SegmentScanner 需要拥有所有权，所以 clone
-        let deleted_owned = (*deleted).clone();
-        let row_data_owned = (*row_data).clone();
+        let partition = self
+            .engine
+            .get_partition(table_name, partition_name)
+            .await
+            .ok_or_else(|| {
+                CoreError::NotExisted(format!("Partition {} not found", partition_name))
+            })?;
 
-        let scanner = SegmentScanner::new(
-            schema.clone(),
-            row_data_owned,
-            index_readers,
-            doc_count,
-            deleted_owned,
-        );
+        // 获取 segment 数据
+        let (schema, index_readers, doc_count, deleted, row_data) = if segment_id == "current" {
+            let current_segment = partition.get_current_segment();
+            let schema = partition.arrow_schema.clone();
+            let index_readers = current_segment.get_index_readers();
+            let doc_count = current_segment.doc_count();
+            let deleted = current_segment.get_deleted();
+            let row_data = current_segment.get_row_data();
+            drop(current_segment);
+            (schema, index_readers, doc_count, deleted, row_data)
+        } else {
+            let segment_id_u64: u64 = segment_id
+                .parse()
+                .map_err(|_| CoreError::Internal(format!("Invalid segment ID: {}", segment_id)))?;
+
+            let frozen_segments = partition.get_frozen_segments();
+            let segment = frozen_segments
+                .iter()
+                .find(|(id, _)| *id == segment_id_u64)
+                .map(|(_, seg)| seg.clone())
+                .ok_or_else(|| {
+                    CoreError::NotExisted(format!("Segment {} not found", segment_id))
+                })?;
+
+            let schema = partition.arrow_schema.clone();
+            let index_readers = segment.get_index_readers();
+            let doc_count = segment.doc_count();
+            let deleted = segment.get_deleted();
+            let row_data = segment.get_row_data();
+            drop(frozen_segments);
+            (schema, index_readers, doc_count, deleted, row_data)
+        };
+
+        // 使用 SegmentScanner 直接扫描
+        let scanner =
+            SegmentScanner::new(schema.clone(), row_data, index_readers, doc_count, deleted);
 
         // 🚀 构建投影列索引
-        let projection = if is_select_star || force_full_projection {
+        let projection = if is_select_star {
             None // SELECT * 读取所有列
         } else {
             // 根据字段名找到列索引
@@ -724,311 +633,10 @@ impl NaturalOrderExecutor {
             }
         };
 
-        // 🚀 核心优化：使用 SegmentScanner 的 scan_with_skip 并应用投影下推
+        // 扫描数据
         let batch = scanner.scan_with_skip_and_limit(&[], skip, read_count, projection.as_ref())?;
 
         Ok(batch)
-    }
-
-    /// 从 WHERE SQL 文本解析成 DataFusion 过滤器表达式
-    fn parse_where_filters(
-        &self,
-        where_sql: &str,
-    ) -> CoreResult<Vec<datafusion::logical_expr::Expr>> {
-        use datafusion::sql::sqlparser::dialect::GenericDialect;
-        use datafusion::sql::sqlparser::parser::Parser;
-
-        // 构造一个临时的 SELECT 语句来解析 WHERE 条件
-        let temp_sql = format!("SELECT * FROM dummy WHERE {}", where_sql);
-
-        // 解析 SQL
-        let dialect = GenericDialect {};
-        let statements = Parser::parse_sql(&dialect, &temp_sql)
-            .map_err(|e| CoreError::Internal(format!("Failed to parse WHERE clause: {}", e)))?;
-
-        if statements.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // 从 AST 提取 WHERE 表达式
-        use datafusion::sql::sqlparser::ast::{SetExpr, Statement};
-        if let Statement::Query(query) = &statements[0] {
-            if let SetExpr::Select(select) = query.body.as_ref() {
-                if let Some(selection) = &select.selection {
-                    // 将 sqlparser 的 Expr 转换为 DataFusion 的 Expr
-                    // 使用简单的转换策略
-                    match self.convert_sql_expr_to_df_expr(selection) {
-                        Ok(expr) => {
-                            log::info!("✅ [NaturalOrder] Parsed WHERE filter: {:?}", expr);
-                            return Ok(vec![expr]);
-                        }
-                        Err(e) => {
-                            log::warn!("⚠️  Failed to convert WHERE expression: {}, returning empty filters", e);
-                            return Ok(Vec::new());
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(Vec::new())
-    }
-
-    fn apply_filters_to_batch(
-        &self,
-        batch: RecordBatch,
-        filters: &[datafusion::logical_expr::Expr],
-    ) -> CoreResult<RecordBatch> {
-        use crate::utils::error::CoreError;
-        use datafusion::arrow::compute::filter_record_batch;
-        use datafusion::common::ToDFSchema;
-        use datafusion::execution::context::SessionContext;
-        use datafusion::physical_expr::create_physical_expr;
-
-        if filters.is_empty() || batch.num_rows() == 0 {
-            return Ok(batch);
-        }
-
-        let combined_filter = if filters.len() == 1 {
-            filters[0].clone()
-        } else {
-            let mut expr = filters[0].clone();
-            for filter in &filters[1..] {
-                expr = datafusion::logical_expr::Expr::BinaryExpr(
-                    datafusion::logical_expr::BinaryExpr {
-                        left: Box::new(expr),
-                        op: datafusion::logical_expr::Operator::And,
-                        right: Box::new(filter.clone()),
-                    },
-                );
-            }
-            expr
-        };
-
-        let ctx = SessionContext::new();
-        let df_schema = batch.schema().to_dfschema_ref().map_err(|e| {
-            CoreError::Internal(format!("Failed to convert schema to DFSchema: {}", e))
-        })?;
-
-        let physical_expr =
-            create_physical_expr(&combined_filter, &df_schema, ctx.state().execution_props())
-                .map_err(|e| {
-                    CoreError::Internal(format!("Failed to create physical expr: {}", e))
-                })?;
-
-        let result = physical_expr
-            .evaluate(&batch)
-            .map_err(|e| CoreError::Internal(format!("Failed to evaluate filter: {}", e)))?;
-
-        let predicate = match result {
-            datafusion::physical_plan::ColumnarValue::Array(array) => {
-                use datafusion::arrow::array::AsArray;
-                let boolean_array = array.as_boolean();
-                if boolean_array.len() != batch.num_rows() {
-                    return Err(CoreError::Internal(format!(
-                        "Filter produced {} rows, expected {}",
-                        boolean_array.len(),
-                        batch.num_rows()
-                    )));
-                }
-                boolean_array.clone()
-            }
-            datafusion::physical_plan::ColumnarValue::Scalar(scalar) => match scalar {
-                datafusion::scalar::ScalarValue::Boolean(Some(true)) => {
-                    return Ok(batch);
-                }
-                datafusion::scalar::ScalarValue::Boolean(Some(false))
-                | datafusion::scalar::ScalarValue::Boolean(None) => {
-                    return Ok(RecordBatch::new_empty(batch.schema()));
-                }
-                _ => {
-                    return Err(CoreError::Internal(
-                        "Filter returned non-boolean scalar".to_string(),
-                    ));
-                }
-            },
-        };
-
-        filter_record_batch(&batch, &predicate)
-            .map_err(|e| CoreError::Internal(format!("Failed to filter batch: {}", e)))
-    }
-
-    fn project_batch(
-        &self,
-        batch: RecordBatch,
-        projection_fields: &[String],
-    ) -> CoreResult<RecordBatch> {
-        use crate::utils::error::CoreError;
-
-        if projection_fields.is_empty() {
-            return Ok(batch);
-        }
-
-        let schema = batch.schema();
-        let mut indices = Vec::new();
-        for field_name in projection_fields {
-            if let Some((idx, _)) = schema
-                .fields()
-                .iter()
-                .enumerate()
-                .find(|(_, f)| f.name() == field_name)
-            {
-                indices.push(idx);
-            } else {
-                return Err(CoreError::InvalidParam(format!(
-                    "Field '{}' not found in result schema",
-                    field_name
-                )));
-            }
-        }
-
-        batch
-            .project(&indices)
-            .map_err(|e| CoreError::Internal(format!("Failed to project batch: {}", e)))
-    }
-
-    /// 将 sqlparser 的 Expr 转换为 DataFusion 的 Expr
-    fn convert_sql_expr_to_df_expr(
-        &self,
-        sql_expr: &datafusion::sql::sqlparser::ast::Expr,
-    ) -> CoreResult<datafusion::logical_expr::Expr> {
-        use datafusion::logical_expr::{col, lit};
-        use datafusion::sql::sqlparser::ast::Expr as SqlExpr;
-
-        match sql_expr {
-            // 二元操作: a = b, a > b, etc.
-            SqlExpr::BinaryOp { left, op, right } => {
-                let left_expr = self.convert_sql_expr_to_df_expr(left)?;
-                let right_expr = self.convert_sql_expr_to_df_expr(right)?;
-
-                use datafusion::sql::sqlparser::ast::BinaryOperator;
-                let df_expr = match op {
-                    BinaryOperator::Eq => left_expr.eq(right_expr),
-                    BinaryOperator::NotEq => left_expr.not_eq(right_expr),
-                    BinaryOperator::Lt => left_expr.lt(right_expr),
-                    BinaryOperator::LtEq => left_expr.lt_eq(right_expr),
-                    BinaryOperator::Gt => left_expr.gt(right_expr),
-                    BinaryOperator::GtEq => left_expr.gt_eq(right_expr),
-                    BinaryOperator::And => left_expr.and(right_expr),
-                    BinaryOperator::Or => left_expr.or(right_expr),
-                    _ => {
-                        return Err(CoreError::Internal(format!(
-                            "Unsupported binary operator: {:?}",
-                            op
-                        )))
-                    }
-                };
-                Ok(df_expr)
-            }
-
-            // 列引用
-            SqlExpr::Identifier(ident) => Ok(col(&ident.value)),
-
-            // 值字面量（新版本使用 ValueWithSpan）
-            SqlExpr::Value(value_with_span) => {
-                use datafusion::sql::sqlparser::ast::Value;
-                match &value_with_span.value {
-                    Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                        Ok(lit(s.clone()))
-                    }
-                    Value::Number(n, _) => {
-                        // 尝试解析为 i64
-                        if let Ok(num) = n.parse::<i64>() {
-                            Ok(lit(num))
-                        } else if let Ok(num) = n.parse::<f64>() {
-                            Ok(lit(num))
-                        } else {
-                            Err(CoreError::Internal(format!("Invalid number: {}", n)))
-                        }
-                    }
-                    _ => Err(CoreError::Internal(format!(
-                        "Unsupported value type: {:?}",
-                        value_with_span
-                    ))),
-                }
-            }
-
-            // 其他类型暂不支持
-            _ => Err(CoreError::Internal(format!(
-                "Unsupported SQL expression type: {:?}",
-                sql_expr
-            ))),
-        }
-    }
-
-    /// 清理 SQL：移除 ORDER BY _nature 和 LIMIT/OFFSET
-    fn clean_sql_for_segment_query(&self, sql: &str) -> CoreResult<String> {
-        let mut cleaned = sql.to_string();
-
-        // 移除 ORDER BY _nature
-        let sql_upper = cleaned.to_uppercase();
-        if let Some(order_pos) = sql_upper.find("ORDER BY _NATURE") {
-            // 查找 ORDER BY 后的下一个子句（LIMIT/OFFSET/分号）
-            let after_order = &cleaned[order_pos..];
-            if let Some(limit_pos) = after_order.to_uppercase().find("LIMIT") {
-                // 保留 LIMIT 之后的部分（稍后会移除）
-                cleaned = format!("{}{}", &cleaned[..order_pos], &after_order[limit_pos..]);
-            } else {
-                // 没有其他子句，直接截断
-                cleaned = cleaned[..order_pos].to_string();
-            }
-        }
-
-        // 移除 LIMIT 和 OFFSET（因为我们在代码中控制）
-        let sql_upper = cleaned.to_uppercase();
-        if let Some(limit_pos) = sql_upper.find("LIMIT") {
-            cleaned = cleaned[..limit_pos].to_string();
-        }
-
-        Ok(cleaned.trim().to_string())
-    }
-
-    /// 合并多个 RecordBatch
-    fn concat_batches(&self, batches: Vec<RecordBatch>) -> CoreResult<RecordBatch> {
-        if batches.is_empty() {
-            return Err(CoreError::Internal("No batches to concat".to_string()));
-        }
-
-        if batches.len() == 1 {
-            return Ok(batches.into_iter().next().unwrap());
-        }
-
-        use datafusion::arrow::compute::concat_batches;
-        let schema = batches[0].schema();
-        concat_batches(&schema, &batches)
-            .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
-    }
-
-    /// 创建空 RecordBatch（从第一个 segment 获取 schema）
-    async fn create_empty_batch(&self, table_name: &str) -> CoreResult<RecordBatch> {
-        use datafusion::arrow::array::{new_empty_array, ArrayRef};
-
-        // 获取第一个 partition 和 segment
-        let partition_names = self.engine.list_partitions(table_name).await;
-        let first_partition_name = partition_names.into_iter().next().ok_or_else(|| {
-            CoreError::NotExisted(format!("No partitions found for table '{}'", table_name))
-        })?;
-
-        let partition = self
-            .engine
-            .get_partition(table_name, &first_partition_name)
-            .await
-            .ok_or_else(|| {
-                CoreError::NotExisted(format!("Partition {} not found", first_partition_name))
-            })?;
-
-        // 获取 schema
-        let arrow_schema = partition.schema().to_arrow_schema();
-
-        // 创建空数组
-        let empty_columns: Vec<ArrayRef> = arrow_schema
-            .fields()
-            .iter()
-            .map(|field| new_empty_array(field.data_type()))
-            .collect();
-
-        RecordBatch::try_new(arrow_schema, empty_columns)
-            .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)))
     }
 }
 

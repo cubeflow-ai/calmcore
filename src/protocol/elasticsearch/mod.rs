@@ -848,37 +848,69 @@ async fn handle_aggregation_search(
     log::info!("🔍 [ES Agg] Generated SQL: {}", sql);
 
     // 执行聚合查询
-    let result = server
+    use futures::StreamExt;
+    let mut stream = server
         .engine
         .clone()
-        .execute_sql(&sql)
+        .execute_sql_stream(&sql)
         .await
         .map_err(|e| internal_error(format!("Aggregation query failed: {}", e)))?;
 
+    let mut agg_batches = Vec::new();
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result.map_err(|e| internal_error(format!("Stream error: {}", e)))?;
+        agg_batches.push(batch);
+    }
+
+    let result = if agg_batches.is_empty() {
+        use datafusion::arrow::array::RecordBatch;
+        use datafusion::arrow::datatypes::Schema;
+        RecordBatch::new_empty(std::sync::Arc::new(Schema::empty()))
+    } else if agg_batches.len() == 1 {
+        agg_batches.into_iter().next().unwrap()
+    } else {
+        use datafusion::arrow::compute::concat_batches;
+        let schema = agg_batches[0].schema();
+        concat_batches(&schema, &agg_batches)
+            .map_err(|e| internal_error(format!("Failed to concat batches: {}", e)))?
+    };
+
     // 先获取总计数
     let count_sql = format!("SELECT COUNT(*) FROM {}{}", index, where_clause);
-    let total_count = match server.engine.clone().execute_sql(&count_sql).await {
-        Ok(result) if result.batch.num_rows() > 0 => {
-            use datafusion::arrow::array::*;
-            let batch = &result.batch;
-            if batch.num_columns() > 0 && batch.num_rows() > 0 {
-                let column = batch.column(0);
-                if let Some(int64_array) = column.as_any().downcast_ref::<Int64Array>() {
-                    int64_array.value(0) as usize
-                } else if let Some(uint64_array) = column.as_any().downcast_ref::<UInt64Array>() {
-                    uint64_array.value(0) as usize
-                } else {
-                    0
-                }
+    let mut count_stream = server
+        .engine
+        .clone()
+        .execute_sql_stream(&count_sql)
+        .await
+        .map_err(|e| internal_error(format!("Count query failed: {}", e)))?;
+
+    let mut count_batches = Vec::new();
+    while let Some(batch_result) = count_stream.next().await {
+        let batch = batch_result.map_err(|e| internal_error(format!("Stream error: {}", e)))?;
+        count_batches.push(batch);
+    }
+
+    let total_count = if !count_batches.is_empty() && count_batches[0].num_rows() > 0 {
+        use datafusion::arrow::array::*;
+        let batch = &count_batches[0];
+        if batch.num_columns() > 0 && batch.num_rows() > 0 {
+            let column = batch.column(0);
+            if let Some(int64_array) = column.as_any().downcast_ref::<Int64Array>() {
+                int64_array.value(0) as usize
+            } else if let Some(uint64_array) = column.as_any().downcast_ref::<UInt64Array>() {
+                uint64_array.value(0) as usize
             } else {
                 0
             }
+        } else {
+            0
         }
-        _ => 0,
+    } else {
+        0
     };
 
     // 转换结果为 JSON
-    let records = crate::utils::arrow_utils::record_batch_to_json(&result.batch)
+    let records = crate::utils::arrow_utils::record_batch_to_json(&result)
         .map_err(|e| internal_error(format!("Failed to convert results: {}", e)))?;
 
     // 转换为 Map 格式
@@ -1025,30 +1057,43 @@ async fn search_impl(
     log::debug!("🔍 [ES Search] Generated SQL: {}", sql);
 
     // 先执行 COUNT 查询获取总数
+    use futures::StreamExt;
     let count_sql = format!("SELECT COUNT(*) FROM {}{}", index, where_clause);
-    let total_count = match server.engine.clone().execute_sql(&count_sql).await {
-        Ok(result) if result.batch.num_rows() > 0 => {
-            use datafusion::arrow::array::*;
-            let batch = &result.batch;
-            if batch.num_columns() > 0 && batch.num_rows() > 0 {
-                let column = batch.column(0);
-                if let Some(int64_array) = column.as_any().downcast_ref::<Int64Array>() {
-                    int64_array.value(0) as usize
-                } else if let Some(uint64_array) = column.as_any().downcast_ref::<UInt64Array>() {
-                    uint64_array.value(0) as usize
-                } else {
-                    0
-                }
+    let mut count_stream = server
+        .engine
+        .clone()
+        .execute_sql_stream(&count_sql)
+        .await
+        .map_err(|e| internal_error(format!("Count query failed: {}", e)))?;
+
+    let mut count_batches = Vec::new();
+    while let Some(batch_result) = count_stream.next().await {
+        let batch = batch_result.map_err(|e| internal_error(format!("Stream error: {}", e)))?;
+        count_batches.push(batch);
+    }
+
+    let total_count = if !count_batches.is_empty() && count_batches[0].num_rows() > 0 {
+        use datafusion::arrow::array::*;
+        let batch = &count_batches[0];
+        if batch.num_columns() > 0 && batch.num_rows() > 0 {
+            let column = batch.column(0);
+            if let Some(int64_array) = column.as_any().downcast_ref::<Int64Array>() {
+                int64_array.value(0) as usize
+            } else if let Some(uint64_array) = column.as_any().downcast_ref::<UInt64Array>() {
+                uint64_array.value(0) as usize
             } else {
                 0
             }
+        } else {
+            0
         }
-        _ => 0,
+    } else {
+        0
     };
 
     // 执行实际查询
-    let result = match server.engine.clone().execute_sql(&sql).await {
-        Ok(result) => result,
+    let mut search_stream = match server.engine.clone().execute_sql_stream(&sql).await {
+        Ok(s) => s,
         Err(e) => {
             let msg = format!("Query execution failed: {}", e);
             log::error!("❌ [ES Search] Error: {}", msg);
@@ -1056,9 +1101,38 @@ async fn search_impl(
         }
     };
 
+    let mut search_batches = Vec::new();
+    while let Some(batch_result) = search_stream.next().await {
+        let batch = match batch_result {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("Stream error: {}", e);
+                log::error!("❌ [ES Search] Stream error: {}", msg);
+                return Err(internal_error(msg).into());
+            }
+        };
+        search_batches.push(batch);
+    }
+
+    let result = if search_batches.is_empty() {
+        use datafusion::arrow::array::RecordBatch;
+        use datafusion::arrow::datatypes::Schema;
+        RecordBatch::new_empty(std::sync::Arc::new(Schema::empty()))
+    } else if search_batches.len() == 1 {
+        search_batches.into_iter().next().unwrap()
+    } else {
+        use datafusion::arrow::compute::concat_batches;
+        let schema = search_batches[0].schema();
+        concat_batches(&schema, &search_batches).map_err(|e| {
+            let msg = format!("Failed to concat batches: {}", e);
+            log::error!("❌ [ES Search] Concat error: {}", msg);
+            internal_error(msg)
+        })?
+    };
+
     // 将 RecordBatch 转换为 JSON
     let all_docs =
-        crate::utils::arrow_utils::record_batch_to_json(&result.batch).unwrap_or_else(|_| vec![]);
+        crate::utils::arrow_utils::record_batch_to_json(&result).unwrap_or_else(|_| vec![]);
 
     // 提取排序字段名称（如果有排序）
     let sort_fields: Vec<String> = if let Some(sort) = &search_req.sort {
@@ -1678,16 +1752,6 @@ fn check_field_match(doc: &Value, field: &str, expected_value: &Value) -> bool {
 }
 
 // ===== 辅助函数 =====
-
-/// 插入单个文档
-async fn insert_document(
-    server: &Arc<ElasticsearchServer>,
-    index: &str,
-    _id: &str,
-    doc: Value,
-) -> Result<(), CoreError> {
-    insert_document_with_routing(server, index, _id, doc, None).await
-}
 
 async fn insert_document_with_routing(
     server: &Arc<ElasticsearchServer>,

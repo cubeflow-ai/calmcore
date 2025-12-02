@@ -1211,13 +1211,41 @@ impl QueryRoot {
     async fn query(&self, ctx: &Context<'_>, sql: String) -> Result<QueryResult> {
         let engine = ctx.data::<Arc<Engine>>()?;
 
-        // 使用 Engine 的 execute_sql 方法
-        let result = engine
-            .execute_sql(&sql)
+        // 使用 Engine 的 execute_sql_stream 方法
+        use futures::StreamExt;
+        let mut stream = engine
+            .execute_sql_stream(&sql)
             .await
             .map_err(|e| async_graphql::Error::new(format!("Query failed: {}", e)))?;
 
-        if result.batch.num_rows() == 0 {
+        // Collect stream
+        let mut batches = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result
+                .map_err(|e| async_graphql::Error::new(format!("Stream error: {}", e)))?;
+            batches.push(batch);
+        }
+
+        if batches.is_empty() {
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                total_rows: 0,
+            });
+        }
+
+        // 合并 batches
+        let result = if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            use datafusion::arrow::compute::concat_batches;
+            let schema = batches[0].schema();
+            concat_batches(&schema, &batches).map_err(|e| {
+                async_graphql::Error::new(format!("Failed to concat batches: {}", e))
+            })?
+        };
+
+        if result.num_rows() == 0 {
             return Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
@@ -1227,7 +1255,6 @@ impl QueryRoot {
 
         // 获取列名
         let columns: Vec<String> = result
-            .batch
             .schema()
             .fields()
             .iter()
@@ -1235,7 +1262,7 @@ impl QueryRoot {
             .collect();
 
         // 转换为 JSON
-        let rows = arrow_utils::record_batch_to_json(&result.batch)
+        let rows = arrow_utils::record_batch_to_json(&result)
             .map_err(|e| async_graphql::Error::new(format!("Failed to convert to JSON: {}", e)))?;
 
         let total_rows = rows.len();
