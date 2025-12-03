@@ -40,6 +40,11 @@ impl SqlNormalizer {
         // 将 "pickup_datetime >= 1704067200000" 转换为 "pickup_datetime >= CAST(1704067200000 AS TIMESTAMP)"
         normalized = Self::fix_timestamp_comparisons(&normalized);
 
+        // 🔧 自动为重复的投影列添加别名（兼容MySQL行为）
+        // MySQL 允许 SELECT '11.3.83.3', 'r2api', 'r2api' 这样的重复列
+        // 但 DataFusion 要求每个投影必须有唯一名称
+        normalized = Self::fix_duplicate_projections(&normalized);
+
         Ok((statement, normalized))
     }
 
@@ -87,6 +92,94 @@ impl SqlNormalizer {
 
         result
     }
+
+    /// 自动为重复的投影列添加别名
+    ///
+    /// MySQL 允许 SELECT 中有重复的常量列，例如:
+    /// SELECT '11.3.83.3', 'r2api', 'r2api', trace_id FROM table
+    ///
+    /// 但 DataFusion 要求每个投影必须有唯一名称，会报错:
+    /// "Projections require unique expression names"
+    ///
+    /// 此函数自动为重复的列添加别名:
+    /// SELECT '11.3.83.3' AS _col0, 'r2api' AS _col1, 'r2api' AS _col2, trace_id FROM table
+    fn fix_duplicate_projections(sql: &str) -> String {
+        // 简单的正则匹配 SELECT ... FROM 部分
+        // 匹配: SELECT [投影列表] FROM
+        let re = match Regex::new(r"(?i)SELECT\s+(.*?)\s+FROM\s+") {
+            Ok(r) => r,
+            Err(_) => return sql.to_string(),
+        };
+
+        let captures = match re.captures(sql) {
+            Some(c) => c,
+            None => return sql.to_string(), // 没有 SELECT FROM 结构，直接返回
+        };
+
+        let projection_str = &captures[1];
+        
+        // 分割投影列（处理逗号分隔）
+        // 注意：这是简化版本，不处理嵌套函数中的逗号
+        let projections: Vec<&str> = projection_str
+            .split(',')
+            .map(|s| s.trim())
+            .collect();
+
+        // 检测重复的列名
+        use std::collections::HashMap;
+        let mut column_names: HashMap<String, usize> = HashMap::new();
+        let mut needs_alias = vec![false; projections.len()];
+        
+        for (idx, proj) in projections.iter().enumerate() {
+            // 如果已经有 AS 别名，跳过
+            if proj.to_uppercase().contains(" AS ") {
+                continue;
+            }
+            
+            // 提取列的"显示名称"（常量值或字段名）
+            let display_name = if proj.starts_with('\'') || proj.starts_with('"') {
+                // 字符串常量: '11.3.83.3' 或 "r2api"
+                proj.to_string()
+            } else if proj.chars().all(|c| c.is_numeric() || c == '.' || c == '-') {
+                // 数字常量: 123 或 3.14
+                proj.to_string()
+            } else {
+                // 字段名或表达式
+                proj.to_string()
+            };
+            
+            // 检查是否重复
+            if let Some(prev_idx) = column_names.get(&display_name) {
+                // 发现重复，标记当前列和之前的列都需要别名
+                needs_alias[*prev_idx] = true;
+                needs_alias[idx] = true;
+            } else {
+                column_names.insert(display_name, idx);
+            }
+        }
+
+        // 如果没有重复，直接返回原SQL
+        if !needs_alias.iter().any(|&x| x) {
+            return sql.to_string();
+        }
+
+        // 重新构建 SELECT 子句，为需要的列添加别名
+        let mut new_projections = Vec::new();
+        for (idx, proj) in projections.iter().enumerate() {
+            if needs_alias[idx] && !proj.to_uppercase().contains(" AS ") {
+                // 添加别名 _col0, _col1, ...
+                new_projections.push(format!("{} AS _col{}", proj, idx));
+            } else {
+                new_projections.push(proj.to_string());
+            }
+        }
+
+        let new_projection_str = new_projections.join(", ");
+        
+        // 替换原SQL中的投影部分
+        re.replace(sql, format!("SELECT {} FROM ", new_projection_str).as_str())
+            .to_string()
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +205,25 @@ mod tests {
         // 验证 Statement 能够被正确解析
         // 实际的转换在 plan_analyzer 中处理
         assert!(matches!(statement, Statement::Statement(_)));
+    }
+
+    #[test]
+    fn test_fix_duplicate_projections() {
+        let sql = "SELECT '11.3.83.3', 'r2api', 'r2api', trace_id FROM r2api";
+        let (_statement, normalized) = SqlNormalizer::normalize(sql).unwrap();
+        
+        // 检查是否添加了别名
+        assert!(normalized.contains("AS _col"));
+        println!("Normalized SQL: {}", normalized);
+    }
+
+    #[test]
+    fn test_no_duplicate_projections() {
+        let sql = "SELECT '11.3.83.3', 'r2api', trace_id FROM r2api";
+        let (_statement, normalized) = SqlNormalizer::normalize(sql).unwrap();
+        
+        // 没有重复，不应该添加别名
+        assert!(!normalized.contains("AS _col"));
     }
 
     #[test]

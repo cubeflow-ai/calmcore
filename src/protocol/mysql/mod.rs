@@ -3,7 +3,7 @@ mod insert_handler;
 use crate::engine::Engine;
 use crate::schema::field::FieldOption;
 use crate::schema::Schema;
-use datafusion::arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array};
+use datafusion::arrow::array::{Array, ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use msql_srv::*;
 use sha1::{Digest, Sha1};
@@ -1507,6 +1507,64 @@ async fn handle_delete<W: io::Read + io::Write>(
 }
 
 /// 写入查询结果
+/// 提取常量字面量值作为列名
+/// 
+/// 处理两种情况:
+/// 1. DataFusion 对常量生成的列名: "Utf8(\"value\")" -> "value"
+/// 2. 我们自动添加的别名: "_col0", "_col1" -> 从第一行数据中提取实际值
+fn extract_literal_column_name(field_name: &str, first_batch: Option<&RecordBatch>, col_idx: usize) -> String {
+    // 情况1: 匹配 Utf8("value") 格式
+    if let Some(start) = field_name.find("Utf8(\"") {
+        if let Some(end) = field_name[start + 6..].find("\")") {
+            let value = &field_name[start + 6..start + 6 + end];
+            return value.to_string();
+        }
+    }
+    
+    // 情况2: 匹配 Int64(123) 或其他数字类型
+    if let Some(start) = field_name.find('(') {
+        if let Some(end) = field_name[start..].find(')') {
+            let type_name = &field_name[..start];
+            // 检查是否是数字类型
+            if type_name.contains("Int") || type_name.contains("Float") || type_name.contains("Decimal") {
+                let value = &field_name[start + 1..start + end];
+                return value.to_string();
+            }
+        }
+    }
+    
+    // 情况3: 如果是我们添加的别名 "_col0", "_col1" 等
+    // 尝试从第一行数据中提取实际的常量值
+    if field_name.starts_with("_col") {
+        if let Some(batch) = first_batch {
+            if batch.num_rows() > 0 && col_idx < batch.num_columns() {
+                let array = batch.column(col_idx);
+                // 尝试字符串类型
+                if let Some(str_array) = array.as_any().downcast_ref::<StringArray>() {
+                    if !str_array.is_null(0) {
+                        return str_array.value(0).to_string();
+                    }
+                }
+                // 尝试 Int64
+                if let Some(int_array) = array.as_any().downcast_ref::<Int64Array>() {
+                    if !int_array.is_null(0) {
+                        return int_array.value(0).to_string();
+                    }
+                }
+                // 尝试 Float64
+                if let Some(float_array) = array.as_any().downcast_ref::<datafusion::arrow::array::Float64Array>() {
+                    if !float_array.is_null(0) {
+                        return float_array.value(0).to_string();
+                    }
+                }
+            }
+        }
+    }
+    
+    // 如果都不匹配,返回原始名称
+    field_name.to_string()
+}
+
 fn write_query_result<W: io::Read + io::Write>(
     results: QueryResultWriter<'_, W>,
     schema: &SchemaRef,
@@ -1518,14 +1576,19 @@ fn write_query_result<W: io::Read + io::Write>(
         batches.len()
     );
 
+    // 获取第一个 batch 用于提取常量列名
+    let first_batch = batches.first();
+
     let columns: Vec<msql_srv::Column> = schema
         .fields()
         .iter()
-        .map(|field| {
+        .enumerate()
+        .map(|(col_idx, field)| {
             let col_type = get_arrow_type(field.data_type());
+            let column_name = extract_literal_column_name(field.name(), first_batch, col_idx);
             msql_srv::Column {
                 table: "".to_string(),
-                column: field.name().clone(),
+                column: column_name,
                 coltype: col_type,
                 colflags: ColumnFlags::empty(),
             }
