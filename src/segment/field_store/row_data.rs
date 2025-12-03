@@ -362,11 +362,38 @@ impl ParquetRowDataReader {
     /// Returns: HashMap<batch_start_id, Vec<doc_id>>
     pub fn batch_lookup_doc_ids(&self, doc_ids: &[u32]) -> HashMap<u32, Vec<u32>> {
         let mut result: HashMap<u32, Vec<u32>> = HashMap::new();
+        if doc_ids.is_empty() {
+            return result;
+        }
 
-        for &doc_id in doc_ids {
-            if let Some(batch_key) = self.get_batch_key_for_doc(doc_id) {
-                result.entry(batch_key).or_default().push(doc_id);
+        // doc_ids 通常已经按升序排列（来自 RoaringBitmap iterator），但仍做一次检测保障
+        let mut sorted_buffer: Vec<u32> = Vec::new();
+        let ids: &[u32] = if doc_ids.windows(2).all(|w| w[0] <= w[1]) {
+            doc_ids
+        } else {
+            sorted_buffer = doc_ids.to_vec();
+            sorted_buffer.sort_unstable();
+            sorted_buffer.as_slice()
+        };
+
+        result.reserve(ids.len().min(self.ranges.len()));
+        let mut range_idx = 0usize;
+
+        for &doc_id in ids {
+            while range_idx < self.ranges.len() && doc_id >= self.ranges[range_idx].1 {
+                range_idx += 1;
             }
+
+            if range_idx == self.ranges.len() {
+                break;
+            }
+
+            let (start, _end, _rg_idx) = self.ranges[range_idx];
+            if doc_id < start {
+                continue;
+            }
+
+            result.entry(start).or_default().push(doc_id);
         }
 
         result

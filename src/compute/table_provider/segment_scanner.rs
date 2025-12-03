@@ -1595,7 +1595,7 @@ impl SegmentStream {
             }
         }
 
-        // 🚀 统一流式策略: 每次最多处理 1024 行
+        // 🚀 统一流式策略: 每次最多处理 1000 行
         // 优点:
         // 1. 更平滑的内存曲线 - 峰值内存降低 100x
         // 2. 更好的背压控制 - MySQL客户端可以按需消费
@@ -1604,73 +1604,69 @@ impl SegmentStream {
 
         let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
 
-        // 🎯 硬性限制: 每次最多收集 1024 个 doc_ids
-        const MAX_DOC_IDS_PER_CHUNK: usize = 1024;
+        // 🎯 硬性限制: 每次最多收集 1000 个 doc_ids
+        const MAX_DOC_IDS_PER_CHUNK: usize = 1000;
 
         let mut doc_ids_to_process: Vec<u32> = Vec::with_capacity(MAX_DOC_IDS_PER_CHUNK);
         let mut batch_key_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
 
-        let batch_groups = {
-            loop {
-                // 🚨 硬性限制: 每次最多1024行,确保内存可控
-                if doc_ids_to_process.len() >= MAX_DOC_IDS_PER_CHUNK {
+        loop {
+            // 🚨 硬性限制: 每次最多1000行,确保内存可控
+            if doc_ids_to_process.len() >= MAX_DOC_IDS_PER_CHUNK {
+                break;
+            }
+
+            // LIMIT 优化
+            if let Some(remaining) = remaining_rows {
+                if doc_ids_to_process.len() >= remaining {
                     break;
                 }
-
-                // LIMIT 优化
-                if let Some(remaining) = remaining_rows {
-                    if doc_ids_to_process.len() >= remaining {
-                        break;
-                    }
-                }
-
-                // 🎯 关键: 先 peek 查看下一个 doc_id,不消费
-                let &doc_id = match self.doc_ids_iter.peek() {
-                    Some(id) => id,
-                    None => break, // 没有更多 doc_id
-                };
-
-                // 检查这个 doc_id 属于哪个 batch
-                let batch_key_opt = self.raw_data.get_batch_key_for_doc(doc_id);
-
-                if let Some(batch_key) = batch_key_opt {
-                    // 🎯 如果是新 batch 且已经收集够了 chunk_size,停止(不消费这个 doc_id)
-                    // 必须在消费前检查,否则 doc_id 会被迭代器消费但无法放回
-                    let is_new_batch = !batch_key_set.contains(&batch_key);
-                    if is_new_batch && batch_key_set.len() >= self.chunk_size {
-                        break; // 留给下一次 chunk 处理
-                    }
-
-                    // 安全消费这个 doc_id
-                    self.doc_ids_iter.next();
-                    doc_ids_to_process.push(doc_id);
-                    batch_key_set.insert(batch_key);
-                } else {
-                    // 无效的 doc_id,消费并跳过
-                    log::debug!("  [SegmentStream] 跳过无效doc_id: {}", doc_id);
-                    self.doc_ids_iter.next();
-                }
             }
 
-            // 没有更多数据
-            if doc_ids_to_process.is_empty() {
-                return Ok(Vec::new());
+            // 🎯 关键: 先 peek 查看下一个 doc_id,不消费
+            let &doc_id = match self.doc_ids_iter.peek() {
+                Some(id) => id,
+                None => break, // 没有更多 doc_id
+            };
+
+            // 检查这个 doc_id 属于哪个 batch
+            let batch_key_opt = self.raw_data.get_batch_key_for_doc(doc_id);
+
+            if let Some(batch_key) = batch_key_opt {
+                // 🎯 如果是新 batch 且已经收集够了 chunk_size,停止(不消费这个 doc_id)
+                // 必须在消费前检查,否则 doc_id 会被迭代器消费但无法放回
+                let is_new_batch = !batch_key_set.contains(&batch_key);
+                if is_new_batch && batch_key_set.len() >= self.chunk_size {
+                    break; // 留给下一次 chunk 处理
+                }
+
+                // 安全消费这个 doc_id
+                self.doc_ids_iter.next();
+                doc_ids_to_process.push(doc_id);
+                batch_key_set.insert(batch_key);
+                batch_groups.entry(batch_key).or_default().push(doc_id);
+            } else {
+                // 无效的 doc_id,消费并跳过
+                log::debug!("  [SegmentStream] 跳过无效doc_id: {}", doc_id);
+                self.doc_ids_iter.next();
             }
+        }
 
-            // 批量查找 batch_key 并分组
-            let batch_groups = self.raw_data.batch_lookup_doc_ids(&doc_ids_to_process);
-
-            log::debug!(
-                "  [SegmentStream] batch_lookup returned {} batch groups",
-                batch_groups.len()
-            );
-
-            batch_groups
-        };
-
-        if batch_groups.is_empty() {
+        // 没有更多数据
+        if doc_ids_to_process.is_empty() {
             return Ok(Vec::new());
         }
+
+        if batch_groups.is_empty() {
+            log::debug!("  [SegmentStream] batch grouping empty after scanning doc_ids");
+            return Ok(Vec::new());
+        }
+
+        log::debug!(
+            "  [SegmentStream] batch grouping collected {} groups",
+            batch_groups.len()
+        );
 
         let _doc_count = batch_groups.values().map(|v| v.len()).sum::<usize>();
 

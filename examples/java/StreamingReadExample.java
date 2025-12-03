@@ -1,4 +1,9 @@
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 
 /**
  * Calm 数据库流式读取示例
@@ -19,11 +24,11 @@ public class StreamingReadExample {
         // 示例 2: 带进度显示的流式读取
         streamingReadWithProgress(url, user, password);
         
-        // 示例 3: 分页读取（LIMIT + OFFSET）
-        paginatedRead(url, user, password);
-        
-        // 示例 4: 游标流式读取（最高效）
+        // 示例 3: 游标流式读取（最高效，推荐）
         cursorStreamingRead(url, user, password);
+        
+        // 示例 4: 内存监控版流式读取
+        streamingReadWithMemoryMonitor(url, user, password);
     }
     
     /**
@@ -129,67 +134,7 @@ public class StreamingReadExample {
     }
     
     /**
-     * 示例 3: 分页读取
-     * 使用 LIMIT + OFFSET 方式，适合需要跳页的场景
-     */
-    public static void paginatedRead(String url, String user, String password) {
-        System.out.println("\n========== 示例 3: 分页读取 (LIMIT + OFFSET) ==========");
-        
-        try (Connection conn = DriverManager.getConnection(url, user, password)) {
-            int pageSize = 1000;
-            int totalRead = 0;
-            int page = 0;
-            
-            while (true) {
-                int offset = page * pageSize;
-                String sql = String.format(
-                    "SELECT * FROM r2api LIMIT %d OFFSET %d", 
-                    pageSize, offset
-                );
-                
-                try (Statement stmt = conn.createStatement();
-                     ResultSet rs = stmt.executeQuery(sql)) {
-                    
-                    int rowsInPage = 0;
-                    while (rs.next()) {
-                        rowsInPage++;
-                        totalRead++;
-                        
-                        // 处理数据
-                        String clientIp = rs.getString("client_ip");
-                        String r2Key = rs.getString("r2_key");
-                    }
-                    
-                    if (rowsInPage > 0) {
-                        System.out.printf("  📄 第 %d 页: %d 行 (offset=%d)\n", 
-                            page + 1, rowsInPage, offset);
-                    }
-                    
-                    // 如果这页没有数据，说明读完了
-                    if (rowsInPage == 0) {
-                        break;
-                    }
-                    
-                    page++;
-                    
-                    // 示例：只读 5 页
-                    if (page >= 5) {
-                        System.out.println("  ⏹️  示例限制：只读 5 页");
-                        break;
-                    }
-                }
-            }
-            
-            System.out.printf("✅ 完成: 共读取 %d 行，%d 页\n", totalRead, page);
-            
-        } catch (SQLException e) {
-            System.err.println("❌ 错误: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-    
-    /**
-     * 示例 4: 游标流式读取（MySQL 5.0+）
+     * 示例 3: 游标流式读取（MySQL 5.0+）
      * 最高效的方式，使用服务器端游标
      */
     public static void cursorStreamingRead(String url, String user, String password) {
@@ -215,13 +160,12 @@ public class StreamingReadExample {
                 ResultSet rs = pstmt.executeQuery();
                 
                 int count = 0;
-                long lastReportTime = startTime;
                 
                 while (rs.next()) {
-                    // 处理数据
-                    String clientIp = rs.getString("client_ip");
-                    String r2Key = rs.getString("r2_key");
-                    String database = rs.getString("database");
+                    // 处理数据 - 只是示例，实际可根据需要处理
+                    // String clientIp = rs.getString("client_ip");
+                    // String r2Key = rs.getString("r2_key");
+                    // String database = rs.getString("database");
                     
                     count++;
                     
@@ -256,15 +200,7 @@ public class StreamingReadExample {
     }
     
     /**
-     * 工具方法: 处理单行数据
-     */
-    private static void processRow(String clientIp, String r2Key) {
-        // 实际的业务逻辑
-        // 例如: 数据转换、写入另一个数据库、生成报表等
-    }
-    
-    /**
-     * 示例 5: 内存监控版流式读取
+     * 示例 4: 内存监控版流式读取
      * 监控 JVM 内存使用情况，验证流式读取的内存效率
      */
     public static void streamingReadWithMemoryMonitor(String url, String user, String password) {
