@@ -1036,6 +1036,9 @@ async fn execute_query<W: io::Read + io::Write>(
 ) -> io::Result<()> {
     use crate::utils::tracing::{is_tracing_enabled, TraceContext};
 
+    // 🔍 记录查询开始时的内存
+    log::info!("🚀 [Query Start] {}", query);
+
     // 创建追踪上下文
     let trace_ctx = if is_tracing_enabled() {
         Some(TraceContext::new(format!(
@@ -1057,7 +1060,10 @@ async fn execute_query<W: io::Read + io::Write>(
         });
 
         match engine.clone().execute_sql_stream(query).await {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                log::info!("✅ [Query Planned] Stream created, starting to fetch batches");
+                stream
+            }
             Err(e) => {
                 let msg = format!("SQL execution failed: {}", e);
                 log::error!("SQL Error: {}", msg);
@@ -1605,6 +1611,11 @@ async fn write_query_result_streaming<W: io::Read + io::Write>(
 
     // 流式处理后续的 batch
     while let Some(batch_result) = stream.next().await {
+        log::warn!(
+            "🔍 [Stream] Received batch {} from DataFusion",
+            batch_count + 1
+        );
+
         let batch = match batch_result {
             Ok(b) => b,
             Err(e) => {
@@ -1615,6 +1626,24 @@ async fn write_query_result_streaming<W: io::Read + io::Write>(
         };
 
         let batch_rows = batch.num_rows();
+
+        // 🔍 计算 batch 占用的内存大小
+        let batch_bytes = batch.get_array_memory_size();
+        log::warn!(
+            "🔍 [Batch {}] {} rows, {} MB memory",
+            batch_count + 1,
+            batch_rows,
+            batch_bytes / 1_048_576
+        );
+        if batch_bytes > 1_000_000 {
+            log::warn!(
+                "⚠️  [Batch {}] Large batch: {} rows, {} MB memory",
+                batch_count + 1,
+                batch_rows,
+                batch_bytes / 1_048_576
+            );
+        }
+
         write_batch_rows(&mut row_writer, &batch, &mut total_rows, FLUSH_INTERVAL)?;
         batch_count += 1;
 
@@ -1668,9 +1697,11 @@ fn write_batch_rows<W: io::Read + io::Write>(
         *total_rows += 1;
         rows_in_batch += 1;
 
-        // 每 FLUSH_INTERVAL 行记录一次(TCP 自动背压)
+        // 🔥 背压机制: end_row() 会写入 TCP socket
+        // 如果客户端消费慢，write() 系统调用会阻塞，自动实现背压
+        // 每 100 行记录一次进度
         if *total_rows % flush_interval == 0 {
-            log::trace!("Streamed {} rows", total_rows);
+            log::debug!("📤 Sent {} rows (TCP backpressure active)", total_rows);
         }
     }
 

@@ -23,7 +23,7 @@ echo "📊 初始内存: $(echo "scale=2; $INIT_MEM / 1024" | bc) MB"
 
 echo ""
 echo "🚀 开始执行大查询..."
-echo "查询: SELECT id FROM taxi_trips (纯列查询,无常量投影)"
+echo "查询: SELECT '11.3.83.3','r2api','r2api',app_name FROM r2api"
 
 # 在后台监控内存
 (
@@ -41,7 +41,7 @@ echo "查询: SELECT id FROM taxi_trips (纯列查询,无常量投影)"
 MONITOR_PID=$!
 
 # 执行查询到本地 calm (3307端口)
-mysql -h127.0.0.1 -P3307 -uroot -pcalm -e "select id from taxi_trips" > /dev/null 2>&1
+mysql -h127.0.0.1 -P3307 -uroot -pcalm -e "select '11.3.83.3','r2api','r2api',app_name,data_path,app_name,data from r2api" > /dev/null 2>&1
 
 # 停止监控
 kill $MONITOR_PID 2>/dev/null
