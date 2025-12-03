@@ -33,75 +33,30 @@ pub async fn handle_insert<W: io::Read + io::Write>(
         .get_table_meta(&table_name)
         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("Table not found: {}", e)))?;
 
-    // 按 partition 分组数据
-    let route_start = std::time::Instant::now();
-    use std::collections::HashMap;
-    let mut partition_data: HashMap<String, Vec<Vec<String>>> = HashMap::new();
-
-    let pk_field =
-        meta.schema.primary_key.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Table has no primary key")
-        })?;
-
-    let pk_idx = columns
-        .iter()
-        .position(|c| c.eq_ignore_ascii_case(pk_field))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Primary key not in INSERT"))?;
-
-    // 路由每一行到对应的 partition
-    for row in all_rows {
-        let pk_value = &row[pk_idx];
-        let partition_id = engine
-            .route_partition(&table_name, pk_value)
-            .map_err(|e| io::Error::other(format!("Partition routing failed: {}", e)))?;
-
-        partition_data.entry(partition_id).or_default().push(row);
-    }
-
+    // 构建 RecordBatch
+    let batch_build_start = std::time::Instant::now();
+    let batch = build_record_batch(&meta, &columns, &all_rows)?;
     log::debug!(
-        "⏱️  [INSERT] Routed to {} partitions in {:?}",
-        partition_data.len(),
-        route_start.elapsed()
+        "⏱️  [INSERT] Built RecordBatch ({} rows) in {:?}",
+        all_rows.len(),
+        batch_build_start.elapsed()
     );
 
-    // 对每个 partition 批量插入
+    // 使用新的统一路由接口插入数据
     let insert_start = std::time::Instant::now();
-    let mut total_inserted = 0u64;
+    let stats = engine
+        .insert_batch(&table_name, batch, None)
+        .await
+        .map_err(|e| io::Error::other(format!("Insert failed: {}", e)))?;
 
-    for (partition_id, rows) in partition_data {
-        let batch_build_start = std::time::Instant::now();
-        let batch = build_record_batch(&meta, &columns, &rows)?;
-        log::debug!(
-            "⏱️  [INSERT] Built RecordBatch for partition {} ({} rows) in {:?}",
-            partition_id,
-            rows.len(),
-            batch_build_start.elapsed()
-        );
+    log::debug!(
+        "⏱️  [INSERT] Inserted {} rows to {} partitions in {:?}",
+        stats.rows_inserted,
+        stats.partitions_affected,
+        insert_start.elapsed()
+    );
 
-        let partition_get_start = std::time::Instant::now();
-        let partition = engine
-            .get_partition(&table_name, &partition_id)
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Partition not found"))?;
-        log::debug!(
-            "⏱️  [INSERT] Got partition {} in {:?}",
-            partition_id,
-            partition_get_start.elapsed()
-        );
-
-        let upsert_start = std::time::Instant::now();
-        partition
-            .upsert(batch)
-            .map_err(|e| io::Error::other(format!("Insert failed: {}", e)))?;
-        log::debug!(
-            "⏱️  [INSERT] Upserted {} rows to partition {} in {:?}",
-            rows.len(),
-            partition_id,
-            upsert_start.elapsed()
-        );
-
-        total_inserted += rows.len() as u64;
-    }
+    let total_inserted = stats.rows_inserted as u64;
 
     log::debug!(
         "⏱️  [INSERT] Total insert time: {:?}, {} rows, {:.0} rows/sec",

@@ -15,9 +15,6 @@ pub struct TableMeta {
     /// 分区策略
     pub partition_strategy: PartitionStrategy,
 
-    /// 并行工作数（partition 数量）
-    pub parallel_workers: usize,
-
     /// 创建时间（Unix 时间戳）
     pub created_at: u64,
 
@@ -28,32 +25,76 @@ pub struct TableMeta {
 /// 分区策略
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PartitionStrategy {
-    /// 哈希分区 - 根据字段值的哈希分配 partition
-    Hash {
-        /// 分区字段名
-        field: String,
-        /// partition 数量
+    /// 主键哈希分区（预创建，仅用于有主键的表）
+    ///
+    /// **约束**：只能用于有主键的表
+    /// **语义**：按主键字段进行哈希分区
+    ///
+    /// partition 会按照 num_partitions 提前创建
+    /// partition 命名：partition_0000000000000000000, partition_0000000000000000001, ...
+    PKHash {
+        /// partition 数量（预创建）
         num_partitions: usize,
     },
 
-    /// 范围分区 - 适合时序数据或有序数据
+    /// 哈希分区（预创建，用于无主键的表）
+    ///
+    /// **约束**：只能用于无主键的表
+    /// **语义**：按指定字段进行哈希分区
+    ///
+    /// partition 会按照 num_partitions 提前创建
+    /// partition 命名：partition_0000000000000000000, partition_0000000000000000001, ...
+    Hash {
+        /// 分区字段名
+        field: String,
+        /// partition 数量（预创建）
+        num_partitions: usize,
+    },
+
+    /// 范围分区（按需创建，适合时序数据）
+    ///
+    /// partition 不会提前创建，插入时按需创建
+    /// partition 命名格式：partition_{start:019} 或 partition_{start:019}_{parallelism_index}
+    ///
+    /// 例如：start=0, step=1000000, parallelism=None
+    ///   → partition_0000000000000000000 (范围: [0, 1000000))
+    ///   → partition_0000000000001000000 (范围: [1000000, 2000000))
+    ///
+    /// 例如：start=0, step=1000000, parallelism=Some(2)
+    ///   → partition_0000000000000000000_0 (范围: [0, 1000000), 并行索引 0)
+    ///   → partition_0000000000000000000_1 (范围: [0, 1000000), 并行索引 1)
+    ///   → partition_0000000000001000000_0 (范围: [1000000, 2000000), 并行索引 0)
+    ///   → partition_0000000000001000000_1 (范围: [1000000, 2000000), 并行索引 1)
     Range {
         /// 分区字段名
         field: String,
-        /// 范围列表 [(起始值, 结束值, partition_name)]
-        ranges: Vec<RangePartition>,
+        /// 起始位置（支持负数）
+        start: i64,
+        /// 步长（每个分区的范围大小）
+        step: i64,
+        /// 并行度（可选，用于提高单个 range 内的写入并行度）
+        /// None 表示不启用并行，Some(n) 表示每个 range 创建 n 个子分区
+        parallelism: Option<usize>,
     },
 
-    /// 自定义分区 - 用户通过load文件来加载分区信息
+    /// 自定义分区（按需创建）
+    ///
+    /// partition 不会提前创建
+    /// - 用户通过 LOAD DATA ... PARTITION(name) 指定
+    /// - 或者 INSERT INTO ... PARTITION(name) 指定
     Custom,
 
-    /// 无分区 - 所有数据在一个 partition
+    /// 无分区（单分区表，适合小表）
+    ///
+    /// 所有数据在一个分区：partition_0000000000000000000
     None,
 }
 
 impl PartitionStrategy {
+    /// 获取路由字段名
     pub fn router_field(&self) -> Option<&String> {
         match self {
+            PartitionStrategy::PKHash { .. } => None, // PKHash 使用主键，由调用方决定
             PartitionStrategy::Hash { field, .. } => Some(field),
             PartitionStrategy::Range { field, .. } => Some(field),
             PartitionStrategy::Custom => None,
@@ -61,93 +102,140 @@ impl PartitionStrategy {
         }
     }
 
-    /// 根据分区策略生成所有 partition_name 列表
-    pub fn generate_partitions(&self, parallel_workers: usize) -> Vec<String> {
+    /// 获取分区数量（仅用于预创建的策略）
+    pub fn num_partitions(&self) -> Option<usize> {
         match self {
-            PartitionStrategy::Hash { .. } => {
-                // Hash 分区：使用19位数字，不足补0
-                (0..parallel_workers)
-                    .map(|i| format!("{:019}", i))
-                    .collect()
+            PartitionStrategy::PKHash { num_partitions, .. } => Some(*num_partitions),
+            PartitionStrategy::Hash { num_partitions, .. } => Some(*num_partitions),
+            PartitionStrategy::Range { .. } => None, // 按需创建
+            PartitionStrategy::Custom => None,       // 按需创建
+            PartitionStrategy::None => Some(1),      // 单分区
+        }
+    }
+
+    /// 判断是否需要预创建分区
+    pub fn should_precreate_partitions(&self) -> bool {
+        matches!(
+            self,
+            PartitionStrategy::PKHash { .. }
+                | PartitionStrategy::Hash { .. }
+                | PartitionStrategy::None
+        )
+    }
+
+    /// 生成需要预创建的 partition_name 列表
+    ///
+    /// 返回 None 表示按需创建（Range, Custom）
+    pub fn generate_partitions(&self) -> Option<Vec<String>> {
+        match self {
+            PartitionStrategy::PKHash { num_partitions, .. } => {
+                // PKHash 分区：预创建 num_partitions 个分区
+                // 格式：0000000000000000000, 0000000000000000001, ...
+                Some((0..*num_partitions).map(|i| format!("{:019}", i)).collect())
             }
-            PartitionStrategy::Range { ranges, .. } => {
-                // Range 分区：使用 start_end 格式
-                ranges
-                    .iter()
-                    .map(|r| {
-                        format!(
-                            "{}_{}",
-                            Self::format_partition_value(&r.start),
-                            Self::format_partition_value(&r.end)
-                        )
-                    })
-                    .collect()
+            PartitionStrategy::Hash { num_partitions, .. } => {
+                // Hash 分区：预创建 num_partitions 个分区
+                // 格式：0000000000000000000, 0000000000000000001, ...
+                Some((0..*num_partitions).map(|i| format!("{:019}", i)).collect())
+            }
+            PartitionStrategy::Range { .. } => {
+                // Range 分区：按需创建
+                None
             }
             PartitionStrategy::Custom => {
-                vec![]
+                // Custom 分区：按需创建
+                None
             }
             PartitionStrategy::None => {
-                // None 分区：使用表名
-                vec![format!("{:019}", 0)]
+                // None 分区：单分区
+                Some(vec![format!("{:019}", 0)])
             }
+        }
+    }
+
+    /// 根据字段值计算 Range 分区名（随机选择并行分区）
+    ///
+    /// 例如：value=1500000, start=0, step=1000000, parallelism=None
+    ///   → partition_0000000000001000000 (范围 [1000000, 2000000))
+    ///
+    /// 例如：value=1500000, start=0, step=1000000, parallelism=Some(2)
+    ///   → partition_0000000000001000000_0 或 partition_0000000000001000000_1 (随机选择)
+    pub fn calculate_range_partition(&self, value: i64) -> Option<String> {
+        match self {
+            PartitionStrategy::Range {
+                start,
+                step,
+                parallelism,
+                ..
+            } => {
+                if *step <= 0 {
+                    return None;
+                }
+
+                // 计算 partition 的起始位置
+                let offset = value - start;
+                let partition_index = offset / step;
+                let partition_start = start + (partition_index * step);
+
+                // 格式化基础分区名
+                let base_name = Self::format_partition_id(partition_start);
+
+                // 如果启用了并行度，随机选择一个子分区
+                if let Some(p) = parallelism {
+                    if *p > 1 {
+                        // 使用哈希值作为随机源，避免依赖 rand crate
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+
+                        let mut hasher = DefaultHasher::new();
+                        // 结合时间戳和值来生成随机性
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos();
+                        now.hash(&mut hasher);
+                        value.hash(&mut hasher);
+
+                        let hash = hasher.finish();
+                        let parallel_index = (hash as usize) % p;
+                        return Some(format!("{}_{}", base_name, parallel_index));
+                    }
+                }
+
+                // 未启用并行度，返回基础分区名
+                Some(base_name)
+            }
+            _ => None,
+        }
+    }
+
+    /// 格式化 partition ID（支持负数）
+    ///
+    /// 正数：0000000000000001000
+    /// 负数：-000000000001000000
+    pub fn format_partition_id(value: i64) -> String {
+        if value >= 0 {
+            format!("{:019}", value)
+        } else {
+            // 负数：符号 + 018 位数字
+            format!("-{:018}", value.abs())
         }
     }
 
     /// 生成 partition 目录名
     ///
-    /// 格式：partition-{partition_name}
+    /// 格式：partition_{partition_name}
+    /// 例如：partition_0000000000000000001
     pub fn generate_partition_dir_name(partition_name: &str) -> String {
-        format!("partition-{}", partition_name)
+        format!("partition_{}", partition_name)
     }
 
     /// 从 partition 目录名中提取 partition_name
     ///
-    /// 例如：从 "partition-0000000000000000001" 提取 "0000000000000000001"
+    /// 例如：从 "partition_0000000000000000001" 提取 "0000000000000000001"
     pub fn extract_partition_from_dir_name(dir_name: &str) -> Option<String> {
-        dir_name.strip_prefix("partition-").map(|s| s.to_string())
+        dir_name.strip_prefix("partition_").map(|s| s.to_string())
     }
-
-    /// 格式化 PartitionValue 为字符串
-    fn format_partition_value(value: &PartitionValue) -> String {
-        match value {
-            PartitionValue::Int64(v) => v.to_string(),
-            PartitionValue::UInt64(v) => v.to_string(),
-            PartitionValue::String(v) => Self::sanitize_filename(v),
-            PartitionValue::MinValue => "min".to_string(),
-            PartitionValue::MaxValue => "max".to_string(),
-        }
-    }
-
-    /// 清理文件名中的特殊字符
-    pub fn sanitize_filename(value: &str) -> String {
-        value
-            .chars()
-            .map(|c| match c {
-                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-                c if c.is_control() => '_',
-                c => c,
-            })
-            .collect()
-    }
-}
-
-/// 范围分区配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RangePartition {
-    /// 起始值（包含）
-    pub start: PartitionValue,
-    /// 结束值（不包含）
-    pub end: PartitionValue,
-}
-
-/// 分区值（支持常见类型）
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PartitionValue {
-    Int64(i64),
-    UInt64(u64),
-    String(String),
-    MinValue, // 负无穷
-    MaxValue, // 正无穷
 }
 
 /// Partition 的元数据
@@ -209,12 +297,7 @@ pub enum SegmentStatus {
 
 impl TableMeta {
     /// 创建新的表元数据
-    pub fn new(
-        table_name: String,
-        schema: Schema,
-        partition_strategy: PartitionStrategy,
-        parallel_workers: usize,
-    ) -> Self {
+    pub fn new(table_name: String, schema: Schema, partition_strategy: PartitionStrategy) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -224,10 +307,14 @@ impl TableMeta {
             table_name,
             schema,
             partition_strategy,
-            parallel_workers,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// 获取分区数量（如果可预知）
+    pub fn num_partitions(&self) -> Option<usize> {
+        self.partition_strategy.num_partitions()
     }
 
     /// 获取表的目录路径

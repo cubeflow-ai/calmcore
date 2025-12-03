@@ -1,10 +1,7 @@
 /// Catalog 模块 - 管理表的元数据和目录结构
 pub mod table_meta;
 
-pub use table_meta::{
-    PartitionMeta, PartitionStrategy, PartitionValue, RangePartition, SegmentInfo, SegmentStatus,
-    TableMeta,
-};
+pub use table_meta::{PartitionMeta, PartitionStrategy, SegmentInfo, SegmentStatus, TableMeta};
 
 use crate::utils::error::{CoreError, CoreResult};
 use std::collections::HashMap;
@@ -185,7 +182,8 @@ impl Catalog {
     fn create_partition(&self, table_meta: &TableMeta) -> CoreResult<()> {
         let partitions = table_meta
             .partition_strategy
-            .generate_partitions(table_meta.parallel_workers);
+            .generate_partitions()
+            .unwrap_or_else(Vec::new);
 
         for partition in partitions {
             // partition 目录直接在 table_dir 下，不需要额外的 segments 子目录

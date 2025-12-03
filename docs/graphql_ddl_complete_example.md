@@ -60,10 +60,17 @@ Calm 使用 **GraphQL 作为唯一的 DDL (数据定义语言) 接口**。这样
 
 | 策略 | 参数 | 说明 | 使用场景 |
 |------|------|------|----------|
-| `HASH` | field, num_partitions | 基于字段哈希分配 | 均衡负载,适合 ID 类字段 |
-| `RANGE` | field, ranges | 基于范围划分 | 时序数据,日志按时间分区 |
-| `CUSTOM` | - | 用户自定义 | 特殊业务需求 |
+| `PKHash` | num_partitions | 基于主键哈希分配 | 适合有主键的表,自动负载均衡 |
+| `HASH` | field, num_partitions | 基于指定字段哈希分配 | 无主键表,均衡负载 |
+| `RANGE` | field, range_start, range_step | 基于范围划分(按需创建) | 时序数据,支持 Int64/Timestamp 字段 |
+| `CUSTOM` | - | 用户自定义分区名 | 特殊业务需求,手动指定分区 |
 | `NONE` | - | 单分区 | 小表,测试环境 |
+
+**Range 分区说明:**
+- `range_start`: 起始值(毫秒时间戳或整数)
+- `range_step`: 步长(例如: 86400000 = 1天)
+- 分区按需创建,命名格式: `partition_{start_value}`
+- 支持字段类型: Int64, Timestamp(毫秒/秒/微秒/纳秒)
 
 ### 持久化策略
 
@@ -215,30 +222,17 @@ mutation {
 mutation {
   createTable(input: {
     name: "access_logs"
-    description: "访问日志表,按日期范围分区"
+    description: "访问日志表,按天分区"
     primary_key: "log_id"
     
-    # Range 分区,按时间戳分 3 个区间
+    # Range 分区,按时间戳分区
+    # range_start: 2024-01-01 00:00:00 (UTC)
+    # range_step: 86400000 (1天 = 24小时 * 3600秒 * 1000毫秒)
     partition_strategy: {
       strategy_type: RANGE
       field: "timestamp"
-      ranges: [
-        {
-          partition_id: 0
-          start: { int_value: 0 }
-          end: { int_value: 1704067200000 }  # 2024-01-01
-        }
-        {
-          partition_id: 1
-          start: { int_value: 1704067200000 }
-          end: { int_value: 1735689600000 }  # 2025-01-01
-        }
-        {
-          partition_id: 2
-          start: { int_value: 1735689600000 }
-          end: { int_value: 9999999999999 }   # 未来
-        }
-      ]
+      range_start: 1704067200000
+      range_step: 86400000
     }
     
     fields: [
@@ -302,15 +296,20 @@ mutation {
 
 ---
 
-### 示例 3: 商品表 (简化配置)
+### 示例 3: 商品表 (PKHash 分区)
 
 ```graphql
 mutation {
   createTable(input: {
     name: "products"
-    description: "商品信息表"
+    description: "商品信息表,按主键自动分区"
     primary_key: "product_id"
-    partition_count: 1  # 小表,单分区即可
+    
+    # PKHash 分区,基于主键 product_id 自动哈希
+    partition_strategy: {
+      strategy_type: PKHash
+      num_partitions: 4
+    }
     
     fields: [
       { 

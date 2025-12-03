@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use datafusion::arrow::record_batch::RecordBatch;
 use itertools::Itertools;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
@@ -10,7 +11,7 @@ use tokio::task::JoinHandle;
 use crate::catalog::{Catalog, PartitionStrategy, TableMeta};
 use crate::partition::Partition;
 use crate::schema::Schema;
-use crate::utils::error::CoreResult;
+use crate::utils::error::{CoreError, CoreResult};
 
 /// Partition 的唯一标识 (表名, partition_name)
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -67,6 +68,15 @@ pub struct EngineStats {
     pub total_frozen_segments: usize,
     pub total_unpersisted_segments: usize,
     pub total_memory_bytes: u64,
+}
+
+/// 插入统计信息
+#[derive(Debug, Clone, Default)]
+pub struct InsertStats {
+    /// 插入的总行数
+    pub rows_inserted: usize,
+    /// 影响的分区数量
+    pub partitions_affected: usize,
 }
 
 /// 存储引擎 - 顶层管理器
@@ -174,7 +184,7 @@ impl Engine {
             // 如果没有找到任何 partition，根据策略创建默认的
             if partition_names.is_empty() {
                 log::info!("🔍 [Engine] No existing partitions found, creating default partitions for table {}", table_name);
-                partition_names = meta.partition_strategy.generate_partitions(meta.parallel_workers);
+                partition_names = meta.partition_strategy.generate_partitions().unwrap_or_else(Vec::new);
             } else {
                 log::info!("🔍 [Engine] Found {} partitions for table {}", partition_names.len(), table_name);
             }
@@ -270,7 +280,6 @@ impl Engine {
             table_name.to_string(),
             schema.clone(),
             partition_strategy,
-            num_partitions,
         );
 
         // 在 Catalog 中创建表（会创建目录结构和元数据）
@@ -285,15 +294,21 @@ impl Engine {
 
         let table_meta = self.catalog.get_table(table_name)?;
 
-        // 生成所有 partition 名称
-        let partition_names = table_meta.partition_strategy.generate_partitions(num_partitions);
+        // 生成所有 partition 名称（None 策略返回 None）
+        let partition_names = match table_meta.partition_strategy.generate_partitions() {
+            Some(names) => names,
+            None => {
+                // None 策略：单分区
+                vec!["partition_000000000000000000".to_string()]
+            }
+        };
 
         for partition_name in partition_names {
             let partition_dir = self.config.data_dir
                 .join("tables")
                 .join(table_name)
                 .join("partitions")
-                .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(&partition_name));
+                .join(&partition_name);
 
             log::debug!(
                 "🔍 [DEBUG create_table] Creating partition {} at {:?}",
@@ -383,14 +398,18 @@ impl Engine {
     ///
     /// # 参数
     /// - `table_name`: 表名
-    /// - `partition_value`: 分区字段的值
+    /// - `partition_value`: 分区字段的值（字符串格式）
     ///
     /// # 返回
     /// 返回应该使用的 partition_name
+    ///
+    /// # 注意
+    /// 这是一个兼容性方法，新代码应该使用 Router::route_batch
     pub fn route_partition(&self, table_name: &str, partition_value: &str) -> CoreResult<String> {
         let meta = self.catalog.get_table(table_name)?;
 
         match &meta.partition_strategy {
+            PartitionStrategy::PKHash { num_partitions } | 
             PartitionStrategy::Hash { num_partitions, .. } => {
                 // Hash 分区：对值进行 hash 然后取模
                 use std::collections::hash_map::DefaultHasher;
@@ -401,57 +420,193 @@ impl Engine {
                 let hash = hasher.finish();
 
                 let index = (hash % (*num_partitions as u64)) as usize;
-                
-                // 生成所有 partition 名称并返回对应索引的
-                let partitions = meta.partition_strategy.generate_partitions(meta.parallel_workers);
-                Ok(partitions.get(index).cloned().unwrap_or_else(|| format!("{:019}", index)))
+                Ok(PartitionStrategy::format_partition_id(index as i64))
             }
 
-            PartitionStrategy::Range { ranges, .. } => {
-                // Range 分区：找到值所在的范围
-                let value_enum = Self::parse_partition_value(partition_value);
-
-                let partitions = meta.partition_strategy.generate_partitions(meta.parallel_workers);
+            PartitionStrategy::Range { start, step, .. } => {
+                // Range 分区：根据值计算所在的 partition_start
+                let value = partition_value.parse::<i64>()
+                    .map_err(|e| CoreError::Internal(
+                        format!("Failed to parse range value '{}': {}", partition_value, e)
+                    ))?;
                 
-                for (idx, range) in ranges.iter().enumerate() {
-                    if value_enum >= range.start && value_enum < range.end {
-                        return Ok(partitions.get(idx).cloned().unwrap_or_else(|| format!("{:019}", idx)));
-                    }
-                }
-                // 如果没找到匹配的范围，返回最后一个 partition
-                let last_idx = ranges.len().saturating_sub(1);
-                Ok(partitions.get(last_idx).cloned().unwrap_or_else(|| format!("{:019}", last_idx)))
+                let offset = value - start;
+                let partition_index = offset / step;
+                let partition_start = start + (partition_index * step);
+                
+                Ok(PartitionStrategy::format_partition_id(partition_start))
             }
 
             PartitionStrategy::Custom => {
                 // Custom 分区：用户自定义，直接使用 partition_value 作为 partition_name
-                Ok(PartitionStrategy::sanitize_filename(partition_value))
+                Ok(partition_value.to_string())
             }
 
             PartitionStrategy::None => {
                 // 无分区策略，返回默认 partition
-                let partitions = meta.partition_strategy.generate_partitions(1);
-                Ok(partitions.get(0).cloned().unwrap_or_else(|| format!("{:019}", 0)))
+                Ok("partition_000000000000000000".to_string())
             }
         }
     }
 
-    /// 辅助方法：将字符串值解析为 PartitionValue
-    fn parse_partition_value(value: &str) -> crate::catalog::PartitionValue {
-        use crate::catalog::PartitionValue;
-
-        // 尝试解析为整数
-        if let Ok(val) = value.parse::<i64>() {
-            return PartitionValue::Int64(val);
+    /// 插入批量数据（统一路由接口）
+    ///
+    /// # 参数
+    /// - `table_name`: 表名
+    /// - `batch`: 要插入的 RecordBatch
+    ///
+    /// # 返回
+    /// 返回插入统计信息
+    ///
+    /// # 说明
+    /// 这是新的统一插入接口，会自动根据分区策略路由数据到对应分区
+    /// - 使用 Router 进行数据路由
+    /// - 按需创建分区（如果分区不存在）
+    /// - 并发插入到多个分区
+    pub async fn insert_batch(
+        self: &Arc<Self>,
+        table_name: &str,
+        batch: datafusion::arrow::record_batch::RecordBatch,
+        partition_name: Option<String>,
+    ) -> CoreResult<InsertStats> {
+        use crate::router::Router;
+        
+        // 1. 获取表元数据
+        let meta = self.catalog.get_table(table_name)?;
+        
+        // 2. 如果指定了 partition_name,直接插入;否则使用 Router 路由
+        let routed_batches: HashMap<String, RecordBatch> = if let Some(partition) = partition_name {
+            // 手动指定分区,不需要路由
+            let mut map = HashMap::new();
+            map.insert(partition, batch);
+            map
+        } else {
+            // 使用 Router 路由数据
+            Router::route_batch(batch, &meta)?
+        };
+        
+        if routed_batches.is_empty() {
+            return Ok(InsertStats {
+                rows_inserted: 0,
+                partitions_affected: 0,
+            });
         }
-
-        // 尝试解析为无符号整数
-        if let Ok(val) = value.parse::<u64>() {
-            return PartitionValue::UInt64(val);
+        
+        // 3. 并发插入到各个分区
+        let mut tasks = Vec::new();
+        
+        for (partition_name, partition_batch) in routed_batches {
+            let table_name = table_name.to_string();
+            let partition_name_clone = partition_name.clone();
+            let self_clone = Arc::clone(self);
+            let meta_clone = meta.clone();
+            
+            let task = tokio::spawn(async move {
+                // 确保分区存在
+                self_clone.ensure_partition_exists(
+                    &table_name,
+                    &partition_name_clone,
+                    &meta_clone,
+                ).await?;
+                
+                // 插入数据
+                let rows = partition_batch.num_rows();
+                self_clone.insert_to_partition(
+                    &table_name,
+                    &partition_name_clone,
+                    partition_batch,
+                ).await?;
+                
+                Ok::<_, CoreError>((partition_name_clone, rows))
+            });
+            
+            tasks.push(task);
         }
-
-        // 默认作为字符串
-        PartitionValue::String(value.to_string())
+        
+        // 4. 等待所有插入完成
+        let mut total_rows = 0;
+        let mut partitions_affected = 0;
+        
+        for task in tasks {
+            match task.await {
+                Ok(Ok((partition_name, rows))) => {
+                    total_rows += rows;
+                    partitions_affected += 1;
+                    log::debug!(
+                        "Inserted {} rows to partition {} of table '{}'",
+                        rows, partition_name, table_name
+                    );
+                }
+                Ok(Err(e)) => {
+                    return Err(CoreError::Internal(
+                        format!("Failed to insert to partition: {}", e)
+                    ));
+                }
+                Err(e) => {
+                    return Err(CoreError::Internal(
+                        format!("Task join error: {}", e)
+                    ));
+                }
+            }
+        }
+        
+        Ok(InsertStats {
+            rows_inserted: total_rows,
+            partitions_affected,
+        })
+    }
+    
+    /// 确保分区存在（按需创建）
+    async fn ensure_partition_exists(
+        &self,
+        table_name: &str,
+        partition_name: &str,
+        meta: &Arc<TableMeta>,
+    ) -> CoreResult<()> {
+        // 检查分区是否已存在
+        if self.get_partition(table_name, partition_name).await.is_some() {
+            return Ok(());
+        }
+        
+        // 分区不存在，创建新分区
+        let partition_dir = self.config.data_dir
+            .join("tables")
+            .join(table_name)
+            .join("partitions")
+            .join(partition_name);
+        
+        log::info!(
+            "Creating partition {} for table '{}' at {:?}",
+            partition_name, table_name, partition_dir
+        );
+        
+        let partition = Partition::new(
+            partition_name.to_string(),
+            table_name.to_string(),
+            partition_dir,
+            meta.schema.clone(),
+            self.partition_notify_tx.clone(),
+        );
+        
+        self.add_partition_with_table(table_name, Arc::new(partition)).await;
+        
+        Ok(())
+    }
+    
+    /// 插入数据到指定分区
+    async fn insert_to_partition(
+        &self,
+        table_name: &str,
+        partition_name: &str,
+        batch: datafusion::arrow::record_batch::RecordBatch,
+    ) -> CoreResult<()> {
+        let partition = self.get_partition(table_name, partition_name).await
+            .ok_or_else(|| CoreError::Internal(
+                format!("Partition {} not found for table '{}'", partition_name, table_name)
+            ))?;
+        
+        partition.upsert(batch)?;
+        Ok(())
     }
 
     /// 创建新的 Partition（低级 API，通常不需要直接调用）
@@ -713,7 +868,7 @@ impl Engine {
 
         // 1. 获取表的元数据以确定有多少个 partition
         let meta = self.catalog.get_table(table_name)?;
-        let num_partitions = meta.parallel_workers;
+        let num_partitions = meta.num_partitions().unwrap_or(1);
 
         log::info!(
             "🔍 Table '{}' has {} partitions",
@@ -725,7 +880,11 @@ impl Engine {
         let mut success_count = 0;
         let mut error_count = 0;
 
-        let partition_names = meta.partition_strategy.generate_partitions(num_partitions);
+        let partition_names = match meta.partition_strategy.generate_partitions() {
+            Some(names) => names,
+            None => vec!["partition_000000000000000000".to_string()],
+        };
+        
         for partition_name in partition_names {
             match self.persist_partition(table_name, &partition_name).await {
                 Ok(_) => {
@@ -1125,15 +1284,14 @@ impl Engine {
         // 获取表的元数据
         let meta = self.catalog.get_table(table_name)?;
 
-        // 验证 partition_name 符合目录名称规范
-        let sanitized_name = PartitionStrategy::sanitize_filename(&partition_name);
-        if sanitized_name != partition_name {
+        // 验证 partition_name 格式 (partition_* 或 Custom 策略允许任意名称)
+        if !partition_name.starts_with("partition_") && 
+           !matches!(meta.partition_strategy, PartitionStrategy::Custom) {
             return Err(crate::utils::error::CoreError::InvalidParam(format!(
-                "Invalid partition_name '{}'. Must not contain special characters. Suggested: '{}'",
-                partition_name, sanitized_name
+                "Invalid partition_name '{}'. Must start with 'partition_' or use Custom partition strategy",
+                partition_name
             )));
         }
-
 
         let partition_dir =
             self.config.data_dir

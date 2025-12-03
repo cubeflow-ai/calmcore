@@ -10,7 +10,6 @@ use poem::{
     web::{Data, Json, Path, Query},
     EndpointExt, Response, Route, Server,
 };
-use poem_openapi::types::ToJSON;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -373,7 +372,7 @@ async fn get_index(
             },
             "settings": {
                 "index": {
-                    "number_of_shards": meta.parallel_workers,
+                    "number_of_shards": meta.num_partitions().unwrap_or(1),
                     "number_of_replicas": 0
                 }
             }
@@ -418,43 +417,25 @@ async fn index_document_with_id(
         map.insert("_id".to_string(), Value::String(id.clone()));
     }
 
-    // 检查是否指定了 routing 参数(对应我们的 partition)
-    let partition_id = if let Some(routing) = query.get("routing") {
-        // 使用指定的 routing 作为 partition_id
-        routing.clone()
-    } else {
-        // 使用默认路由策略
-        server
-            .engine
-            .route_partition(&index, &id)
-            .map_err(|e| not_found(e.to_string()))?
-    };
+    // 获取表元数据
+    let meta = server
+        .engine
+        .get_table_meta(&index)
+        .map_err(|e| not_found(e.to_string()))?;
 
-    // 获取或创建 partition
-    let partition = match server.engine.get_partition(&index, &partition_id).await {
-        Some(p) => p,
-        None => {
-            // 分区不存在,自动创建
-            log::info!(
-                "Partition '{}' not found for index '{}', creating new partition",
-                partition_id,
-                index
-            );
-            let meta = server
-                .engine
-                .get_table_meta(&index)
-                .map_err(|e| not_found(e.to_string()))?;
-            server
-                .engine
-                .load_partition(&index, partition_id.clone(), meta.schema.clone())
-                .await
-                .map_err(|e| internal_error(format!("Failed to create partition: {}", e)))?
-        }
-    };
+    // 转换为 RecordBatch
+    let batch =
+        crate::utils::arrow_utils::json_to_record_batch(&[doc], meta.schema.to_arrow_schema())
+            .map_err(|e| internal_error(e.to_string()))?;
 
-    // 插入文档
-    let result_ids = partition
-        .upsert_json(&[doc])
+    // 获取 routing 参数
+    let routing = query.get("routing").map(|s| s.to_string());
+
+    // 调用 insert_batch
+    let stats = server
+        .engine
+        .insert_batch(&index, batch, routing)
+        .await
         .map_err(|e| internal_error(e.to_string()))?;
 
     Ok(poem::web::Json(serde_json::json!({
@@ -467,7 +448,7 @@ async fn index_document_with_id(
             "successful": 1,
             "failed": 0
         },
-        "_seq_no": result_ids.first().unwrap_or(&0),
+        "_seq_no": stats.rows_inserted,
         "_primary_term": 1
     })))
 }
@@ -490,43 +471,25 @@ async fn index_document(
         map.insert("_id".to_string(), Value::String(id.clone()));
     }
 
-    // 检查是否指定了 routing 参数(对应我们的 partition)
-    let partition_id = if let Some(routing) = query.get("routing") {
-        // 使用指定的 routing 作为 partition_id
-        routing.clone()
-    } else {
-        // 使用默认路由策略
-        server
-            .engine
-            .route_partition(&index, &id)
-            .map_err(|e| not_found(e.to_string()))?
-    };
+    // 获取表元数据
+    let meta = server
+        .engine
+        .get_table_meta(&index)
+        .map_err(|e| not_found(e.to_string()))?;
 
-    // 获取或创建 partition
-    let partition = match server.engine.get_partition(&index, &partition_id).await {
-        Some(p) => p,
-        None => {
-            // 分区不存在,自动创建
-            log::info!(
-                "Partition '{}' not found for index '{}', creating new partition",
-                partition_id,
-                index
-            );
-            let meta = server
-                .engine
-                .get_table_meta(&index)
-                .map_err(|e| not_found(e.to_string()))?;
-            server
-                .engine
-                .load_partition(&index, partition_id.clone(), meta.schema.clone())
-                .await
-                .map_err(|e| internal_error(format!("Failed to create partition: {}", e)))?
-        }
-    };
+    // 转换为 RecordBatch
+    let batch =
+        crate::utils::arrow_utils::json_to_record_batch(&[doc], meta.schema.to_arrow_schema())
+            .map_err(|e| internal_error(e.to_string()))?;
 
-    // 插入文档
-    let result_ids = partition
-        .upsert_json(&[doc])
+    // 获取 routing 参数
+    let routing = query.get("routing").map(|s| s.to_string());
+
+    // 调用 insert_batch
+    let stats = server
+        .engine
+        .insert_batch(&index, batch, routing)
+        .await
         .map_err(|e| internal_error(e.to_string()))?;
 
     Ok(poem::web::Json(serde_json::json!({
@@ -539,7 +502,7 @@ async fn index_document(
             "successful": 1,
             "failed": 0
         },
-        "_seq_no": result_ids.first().unwrap_or(&0),
+        "_seq_no": stats.rows_inserted,
         "_primary_term": 1
     })))
 }
@@ -643,12 +606,18 @@ async fn bulk_operation_impl(
     default_index: Option<String>,
     body: String,
 ) -> Result<Response, poem::Error> {
+    use std::collections::HashMap;
+
     let mut items = Vec::new();
     let mut errors = false;
 
     // 解析 NDJSON 格式
     let lines: Vec<&str> = body.lines().collect();
     let mut i = 0;
+
+    // 按索引分组文档: index_name -> routing -> vec<(doc_id, doc)>
+    let mut docs_by_index: HashMap<String, HashMap<Option<String>, Vec<(String, Value)>>> =
+        HashMap::new();
 
     while i < lines.len() {
         if lines[i].trim().is_empty() {
@@ -670,7 +639,31 @@ async fn bulk_operation_impl(
         } else if let Some(update_action) = action.get("update") {
             ("update", update_action)
         } else if let Some(delete_action) = action.get("delete") {
-            ("delete", delete_action)
+            // Delete 操作暂时跳过,直接添加成功响应
+            let index_name = delete_action
+                .get("_index")
+                .and_then(|v| v.as_str())
+                .or(default_index.as_deref())
+                .unwrap_or("");
+            let doc_id = delete_action
+                .get("_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            items.push(json!({
+                "delete": {
+                    "_index": index_name,
+                    "_type": "_doc",
+                    "_id": doc_id,
+                    "_version": 2,
+                    "result": "deleted",
+                    "_shards": {"total": 2, "successful": 1, "failed": 0},
+                    "_seq_no": 1,
+                    "_primary_term": 1,
+                    "status": 200
+                }
+            }));
+            continue;
         } else {
             return Err(bad_request("Unknown action type".to_string()).into());
         };
@@ -711,35 +704,64 @@ async fn bulk_operation_impl(
 
                 i += 1;
 
-                // 插入文档(支持 routing)
-                match insert_document_with_routing(&server, index_name, &doc_id, doc, routing).await
-                {
-                    Ok(_) => {
-                        // 严格按照 ES 8.x 响应格式，包含 _type 字段（虽然已废弃但客户端需要）
+                // 按索引和routing分组
+                docs_by_index
+                    .entry(index_name.to_string())
+                    .or_insert_with(HashMap::new)
+                    .entry(routing)
+                    .or_insert_with(Vec::new)
+                    .push((doc_id, doc));
+            }
+            _ => {
+                errors = true;
+            }
+        }
+    }
+
+    // 批量插入: 按索引和routing分组处理
+    for (index_name, routing_groups) in docs_by_index {
+        let table_meta = match server.engine.get_table_meta(&index_name) {
+            Ok(m) => m,
+            Err(e) => {
+                errors = true;
+                // 为该索引的所有文档添加错误响应
+                for routing_docs in routing_groups.values() {
+                    for (doc_id, _) in routing_docs {
                         items.push(json!({
-                            action_type: {
+                            "index": {
                                 "_index": index_name,
-                                "_type": "_doc",  // 添加 _type 字段，使用默认值 "_doc"
+                                "_type": "_doc",
                                 "_id": doc_id,
-                                "_version": 1,
-                                "result": "created",
-                                "_shards": {
-                                    "total": 2,
-                                    "successful": 1,
-                                    "failed": 0
-                                },
-                                "_seq_no": 0,
-                                "_primary_term": 1,
-                                "status": 201
+                                "status": 404,
+                                "error": {
+                                    "type": "index_not_found_exception",
+                                    "reason": e.to_string()
+                                }
                             }
                         }));
                     }
-                    Err(e) => {
-                        errors = true;
+                }
+                continue;
+            }
+        };
+
+        for (routing, doc_id_docs) in routing_groups {
+            // 提取文档和ID
+            let (doc_ids, docs): (Vec<String>, Vec<Value>) = doc_id_docs.into_iter().unzip();
+
+            // 将 JSON 文档转换为 RecordBatch
+            let batch = match crate::utils::arrow_utils::json_to_record_batch(
+                &docs,
+                table_meta.schema.to_arrow_schema(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    errors = true;
+                    for doc_id in doc_ids {
                         items.push(json!({
-                            action_type: {
+                            "index": {
                                 "_index": index_name,
-                                "_type": "_doc",  // 错误响应也需要 _type
+                                "_type": "_doc",
                                 "_id": doc_id,
                                 "status": 400,
                                 "error": {
@@ -749,41 +771,57 @@ async fn bulk_operation_impl(
                             }
                         }));
                     }
+                    continue;
                 }
-            }
-            "delete" => {
-                items.push(json!({
-                    "delete": {
-                        "_index": index_name,
-                        "_type": "_doc",  // 添加 _type 字段
-                        "_id": doc_id,
-                        "_version": 2,
-                        "result": "deleted",
-                        "_shards": {
-                            "total": 2,
-                            "successful": 1,
-                            "failed": 0
-                        },
-                        "_seq_no": 1,
-                        "_primary_term": 1,
-                        "status": 200
+            };
+
+            // 调用 insert_batch
+            match server
+                .engine
+                .insert_batch(&index_name, batch, routing)
+                .await
+            {
+                Ok(stats) => {
+                    log::info!(
+                        "✅ Bulk insert: {} rows into {} partitions of '{}'",
+                        stats.rows_inserted,
+                        stats.partitions_affected,
+                        index_name
+                    );
+
+                    for doc_id in doc_ids {
+                        items.push(json!({
+                            "index": {
+                                "_index": index_name,
+                                "_type": "_doc",
+                                "_id": doc_id,
+                                "_version": 1,
+                                "result": "created",
+                                "_shards": {"total": 2, "successful": 1, "failed": 0},
+                                "_seq_no": 0,
+                                "_primary_term": 1,
+                                "status": 201
+                            }
+                        }));
                     }
-                }));
-            }
-            _ => {
-                errors = true;
-                items.push(json!({
-                    action_type: {
-                        "_index": index_name,
-                        "_type": "_doc",  // 添加 _type 字段
-                        "_id": doc_id,
-                        "status": 400,
-                        "error": {
-                            "type": "action_request_validation_exception",
-                            "reason": format!("Unsupported action: {}", action_type)
-                        }
+                }
+                Err(e) => {
+                    errors = true;
+                    for doc_id in doc_ids {
+                        items.push(json!({
+                            "index": {
+                                "_index": index_name,
+                                "_type": "_doc",
+                                "_id": doc_id,
+                                "status": 500,
+                                "error": {
+                                    "type": "engine_exception",
+                                    "reason": e.to_string()
+                                }
+                            }
+                        }));
                     }
-                }));
+                }
             }
         }
     }
@@ -1216,8 +1254,8 @@ async fn search_impl(
         "took": took,
         "timed_out": false,
         "_shards": {
-            "total": meta.parallel_workers,
-            "successful": meta.parallel_workers,
+            "total": meta.num_partitions().unwrap_or(1),
+            "successful": meta.num_partitions().unwrap_or(1),
             "skipped": 0,
             "failed": 0
         },
@@ -1749,68 +1787,6 @@ fn check_field_match(doc: &Value, field: &str, expected_value: &Value) -> bool {
         }
     }
     false
-}
-
-// ===== 辅助函数 =====
-
-async fn insert_document_with_routing(
-    server: &Arc<ElasticsearchServer>,
-    index: &str,
-    _id: &str,
-    doc: Value,
-    routing: Option<String>,
-) -> Result<(), CoreError> {
-    // 如果指定了 routing,直接使用它作为 partition_id
-    let partition_id = if let Some(r) = routing {
-        r
-    } else {
-        // 获取表的元数据以确定分区策略
-        let table_meta = server
-            .engine
-            .get_table_meta(index)
-            .map_err(|e| not_found(e.to_string()))?;
-
-        // 根据分区策略提取分区字段的值
-        let partition_value = table_meta
-            .partition_strategy
-            .router_field()
-            .map(|f| doc.get(f).to_json_string())
-            .unwrap_or_default();
-
-        // 使用分区字段的值来路由
-        server
-            .engine
-            .route_partition(index, &partition_value)
-            .map_err(|e| not_found(e.to_string()))?
-    };
-
-    // 获取或创建 partition
-    let partition = match server.engine.get_partition(index, &partition_id).await {
-        Some(p) => p,
-        None => {
-            // 分区不存在,自动创建
-            log::info!(
-                "Partition '{}' not found for index '{}', creating new partition",
-                partition_id,
-                index
-            );
-            let meta = server
-                .engine
-                .get_table_meta(index)
-                .map_err(|e| not_found(e.to_string()))?;
-            server
-                .engine
-                .load_partition(index, partition_id.clone(), meta.schema.clone())
-                .await
-                .map_err(|e| internal_error(format!("Failed to create partition: {}", e)))?
-        }
-    };
-
-    partition
-        .upsert_json(&[doc])
-        .map_err(|e| internal_error(e.to_string()))?;
-
-    Ok(())
 }
 
 #[cfg(test)]
