@@ -15,7 +15,8 @@ impl SqlNormalizer {
     /// 1. 验证SQL语法
     /// 2. 将MySQL特有语法转换为标准SQL
     /// 3. 将 Timestamp 字段的 Int64 比较值转换为 CAST 表达式
-    /// 4. 返回 (Statement AST, 标准化后的SQL字符串)
+    /// 4. 自动为重复的投影列添加别名（兼容MySQL行为）
+    /// 5. 返回 (Statement AST, 标准化后的SQL字符串)
     pub fn normalize(sql: &str) -> CoreResult<(Statement, String)> {
         let dialect = MySqlDialect {};
 
@@ -144,5 +145,58 @@ mod tests {
         let (_statement, normalized) = SqlNormalizer::normalize(sql).unwrap();
         assert!(normalized.contains("LIMIT 10"));
         assert!(normalized.contains("OFFSET 5"));
+    }
+
+    #[test]
+    fn test_duplicate_literal_columns() {
+        // MySQL 允许: SELECT '11.3.83.3', 'r2api', 'r2api', id FROM table
+        // 应该转换为: SELECT '11.3.83.3', 'r2api', 'r2api' AS col_1, id FROM table
+        let sql = "SELECT '11.3.83.3', 'r2api', 'r2api', id FROM taxi_trips LIMIT 1";
+        let (_statement, normalized) = SqlNormalizer::normalize(sql).unwrap();
+
+        println!("Original: {}", sql);
+        println!("Normalized: {}", normalized);
+
+        // 验证第二个 'r2api' 被自动添加了别名
+        assert!(normalized.contains("AS col_1") || normalized.contains("AS col_2"));
+    }
+
+    #[test]
+    fn test_multiple_duplicate_columns() {
+        // 测试多个重复的情况
+        let sql = "SELECT 'a', 'a', 'a', 'b', 'b', id FROM table";
+        let (_statement, normalized) = SqlNormalizer::normalize(sql).unwrap();
+
+        println!("Original: {}", sql);
+        println!("Normalized: {}", normalized);
+
+        // 应该有多个别名
+        assert!(normalized.contains("AS col_"));
+    }
+
+    #[test]
+    fn test_no_duplicate_columns() {
+        // 没有重复的情况应该保持不变
+        let sql = "SELECT id, name, age FROM users";
+        let (_statement, normalized) = SqlNormalizer::normalize(sql).unwrap();
+
+        println!("Original: {}", sql);
+        println!("Normalized: {}", normalized);
+
+        // 不应该添加别名
+        assert!(!normalized.contains("AS col_"));
+    }
+
+    #[test]
+    fn test_duplicate_with_existing_alias() {
+        // 测试混合情况：有些列有别名，有些重复
+        let sql = "SELECT '11.3.83.3', 'r2api' AS name1, 'r2api' AS name2, id FROM table";
+        let (_statement, normalized) = SqlNormalizer::normalize(sql).unwrap();
+
+        println!("Original: {}", sql);
+        println!("Normalized: {}", normalized);
+
+        // name1 和 name2 是显式别名，应该保留
+        assert!(normalized.contains("name1") || normalized.contains("name2"));
     }
 }

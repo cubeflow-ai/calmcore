@@ -1506,6 +1506,32 @@ async fn handle_delete<W: io::Read + io::Write>(
     results.completed(total_deleted, 0)
 }
 
+/// 规范化列名,使其与 MySQL 行为一致
+///
+/// DataFusion 为字面量生成 `Utf8("value")` 格式的列名
+/// MySQL 直接显示值本身 (例如 '11.3.83.3' 显示为 11.3.83.3)
+///
+/// 对于有别名的列,使用别名
+/// 对于没有别名的字面量,从 field_name 中提取实际值
+fn normalize_column_name(field_name: &str, _col_idx: usize, _batches: &[RecordBatch]) -> String {
+    // 如果列名是 DataFusion 生成的格式 (如 Utf8("xxx") 或 Int64(123))
+    // 提取引号或括号内的实际值
+    if field_name.contains('(') && field_name.contains(')') {
+        // 尝试提取括号内的内容
+        if let Some(start) = field_name.find('(') {
+            if let Some(end) = field_name.rfind(')') {
+                let inner = &field_name[start + 1..end];
+                // 移除引号
+                let cleaned = inner.trim_matches('"').trim_matches('\'');
+                return cleaned.to_string();
+            }
+        }
+    }
+
+    // 否则返回原列名(可能是表列名或用户定义的别名)
+    field_name.to_string()
+}
+
 /// 写入查询结果
 fn write_query_result<W: io::Read + io::Write>(
     results: QueryResultWriter<'_, W>,
@@ -1521,11 +1547,15 @@ fn write_query_result<W: io::Read + io::Write>(
     let columns: Vec<msql_srv::Column> = schema
         .fields()
         .iter()
-        .map(|field| {
+        .enumerate()
+        .map(|(idx, field)| {
             let col_type = get_arrow_type(field.data_type());
+            // 🔧 修复列名显示: DataFusion 生成 Utf8("value") 格式的列名
+            // MySQL 显示为实际值,我们需要提取引号内的内容
+            let column_name = normalize_column_name(field.name(), idx, batches);
             msql_srv::Column {
                 table: "".to_string(),
-                column: field.name().clone(),
+                column: column_name,
                 coltype: col_type,
                 colflags: ColumnFlags::empty(),
             }
