@@ -117,25 +117,22 @@ impl SqlNormalizer {
         };
 
         let projection_str = &captures[1];
-        
+
         // 分割投影列（处理逗号分隔）
         // 注意：这是简化版本，不处理嵌套函数中的逗号
-        let projections: Vec<&str> = projection_str
-            .split(',')
-            .map(|s| s.trim())
-            .collect();
+        let projections: Vec<&str> = projection_str.split(',').map(|s| s.trim()).collect();
 
         // 检测重复的列名
         use std::collections::HashMap;
         let mut column_names: HashMap<String, usize> = HashMap::new();
         let mut needs_alias = vec![false; projections.len()];
-        
+
         for (idx, proj) in projections.iter().enumerate() {
             // 如果已经有 AS 别名，跳过
             if proj.to_uppercase().contains(" AS ") {
                 continue;
             }
-            
+
             // 提取列的"显示名称"（常量值或字段名）
             let display_name = if proj.starts_with('\'') || proj.starts_with('"') {
                 // 字符串常量: '11.3.83.3' 或 "r2api"
@@ -147,7 +144,7 @@ impl SqlNormalizer {
                 // 字段名或表达式
                 proj.to_string()
             };
-            
+
             // 检查是否重复
             if let Some(prev_idx) = column_names.get(&display_name) {
                 // 发现重复，标记当前列和之前的列都需要别名
@@ -175,7 +172,7 @@ impl SqlNormalizer {
         }
 
         let new_projection_str = new_projections.join(", ");
-        
+
         // 替换原SQL中的投影部分
         re.replace(sql, format!("SELECT {} FROM ", new_projection_str).as_str())
             .to_string()
@@ -211,7 +208,7 @@ mod tests {
     fn test_fix_duplicate_projections() {
         let sql = "SELECT '11.3.83.3', 'r2api', 'r2api', trace_id FROM r2api";
         let (_statement, normalized) = SqlNormalizer::normalize(sql).unwrap();
-        
+
         // 检查是否添加了别名
         assert!(normalized.contains("AS _col"));
         println!("Normalized SQL: {}", normalized);
@@ -221,7 +218,7 @@ mod tests {
     fn test_no_duplicate_projections() {
         let sql = "SELECT '11.3.83.3', 'r2api', trace_id FROM r2api";
         let (_statement, normalized) = SqlNormalizer::normalize(sql).unwrap();
-        
+
         // 没有重复，不应该添加别名
         assert!(!normalized.contains("AS _col"));
     }

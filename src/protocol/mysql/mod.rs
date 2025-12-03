@@ -3,7 +3,9 @@ mod insert_handler;
 use crate::engine::Engine;
 use crate::schema::field::FieldOption;
 use crate::schema::Schema;
-use datafusion::arrow::array::{Array, ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array};
+use datafusion::arrow::array::{
+    Array, ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use msql_srv::*;
 use sha1::{Digest, Sha1};
@@ -1066,56 +1068,14 @@ async fn execute_query<W: io::Read + io::Write>(
 
     log::debug!("MySQL Query (streaming): {}", query);
 
-    // 🌊 流式发送结果
-    let mut total_rows = 0;
-    let mut batches = Vec::new();
-
-    while let Some(batch_result) = stream.next().await {
-        let batch = match batch_result {
-            Ok(b) => b,
-            Err(e) => {
-                let msg = format!("Stream error: {}", e);
-                log::error!("{}", msg);
-                return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
-            }
-        };
-
-        total_rows += batch.num_rows();
-        batches.push(batch);
-
-        // 每 100 个 batch 记录一次进度
-        if batches.len() % 100 == 0 {
-            log::debug!(
-                "🌊 [MySQL Stream] Received {} batches, {} total rows",
-                batches.len(),
-                total_rows
-            );
-        }
-    }
-
-    log::debug!(
-        "✅ [MySQL Stream] Completed: {} batches, {} total rows",
-        batches.len(),
-        total_rows
-    );
-
-    // 序列化结果
-    let schema = if batches.is_empty() {
-        use datafusion::arrow::datatypes::Schema;
-        std::sync::Arc::new(Schema::empty())
-    } else {
-        batches[0].schema()
-    };
-
+    // 🌊 真正的流式发送结果 - 边接收边发送,不缓存在内存
     let write_result = {
         let _span = trace_ctx.as_ref().map(|ctx| {
-            let guard = ctx.span("Write Result");
-            guard.metadata("rows", total_rows.to_string());
-            guard.metadata("batches", batches.len().to_string());
+            let guard = ctx.span("Stream Write Result");
             guard
         });
 
-        write_query_result(results, &schema, &batches)
+        write_query_result_streaming(results, &mut stream).await
     };
 
     // 打印追踪报告
@@ -1508,11 +1468,15 @@ async fn handle_delete<W: io::Read + io::Write>(
 
 /// 写入查询结果
 /// 提取常量字面量值作为列名
-/// 
+///
 /// 处理两种情况:
 /// 1. DataFusion 对常量生成的列名: "Utf8(\"value\")" -> "value"
 /// 2. 我们自动添加的别名: "_col0", "_col1" -> 从第一行数据中提取实际值
-fn extract_literal_column_name(field_name: &str, first_batch: Option<&RecordBatch>, col_idx: usize) -> String {
+fn extract_literal_column_name(
+    field_name: &str,
+    first_batch: Option<&RecordBatch>,
+    col_idx: usize,
+) -> String {
     // 情况1: 匹配 Utf8("value") 格式
     if let Some(start) = field_name.find("Utf8(\"") {
         if let Some(end) = field_name[start + 6..].find("\")") {
@@ -1520,19 +1484,22 @@ fn extract_literal_column_name(field_name: &str, first_batch: Option<&RecordBatc
             return value.to_string();
         }
     }
-    
+
     // 情况2: 匹配 Int64(123) 或其他数字类型
     if let Some(start) = field_name.find('(') {
         if let Some(end) = field_name[start..].find(')') {
             let type_name = &field_name[..start];
             // 检查是否是数字类型
-            if type_name.contains("Int") || type_name.contains("Float") || type_name.contains("Decimal") {
+            if type_name.contains("Int")
+                || type_name.contains("Float")
+                || type_name.contains("Decimal")
+            {
                 let value = &field_name[start + 1..start + end];
                 return value.to_string();
             }
         }
     }
-    
+
     // 情况3: 如果是我们添加的别名 "_col0", "_col1" 等
     // 尝试从第一行数据中提取实际的常量值
     if field_name.starts_with("_col") {
@@ -1552,7 +1519,10 @@ fn extract_literal_column_name(field_name: &str, first_batch: Option<&RecordBatc
                     }
                 }
                 // 尝试 Float64
-                if let Some(float_array) = array.as_any().downcast_ref::<datafusion::arrow::array::Float64Array>() {
+                if let Some(float_array) = array
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Float64Array>()
+                {
                     if !float_array.is_null(0) {
                         return float_array.value(0).to_string();
                     }
@@ -1560,9 +1530,151 @@ fn extract_literal_column_name(field_name: &str, first_batch: Option<&RecordBatc
             }
         }
     }
-    
+
     // 如果都不匹配,返回原始名称
     field_name.to_string()
+}
+
+/// 流式写入查询结果 - 边接收 batch 边发送,避免内存暴增
+async fn write_query_result_streaming<W: io::Read + io::Write>(
+    results: QueryResultWriter<'_, W>,
+    stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
+) -> io::Result<()> {
+    use datafusion::physical_plan::RecordBatchStream;
+    use futures::StreamExt;
+
+    // 获取第一个 batch 来确定 schema 和列名
+    let first_batch = match stream.next().await {
+        Some(Ok(batch)) => batch,
+        Some(Err(e)) => {
+            let msg = format!("Stream error: {}", e);
+            log::error!("{}", msg);
+            return Err(io::Error::new(io::ErrorKind::Other, msg));
+        }
+        None => {
+            // 空结果集
+            use datafusion::arrow::datatypes::Schema;
+            let schema = std::sync::Arc::new(Schema::empty());
+            let columns: Vec<msql_srv::Column> = vec![];
+            let row_writer = results.start(&columns)?;
+            return row_writer.finish();
+        }
+    };
+
+    let schema = first_batch.schema();
+
+    let columns: Vec<msql_srv::Column> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(col_idx, field)| {
+            let col_type = get_arrow_type(field.data_type());
+            let column_name =
+                extract_literal_column_name(field.name(), Some(&first_batch), col_idx);
+            msql_srv::Column {
+                table: "".to_string(),
+                column: column_name,
+                coltype: col_type,
+                colflags: ColumnFlags::empty(),
+            }
+        })
+        .collect();
+
+    log::info!(
+        "🌊 [Streaming Write] Starting with {} columns, first batch has {} rows",
+        columns.len(),
+        first_batch.num_rows()
+    );
+
+    let mut row_writer = results.start(&columns)?;
+
+    const FLUSH_INTERVAL: usize = 1000;
+    let mut total_rows = 0;
+    let mut batch_count = 0;
+
+    // 先处理第一个 batch
+    log::info!("📦 [Batch 1] Processing {} rows", first_batch.num_rows());
+    write_batch_rows(
+        &mut row_writer,
+        &first_batch,
+        &mut total_rows,
+        FLUSH_INTERVAL,
+    )?;
+    batch_count += 1;
+    log::info!("✅ [Batch 1] Completed, total rows: {}", total_rows);
+
+    // 流式处理后续的 batch
+    while let Some(batch_result) = stream.next().await {
+        let batch = match batch_result {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("Stream error at batch {}: {}", batch_count, e);
+                log::error!("{}", msg);
+                return Err(io::Error::new(io::ErrorKind::Other, msg));
+            }
+        };
+
+        let batch_rows = batch.num_rows();
+        write_batch_rows(&mut row_writer, &batch, &mut total_rows, FLUSH_INTERVAL)?;
+        batch_count += 1;
+
+        // 每 10 个 batch 记录一次进度
+        if batch_count % 10 == 0 {
+            log::info!(
+                "🌊 [Streaming Write] Batch {}: {} rows, total {} rows",
+                batch_count,
+                batch_rows,
+                total_rows
+            );
+        }
+    }
+
+    log::info!(
+        "✅ [Streaming Write] Completed: {} batches, {} total rows",
+        batch_count,
+        total_rows
+    );
+
+    row_writer.finish()
+}
+
+/// 写入一个 batch 的所有行
+fn write_batch_rows<W: io::Read + io::Write>(
+    row_writer: &mut RowWriter<'_, W>,
+    batch: &RecordBatch,
+    total_rows: &mut usize,
+    flush_interval: usize,
+) -> io::Result<usize> {
+    let mut rows_in_batch = 0;
+
+    for row_idx in 0..batch.num_rows() {
+        // 写入一行的所有列
+        for col_idx in 0..batch.num_columns() {
+            let array = batch.column(col_idx);
+            let value = format_arrow_value(array, row_idx);
+
+            if let Err(e) = row_writer.write_col(value) {
+                log::debug!("Client disconnected or write failed: {}", e);
+                return Err(e);
+            }
+        }
+
+        // 结束当前行
+        if let Err(e) = row_writer.end_row() {
+            log::debug!("Client disconnected at row {}: {}", total_rows, e);
+            return Err(e);
+        }
+
+        *total_rows += 1;
+        rows_in_batch += 1;
+
+        // 每 FLUSH_INTERVAL 行记录一次(TCP 自动背压)
+        if *total_rows % flush_interval == 0 {
+            log::trace!("Streamed {} rows", total_rows);
+        }
+    }
+
+    Ok(rows_in_batch)
 }
 
 fn write_query_result<W: io::Read + io::Write>(
