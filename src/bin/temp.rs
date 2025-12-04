@@ -5,12 +5,12 @@ use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
-use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 const MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 const ROWS_PER_GROUP: usize = 1000;
@@ -64,40 +64,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // 使用共享的文件计数器和统计信息
+    // 使用共享的文件队列和统计信息
+    let file_queue = Arc::new(Mutex::new(VecDeque::from(parquet_files)));
     let file_counter = Arc::new(Mutex::new(0usize));
     let total_rows_read = Arc::new(Mutex::new(0u64));
     let total_rows_written = Arc::new(Mutex::new(0u64));
     let total_rows_filtered = Arc::new(Mutex::new(0u64));
 
-    // 5个并发处理
-    let results: Vec<Result<(), String>> = parquet_files
-        .par_iter()
-        .map(|parquet_file| {
-            match process_single_file(
-                parquet_file,
-                output_dir,
-                file_counter.clone(),
-                total_rows_read.clone(),
-                total_rows_written.clone(),
-                total_rows_filtered.clone(),
-            ) {
-                Ok(_) => {
-                    // 记录成功处理的文件
-                    if let Err(e) = mark_file_processed(&progress_file, parquet_file) {
-                        eprintln!("Failed to mark file as processed: {}", e);
-                    }
-                    Ok(())
-                }
-                Err(e) => Err(format!("Error processing {:?}: {}", parquet_file, e)),
-            }
-        })
-        .collect();
+    // 启动 5 个线程处理
+    let mut handles = vec![];
 
-    // 检查是否有错误
-    for result in results {
-        if let Err(e) = result {
-            eprintln!("Error: {}", e);
+    for thread_id in 0..MAX_THREADS {
+        let queue = file_queue.clone();
+        let counter = file_counter.clone();
+        let rows_read = total_rows_read.clone();
+        let rows_written = total_rows_written.clone();
+        let rows_filtered = total_rows_filtered.clone();
+        let out_dir = output_dir.to_string();
+        let prog_file = progress_file.clone();
+
+        let handle = thread::spawn(move || {
+            process_worker(
+                thread_id,
+                queue,
+                &out_dir,
+                counter,
+                rows_read,
+                rows_written,
+                rows_filtered,
+                &prog_file,
+            )
+        });
+
+        handles.push(handle);
+    }
+
+    // 等待所有线程完成
+    for handle in handles {
+        if let Err(e) = handle.join() {
+            eprintln!("Thread panicked: {:?}", e);
         }
     }
 
@@ -116,10 +121,121 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 处理单个 parquet 文件
-fn process_single_file(
-    parquet_file: &PathBuf,
+/// Worker 线程：从队列取文件并处理，维护自己的输出文件直到达到 1GB
+fn process_worker(
+    thread_id: usize,
+    file_queue: Arc<Mutex<VecDeque<PathBuf>>>,
     output_dir: &str,
+    file_counter: Arc<Mutex<usize>>,
+    total_rows_read: Arc<Mutex<u64>>,
+    total_rows_written: Arc<Mutex<u64>>,
+    total_rows_filtered: Arc<Mutex<u64>>,
+    progress_file: &str,
+) {
+    use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::parquet::basic::Compression;
+    use datafusion::parquet::file::properties::WriterProperties;
+
+    let mut current_writer: Option<ArrowWriter<File>> = None;
+    let mut current_output_path: Option<String> = None;
+
+    loop {
+        // 从队列取文件
+        let parquet_file = {
+            let mut queue = file_queue.lock().unwrap();
+            queue.pop_front()
+        };
+
+        let parquet_file = match parquet_file {
+            Some(f) => f,
+            None => {
+                // 队列空了，关闭当前文件并退出
+                if let Some(writer) = current_writer.take() {
+                    if let Err(e) = writer.close() {
+                        eprintln!("Thread {}: Failed to close writer: {}", thread_id, e);
+                    } else if let Some(path) = &current_output_path {
+                        if let Ok(metadata) = fs::metadata(path) {
+                            println!(
+                                "Thread {}: Closed final file: {} (size: {} MB)",
+                                thread_id,
+                                path,
+                                metadata.len() / 1024 / 1024
+                            );
+                        }
+                    }
+                }
+                break;
+            }
+        };
+
+        println!("Thread {}: Processing {:?}", thread_id, parquet_file);
+
+        // 处理文件
+        let result = process_file_to_writer(
+            &parquet_file,
+            &mut current_writer,
+            &mut current_output_path,
+            output_dir,
+            thread_id,
+            file_counter.clone(),
+            total_rows_read.clone(),
+            total_rows_written.clone(),
+            total_rows_filtered.clone(),
+        );
+
+        match result {
+            Ok(_) => {
+                // 记录成功处理的文件
+                if let Err(e) = mark_file_processed(progress_file, &parquet_file) {
+                    eprintln!(
+                        "Thread {}: Failed to mark file as processed: {}",
+                        thread_id, e
+                    );
+                }
+
+                // 检查当前文件是否已经超过 1GB
+                if let Some(path) = &current_output_path {
+                    if let Ok(metadata) = fs::metadata(path) {
+                        if metadata.len() >= MAX_FILE_SIZE {
+                            // 关闭当前文件，下次创建新文件
+                            if let Some(writer) = current_writer.take() {
+                                if let Err(e) = writer.close() {
+                                    eprintln!(
+                                        "Thread {}: Failed to close writer: {}",
+                                        thread_id, e
+                                    );
+                                } else {
+                                    println!(
+                                        "Thread {}: Closed file: {} (size: {} MB)",
+                                        thread_id,
+                                        path,
+                                        metadata.len() / 1024 / 1024
+                                    );
+                                }
+                            }
+                            current_output_path = None;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Thread {}: Error processing {:?}: {}",
+                    thread_id, parquet_file, e
+                );
+            }
+        }
+    }
+}
+
+/// 处理单个 parquet 文件并写入到 writer
+fn process_file_to_writer(
+    parquet_file: &PathBuf,
+    current_writer: &mut Option<ArrowWriter<File>>,
+    current_output_path: &mut Option<String>,
+    output_dir: &str,
+    thread_id: usize,
     file_counter: Arc<Mutex<usize>>,
     total_rows_read: Arc<Mutex<u64>>,
     total_rows_written: Arc<Mutex<u64>>,
@@ -129,9 +245,6 @@ fn process_single_file(
     use datafusion::parquet::arrow::ArrowWriter;
     use datafusion::parquet::basic::Compression;
     use datafusion::parquet::file::properties::WriterProperties;
-    use std::fs::File;
-
-    println!("Processing: {:?}", parquet_file);
 
     let file = File::open(parquet_file)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
@@ -140,9 +253,6 @@ fn process_single_file(
 
     // 检查是否有 data_path 列
     let data_path_idx = schema.fields().iter().position(|f| f.name() == "data_path");
-
-    let mut current_writer: Option<ArrowWriter<File>> = None;
-    let mut current_output_path: Option<String> = None;
 
     for batch_result in reader {
         let batch = batch_result?;
@@ -163,27 +273,10 @@ fn process_single_file(
         *total_rows_filtered.lock().unwrap() += (original_rows - filtered_batch.num_rows()) as u64;
         *total_rows_written.lock().unwrap() += filtered_batch.num_rows() as u64;
 
-        // 检查当前文件大小是否超过限制
-        let need_new_file = if let Some(path) = &current_output_path {
-            if let Ok(metadata) = fs::metadata(path) {
-                metadata.len() >= MAX_FILE_SIZE
-            } else {
-                false
-            }
-        } else {
-            true
-        };
+        // 如果没有 writer 或者 schema 不兼容，创建新文件
+        let need_new_file = current_writer.is_none();
 
-        // 检查是否需要创建新文件
-        if current_writer.is_none() || need_new_file {
-            if let Some(writer) = current_writer.take() {
-                writer.close()?;
-                if let Some(path) = &current_output_path {
-                    let size = fs::metadata(path)?.len();
-                    println!("Closed file: {} (size: {} MB)", path, size / 1024 / 1024);
-                }
-            }
-
+        if need_new_file {
             let counter = {
                 let mut c = file_counter.lock().unwrap();
                 *c += 1;
@@ -191,7 +284,10 @@ fn process_single_file(
             };
 
             let output_path = format!("{}/filtered_{:04}.parquet", output_dir, counter);
-            println!("Creating new output file: {}", output_path);
+            println!(
+                "Thread {}: Creating new output file: {}",
+                thread_id, output_path
+            );
 
             let output_file = File::create(&output_path)?;
             let props = WriterProperties::builder()
@@ -199,19 +295,14 @@ fn process_single_file(
                 .set_compression(Compression::SNAPPY)
                 .build();
             let writer = ArrowWriter::try_new(output_file, filtered_batch.schema(), Some(props))?;
-            current_writer = Some(writer);
-            current_output_path = Some(output_path);
+            *current_writer = Some(writer);
+            *current_output_path = Some(output_path);
         }
 
         // 写入数据
         if let Some(ref mut writer) = current_writer {
             writer.write(&filtered_batch)?;
         }
-    }
-
-    // 关闭最后一个文件
-    if let Some(writer) = current_writer {
-        writer.close()?;
     }
 
     Ok(())
