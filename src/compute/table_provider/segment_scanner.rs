@@ -1552,15 +1552,10 @@ impl ExecutionPlan for SegmentExec {
 struct SegmentStream {
     schema: SchemaRef,
     raw_data: RowDataStore,
-    doc_ids_iter: std::iter::Peekable<roaring::bitmap::IntoIter>,
+    doc_ids_iter: roaring::bitmap::IntoIter,
     projection: Option<Vec<usize>>,
     chunk_size: usize,
     limit: Option<usize>, // LIMIT 下推：如果设置，只返回这么多行
-
-    // 性能优化参数
-    total_docs: usize, // 总命中文档数，用于决定批量处理策略
-
-    // 迭代状态
     rows_returned: usize, // 已经返回的行数（用于 LIMIT）
     pending_batches: std::vec::IntoIter<RecordBatch>,
 }
@@ -1574,11 +1569,9 @@ impl SegmentStream {
         chunk_size: usize,
         limit: Option<usize>,
     ) -> Self {
-        let total_docs = matched_docs.len() as usize;
-
         log::debug!(
             "🔍 [SegmentStream::new] Total doc_ids={}, will process in chunks of {} storage batches, limit={:?}",
-            total_docs,
+            matched_docs.len(),
             chunk_size,
             limit
         );
@@ -1586,11 +1579,10 @@ impl SegmentStream {
         Self {
             schema,
             raw_data,
-            doc_ids_iter: matched_docs.into_iter().peekable(),
+            doc_ids_iter: matched_docs.into_iter(),
             projection,
             chunk_size,
             limit,
-            total_docs,
             rows_returned: 0,
             pending_batches: Vec::new().into_iter(),
         }
@@ -1600,7 +1592,6 @@ impl SegmentStream {
     fn generate_next_chunk(&mut self) -> DFResult<Vec<RecordBatch>> {
         use datafusion::arrow::array::UInt32Array;
         use datafusion::arrow::compute::take;
-        use std::collections::HashMap;
 
         // LIMIT 下推：如果已经返回足够的行，停止生成
         if let Some(limit) = self.limit {
@@ -1609,150 +1600,41 @@ impl SegmentStream {
             }
         }
 
-        // 🚀 根据命中数量自适应选择策略
-        // - 大数据量(>= 10000): 批量收集再查找，减少函数调用
-        // - 小数据量(< 10000): 逐个查找，避免额外内存分配
-        let batch_groups = if self.total_docs >= 10000 {
-            // 策略A: 批量处理（适合大数据量）
-            let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
+        // 🚀 收集 doc_ids 并批量查找对应的 batch
+        // 策略：先收集足够的 doc_ids，再调用 batch_lookup_doc_ids() 批量查找
+        // 这样只需要一次查找调用，避免频繁的小查询
+        let mut doc_ids_to_process: Vec<u32> = Vec::new();
+        let mut batch_count = 0;
 
-            // 🚀 流式处理: 收集刚好够填满 chunk_size 个 batch 的 doc_ids
-            // 而不是一次性收集所有 doc_ids 然后丢弃多余的 batch
-            let mut doc_ids_to_process: Vec<u32> = Vec::new();
-            let mut batch_key_set: std::collections::HashSet<u32> =
-                std::collections::HashSet::new();
-
-            log::debug!(
-                "  [SegmentStream] Collecting doc_ids to fill up to {} batches, remaining_rows={:?}",
-                self.chunk_size,
-                remaining_rows
-            );
-
-            // 逐个收集 doc_id,边收集边统计 batch 数量
-            // 🎯 使用 peek 避免在 chunk 边界丢失 doc_id
-            loop {
-                // LIMIT 优化
-                if let Some(remaining) = remaining_rows {
-                    if doc_ids_to_process.len() >= remaining {
-                        break;
-                    }
-                }
-
-                // 🎯 关键: 先 peek 查看下一个 doc_id,不消费
-                let &doc_id = match self.doc_ids_iter.peek() {
-                    Some(id) => id,
-                    None => break, // 没有更多 doc_id
-                };
-
-                // 检查这个 doc_id 属于哪个 batch
-                if let Some(batch_key) = self.raw_data.get_batch_key_for_doc(doc_id) {
-                    // 🎯 如果是新 batch 且已经收集够了 chunk_size,停止(不消费这个 doc_id)
-                    // 必须在消费前检查,否则 doc_id 会被迭代器消费但无法放回
-                    let is_new_batch = !batch_key_set.contains(&batch_key);
-                    if is_new_batch && batch_key_set.len() >= self.chunk_size {
-                        break; // 留给下一次 chunk 处理
-                    }
-
-                    // 安全消费这个 doc_id
-                    self.doc_ids_iter.next();
-                    doc_ids_to_process.push(doc_id);
-                    batch_key_set.insert(batch_key);
-                } else {
-                    // 无效的 doc_id,消费并跳过
-                    log::debug!("  [SegmentStream] 跳过无效doc_id: {}", doc_id);
-                    self.doc_ids_iter.next();
-                }
-            }
-
-            // 没有更多数据
+        for doc_id in &mut self.doc_ids_iter {
+            // 简单的 batch 计数（基于 doc_id 跳跃）
             if doc_ids_to_process.is_empty() {
-                return Ok(Vec::new());
-            }
-
-            log::debug!(
-                "  [SegmentStream] Collected {} doc_ids spanning {} batches (limit: {})",
-                doc_ids_to_process.len(),
-                batch_key_set.len(),
-                self.chunk_size
-            );
-
-            // 批量查找 batch_key 并分组
-            let batch_groups = self.raw_data.batch_lookup_doc_ids(&doc_ids_to_process);
-
-            log::debug!(
-                "  [SegmentStream] batch_lookup returned {} batch groups",
-                batch_groups.len()
-            );
-
-            batch_groups
-        } else {
-            // 策略B: 逐个处理（适合小数据量）
-            // 🎯 修复: 同样使用 peek 避免丢失 doc_id
-            let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
-            let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
-            let mut current_batch_key: Option<u32> = None;
-            let mut collected_rows = 0;
-
-            loop {
-                // LIMIT 优化
-                if let Some(remaining) = remaining_rows {
-                    if collected_rows >= remaining {
-                        break;
+                batch_count = 1;
+            } else {
+                // 估算：如果 doc_id 跨越较大范围，可能是新 batch
+                let last_doc_id = doc_ids_to_process[doc_ids_to_process.len() - 1];
+                if doc_id > last_doc_id + 1000 {
+                    batch_count += 1;
+                    if batch_count > self.chunk_size {
+                        break; // 收集够了 chunk_size 个 batch
                     }
                 }
-
-                // 🎯 使用 peek 先查看下一个 doc_id
-                let &doc_id = match self.doc_ids_iter.peek() {
-                    Some(id) => id,
-                    None => break,
-                };
-
-                // 获取 batch_key
-                let batch_key = match self.raw_data.get_batch_key_for_doc(doc_id) {
-                    Some(key) => key,
-                    None => {
-                        // 无效 doc_id,消费并跳过
-                        self.doc_ids_iter.next();
-                        continue;
-                    }
-                };
-
-                // 检查是否是新 batch
-                let is_new_batch =
-                    current_batch_key != Some(batch_key) && !batch_groups.contains_key(&batch_key);
-
-                // 🎯 如果是新 batch 且已经收集够了,停止(不消费这个 doc_id)
-                if is_new_batch && batch_groups.len() >= self.chunk_size {
-                    break;
-                }
-
-                // 安全消费这个 doc_id
-                self.doc_ids_iter.next();
-
-                // 优化：如果 batch_key 相同，直接加入
-                if current_batch_key == Some(batch_key) {
-                    batch_groups.get_mut(&batch_key).unwrap().push(doc_id);
-                } else {
-                    // 新的 batch_key
-                    batch_groups.entry(batch_key).or_default().push(doc_id);
-                    current_batch_key = Some(batch_key);
-                }
-
-                collected_rows += 1;
             }
 
-            if batch_groups.is_empty() {
-                return Ok(Vec::new());
-            }
+            doc_ids_to_process.push(doc_id);
+        }
 
-            log::debug!(
-                "  [SegmentStream] Using incremental lookup for {} doc_ids (total_docs={})",
-                collected_rows,
-                self.total_docs
-            );
+        if doc_ids_to_process.is_empty() {
+            return Ok(Vec::new());
+        }
 
-            batch_groups
-        };
+        log::debug!(
+            "  [SegmentStream] Collected {} doc_ids",
+            doc_ids_to_process.len()
+        );
+
+        // 批量查找 batch_key 并分组
+        let batch_groups = self.raw_data.batch_lookup_doc_ids(&doc_ids_to_process);
 
         if batch_groups.is_empty() {
             return Ok(Vec::new());
