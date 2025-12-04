@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 const MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 const ROWS_PER_GROUP: usize = 1000;
+const MAX_THREADS: usize = 5;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -24,6 +25,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let parquet_dir = &args[1];
     let output_dir = &args[2];
+
+    // 设置线程池为 5 个线程
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(MAX_THREADS)
+        .build_global()
+        .unwrap();
 
     // 创建输出目录
     fs::create_dir_all(output_dir)?;
