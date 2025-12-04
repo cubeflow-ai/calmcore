@@ -1133,6 +1133,12 @@ impl Segment {
             )));
         }
 
+        // 💾 关键：fsync 目录确保元数据持久化到磁盘
+        // 这对于 FLUSH TABLES 至关重要，确保重启后数据不丢失
+        if let Ok(dir) = std::fs::File::open(base_dir) {
+            let _ = dir.sync_all(); // 忽略错误，非关键操作
+        }
+
         // 🔑 关键：只有 rename 成功后才替换 fields 和 row_data
         // 这样 rename 失败时还可以重试
         *self.fields.write().unwrap() = new_fields;

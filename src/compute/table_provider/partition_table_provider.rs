@@ -230,7 +230,6 @@ impl ExecutionPlan for PartitionExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         use datafusion::arrow::record_batch::RecordBatch;
-        use datafusion::error::DataFusionError;
         use tokio::sync::mpsc;
 
         let partition = self.partition.clone();

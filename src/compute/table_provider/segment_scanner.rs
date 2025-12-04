@@ -1255,6 +1255,15 @@ impl SegmentScanner {
                             Operator::Eq => {
                                 return self.query_equal(field_name, scalar_value);
                             }
+                            // col != value -> NOT (col = value) -> valid_docs - equal_bitmap
+                            Operator::NotEq => {
+                                if let Some(eq_bitmap) = self.query_equal(field_name, scalar_value)
+                                {
+                                    return Some(&self.valid_docs - &eq_bitmap);
+                                }
+                                // 如果字段没有索引，返回 None 让 DataFusion 处理
+                                return None;
+                            }
                             // col > value -> range(value, false, +∞, true)
                             Operator::Gt => {
                                 return self.query_range(
