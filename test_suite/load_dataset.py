@@ -93,7 +93,10 @@ def create_table_graphql(host="127.0.0.1", port=9567):
         createTable(input: {
             name: "taxi_trips"
             primaryKey: "id"
-            partitionCount: 4
+            partitionStrategy: {
+                strategyType: PK_HASH
+                numPartitions: 4
+            }
             fields: [
                 { name: "id", fieldType: KEYWORD, indexed: true }
                 { name: "pickup_datetime", fieldType: TIMESTAMP, indexed: true }

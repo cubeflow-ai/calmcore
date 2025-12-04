@@ -172,7 +172,7 @@ impl Segment {
             ));
         }
 
-        println!("  🔧 Creating segment from Parquet with {} rows", num_rows);
+        log::info!("  🔧 Creating segment from Parquet with {} rows", num_rows);
 
         // 1. Create empty field indexes
         let mut fields: Vec<Box<dyn IndexWriter>> = Vec::new();
@@ -250,13 +250,13 @@ impl Segment {
         // 4. Build indexes for all fields
         for field in fields.iter() {
             if let Err(e) = field.write(data, 0) {
-                println!(
+                log::info!(
                     "  ⚠️  Warning: Failed to build index for field {}: {:?}",
                     field.name(),
                     e
                 );
             } else {
-                println!("    ✓ Built index for field: {}", field.name());
+                log::info!("    ✓ Built index for field: {}", field.name());
             }
         }
 
@@ -282,7 +282,7 @@ impl Segment {
                             bloom.set(&hash);
                         }
                     }
-                    println!("    ✓ Built bloom filter for primary key: {}", pk_name);
+                    log::info!("    ✓ Built bloom filter for primary key: {}", pk_name);
                 }
             }
         }
@@ -294,9 +294,10 @@ impl Segment {
         let max_doc_id_relative = (end - start) as u32;
         let doc_id_gen = max_doc_id_relative + 1;
 
-        println!(
+        log::info!(
             "  ✓ Segment created: doc_id_gen={}, max_doc_id={}",
-            doc_id_gen, max_doc_id_relative
+            doc_id_gen,
+            max_doc_id_relative
         );
 
         Ok(Self {
@@ -746,7 +747,7 @@ impl Segment {
     /// # Returns
     /// Returns Ok(()) on success.
     pub fn recover_from_disk(segment_path: &str, schema: Arc<Schema>) -> CoreResult<Self> {
-        println!("Loading frozen segment from: {}", segment_path);
+        log::info!("Loading frozen segment from: {}", segment_path);
 
         // 1. Load fields
         let start = std::time::Instant::now();
@@ -813,7 +814,7 @@ impl Segment {
             }
         }
 
-        println!("  Fields loaded in {:?}", start.elapsed());
+        log::info!("  Fields loaded in {:?}", start.elapsed());
 
         // 2. Load bloomfilter
         let pk_path = format!("{}/pk_bloomfilter", segment_path);
@@ -1065,7 +1066,7 @@ impl Segment {
         }
 
         if total_history_deletes > 0 {
-            println!(
+            log::info!(
                 "  Historical deletes persisted ({} entries from {} segments) in {:?}",
                 total_history_deletes,
                 history_segments.len(),
@@ -1093,7 +1094,7 @@ impl Segment {
             self.persist_row_data(&rowdata_path, row_data_clone, &deleted)?;
         } else {
             // For external Parquet, save the reference path in metadata
-            println!("  Skipping row_data persist (external Parquet reference)");
+            log::info!("  Skipping row_data persist (external Parquet reference)");
         }
 
         // 5. Save segment metadata (to temp directory)
@@ -1138,7 +1139,7 @@ impl Segment {
 
         // Phase 3: Replace historical deleted files back to their segments
         if !history_snapshot.is_empty() {
-            println!("  Phase 3: Replacing historical deleted files");
+            log::info!("  Phase 3: Replacing historical deleted files");
 
             for (hist_start, hist_end, _deleted_bitmap) in &history_snapshot {
                 let source_path =
@@ -1176,7 +1177,7 @@ impl Segment {
             };
             *self.row_data.write().unwrap() = disk_row_data;
         } else {
-            println!("  Keeping external Parquet reference (no row_data replacement)");
+            log::info!("  Keeping external Parquet reference (no row_data replacement)");
         }
 
         // 标记已在开始时设置，这里不需要重复设置
@@ -1277,7 +1278,7 @@ impl Segment {
                 }
             }
         }
-        println!("  Fields loaded in {:?}", start.elapsed());
+        log::info!("  Fields loaded in {:?}", start.elapsed());
 
         // 2. Load pk_bloomfilter
         let pk_path = format!("{}/pk_bloomfilter", segment_path);
@@ -1309,7 +1310,7 @@ impl Segment {
         } else {
             RoaringBitmap::new()
         };
-        println!(
+        log::info!(
             "  Deleted bitmap loaded ({} entries) in {:?}",
             deleted.len(),
             deleted_start.elapsed()
@@ -1320,9 +1321,12 @@ impl Segment {
         // doc_id_gen 是下一个可用ID的相对偏移 = (end_id - start_id) + 1
         let max_doc_id_relative = (end_id - start_id) as u32;
         let doc_id_gen = max_doc_id_relative + 1;
-        println!(
+        log::info!(
             "  Segment range: {}-{} (inclusive), doc_id_gen: {}, max_doc_id_relative: {}",
-            start_id, end_id, doc_id_gen, max_doc_id_relative
+            start_id,
+            end_id,
+            doc_id_gen,
+            max_doc_id_relative
         );
 
         // 4. Build field index
@@ -1354,7 +1358,7 @@ impl Segment {
             };
 
         let (row_data, base_path) = if let Some(external_path) = external_parquet_path {
-            println!(
+            log::info!(
                 "  Loading row_data from external Parquet: {}",
                 external_path
             );
@@ -1377,7 +1381,7 @@ impl Segment {
                     Some(segment_path.clone()),
                 )
             } else {
-                println!("  No row_data found, creating empty store");
+                log::info!("  No row_data found, creating empty store");
                 (RowDataStore::new_memory(32), Some(segment_path.clone()))
             }
         };
@@ -1412,7 +1416,7 @@ impl Segment {
             base_path,
         };
 
-        println!("Frozen segment loaded in {:?}", start.elapsed());
+        log::info!("Frozen segment loaded in {:?}", start.elapsed());
 
         Ok(segment)
     }
@@ -1689,7 +1693,7 @@ impl Segment {
 
         // If no data, return early
         if all_batches.is_empty() {
-            println!("    No data to persist");
+            log::info!("    No data to persist");
             return Ok(());
         }
 
@@ -1707,7 +1711,7 @@ impl Segment {
 
         // Merge all batches into one large batch
         if merged_batch_data.is_empty() {
-            println!("    No data to persist");
+            log::info!("    No data to persist");
             return Ok(());
         }
 
@@ -1717,7 +1721,7 @@ impl Segment {
 
         // Report deleted documents stats
         if !deleted.is_empty() {
-            println!(
+            log::info!(
                 "    Processed {} deleted documents (values set to NULL)",
                 deleted.len()
             );
@@ -1744,7 +1748,7 @@ impl Segment {
         }
 
         let batch_count = reorganized_batches.len();
-        println!(
+        log::info!(
             "    Reorganized into {} RowGroups ({}~{} docs per RowGroup)",
             batch_count,
             if total_docs < BATCH_SIZE {
@@ -1788,7 +1792,7 @@ impl Segment {
             .close()
             .map_err(|e| CoreError::IOError(format!("Failed to close writer: {}", e)))?;
 
-        println!("    Persisted to Parquet: {}", parquet_file_path);
+        log::info!("    Persisted to Parquet: {}", parquet_file_path);
 
         Ok(())
     }

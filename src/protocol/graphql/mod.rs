@@ -190,7 +190,9 @@ pub struct Field {
 /// }
 ///
 /// # 无分区 - 小表
-/// partition_count: 1  # 等价于 strategy_type: NONE
+/// partition_strategy: {
+///   strategy_type: NONE
+/// }
 /// ```
 #[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq)]
 pub enum PartitionStrategyType {
@@ -343,7 +345,7 @@ pub struct PersistPolicyInput {
 /// **推荐配置:**
 /// - `description`: 表描述,帮助团队理解
 /// - `primary_key`: 主键字段,用于去重和分区
-/// - `partition_strategy` 或 `partition_count`: 分区配置
+/// - `partition_strategy`: 分区配置（不指定则默认 None）
 /// - `store_source`: 是否存储原始 JSON (默认 true)
 ///
 /// **快速开始模板:**
@@ -353,7 +355,10 @@ pub struct PersistPolicyInput {
 ///     name: "users"                          # 表名
 ///     description: "用户信息表"               # 表描述
 ///     primary_key: "user_id"                 # 主键
-///     partition_count: 4                     # 简单分区(Hash on user_id)
+///     partitionStrategy: {                   # PKHash 分区
+///       strategyType: PKHASH
+///       numPartitions: 4
+///     }
 ///     
 ///     fields: [                              # 字段定义
 ///       {
@@ -379,7 +384,6 @@ pub struct PersistPolicyInput {
 ///     ]
 ///   }) {
 ///     name
-///     partition_count
 ///   }
 /// }
 /// ```
@@ -423,11 +427,8 @@ pub struct CreateTableInput {
     /// 表描述/注释 - 帮助团队理解表用途和业务含义,强烈建议填写
     pub description: Option<String>,
 
-    /// 分区策略 - 定义数据如何分布。与 partition_count 二选一,不指定则默认 Hash 分区 1 个
+    /// 分区策略 - 定义数据如何分布。不指定则默认为 None (无分区)
     pub partition_strategy: Option<PartitionStrategyInput>,
-
-    /// 分区数量 - 简化配置,仅在未指定 partition_strategy 时使用。默认为 1(无分区)
-    pub partition_count: Option<u64>,
 
     /// 字段列表 - 定义表的列结构,至少需要 1 个字段
     pub fields: Vec<FieldInput>,
@@ -1236,7 +1237,10 @@ impl MutationRoot {
     ///     name: "users"
     ///     description: "用户信息表"
     ///     primary_key: "user_id"
-    ///     partition_count: 4  # 简化配置,Hash 分区
+    ///     partitionStrategy: {
+    ///       strategyType: PKHASH
+    ///       numPartitions: 4
+    ///     }
     ///     fields: [
     ///       { name: "user_id", field_type: U64, nullable: false }
     ///       { name: "username", field_type: KEYWORD, nullable: false }
@@ -1244,7 +1248,6 @@ impl MutationRoot {
     ///     ]
     ///   }) {
     ///     name
-    ///     partition_count
     ///   }
     /// }
     /// ```
@@ -1459,23 +1462,8 @@ impl MutationRoot {
                 }
             }
         } else {
-            // 如果未指定分区策略，使用默认的 Hash 策略
-            let partition_field = input.primary_key.clone().unwrap_or_else(|| {
-                fields
-                    .first()
-                    .map(|f| f.name().to_string())
-                    .unwrap_or_default()
-            });
-
-            let partition_count = input.partition_count.unwrap_or(1) as usize;
-
-            (
-                PartitionStrategy::Hash {
-                    field: partition_field,
-                    num_partitions: partition_count,
-                },
-                partition_count,
-            )
+            // 未指定分区策略，默认使用 None（无分区）
+            (PartitionStrategy::None, 1)
         };
 
         // 创建表

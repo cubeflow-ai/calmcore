@@ -104,6 +104,8 @@ impl DataFusionExecutor {
             return Ok(Box::pin(adapter));
         }
 
+        //TODO:ANSJ
+
         // 创建 DataFusion SessionContext
         let config = SessionConfig::new().with_target_partitions(32);
         let ctx = SessionContext::new_with_config(config);

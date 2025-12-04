@@ -358,9 +358,6 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
     fn on_query(&mut self, query: &str, results: QueryResultWriter<W>) -> io::Result<()> {
         let query_trimmed = query.trim();
 
-        // 记录所有查询（用于调试）
-        log::info!("📨 [MySQL Query] {}", query_trimmed);
-
         // 去除 MySQL 注释 (/* ... */)
         let query_without_comment = if query_trimmed.starts_with("/*") {
             if let Some(end_pos) = query_trimmed.find("*/") {
