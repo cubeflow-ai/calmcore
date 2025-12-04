@@ -105,7 +105,17 @@ impl DataFusionExecutor {
         }
 
         // 创建 DataFusion SessionContext
-        let config = SessionConfig::new().with_target_partitions(32);
+        // 🔧 控制并行度以限制内存使用
+        // target_partitions 决定同时执行多少个 segment
+        // 内存峰值 ≈ target_partitions × 1000行 × 单行大小
+        //
+        // 设置为 1 实现完全串行执行：
+        // - 一次只处理一个 segment
+        // - 处理完一个再处理下一个
+        // - 内存峰值最小化
+        let config = SessionConfig::new()
+            .with_target_partitions(1) // 串行执行，最小内存
+            .with_batch_size(500); // 减小 batch size，进一步降低内存
         let ctx = SessionContext::new_with_config(config);
 
         // 提取表名

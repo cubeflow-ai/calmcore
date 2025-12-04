@@ -1595,24 +1595,27 @@ impl SegmentStream {
             }
         }
 
-        // 🚀 统一流式策略: 每次最多处理 1000 行
+        // 🚀 统一流式策略: 每次最多处理 200 行
         // 优点:
-        // 1. 更平滑的内存曲线 - 峰值内存降低 100x
+        // 1. 更平滑的内存曲线 - 峰值内存降低
         // 2. 更好的背压控制 - MySQL客户端可以按需消费
         // 3. 代码更简单 - 无需复杂的策略选择
         // 4. 适用所有场景 - 大小数据集都能良好工作
+        //
+        // 🔧 从 1000 降到 200，配合 target_partitions=1
+        // 内存峰值 = 1 segment × 200 行 × 单行大小
 
         let remaining_rows = self.limit.map(|l| l.saturating_sub(self.rows_returned));
 
-        // 🎯 硬性限制: 每次最多收集 1000 个 doc_ids
-        const MAX_DOC_IDS_PER_CHUNK: usize = 1000;
+        // 🎯 硬性限制: 每次最多收集 200 个 doc_ids (从 1000 降低)
+        const MAX_DOC_IDS_PER_CHUNK: usize = 200;
 
         let mut doc_ids_to_process: Vec<u32> = Vec::with_capacity(MAX_DOC_IDS_PER_CHUNK);
         let mut batch_key_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut batch_groups: HashMap<u32, Vec<u32>> = HashMap::new();
 
         loop {
-            // 🚨 硬性限制: 每次最多1000行,确保内存可控
+            // 🚨 硬性限制: 每次最多200行,确保内存可控
             if doc_ids_to_process.len() >= MAX_DOC_IDS_PER_CHUNK {
                 break;
             }
