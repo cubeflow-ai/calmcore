@@ -1,16 +1,17 @@
 use std::{any::Any, sync::Arc};
 
 use datafusion::{
-    arrow::datatypes::SchemaRef,
+    arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
     catalog::Session,
     datasource::{TableProvider, TableType},
     error::Result,
-    execution::{SendableRecordBatchStream, TaskContext},
+    execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext},
     logical_expr::{Expr, TableProviderFilterPushDown},
     physical_expr::EquivalenceProperties,
     physical_plan::execution_plan::{Boundedness, EmissionType},
     physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties},
 };
+use tokio::sync::mpsc;
 
 use crate::partition::Partition;
 
@@ -112,73 +113,278 @@ impl TableProvider for PartitionTableProvider {
             limit
         );
 
-        // 🚀 新方案: 让每个segment成为一个独立的partition,实现真正的并行
-        // 而不是使用UnionExec串行合并
-
-        // 提前为每个segment创建SegmentScanner,存储扫描所需的数据
-        let mut segment_scanners = Vec::new();
-
-        // Add current segment (only if non-empty)
-        {
-            let current_segment = self.partition.get_current_segment();
-            if current_segment.doc_count() > 0 {
-                let scanner = SegmentScanner::new(
-                    self.schema.clone(),
-                    current_segment.get_row_data(),
-                    current_segment.get_index_readers(),
-                    current_segment.doc_count(),
-                    current_segment.get_deleted(),
-                );
-                segment_scanners.push(scanner);
-            }
-        }
-
-        // Add frozen segments
-        {
-            let frozen_segments = self.partition.get_frozen_segments();
-            for (_seg_id, segment) in frozen_segments.iter() {
-                let scanner = SegmentScanner::new(
-                    self.schema.clone(),
-                    segment.get_row_data(),
-                    segment.get_index_readers(),
-                    segment.doc_count(),
-                    segment.get_deleted(),
-                );
-                segment_scanners.push(scanner);
-            }
-        }
-
-        log::info!(
-            "🔍 [PartitionTableProvider::scan] Found {} segments",
-            segment_scanners.len()
-        );
-
-        // Handle empty partition case
-        if segment_scanners.is_empty() {
-            log::warn!(
-                "⚠️  [PartitionTableProvider::scan] No segments found, returning empty plan"
-            );
-            use datafusion::physical_plan::empty::EmptyExec;
-
-            let empty_schema = if let Some(proj) = projection {
-                let fields: Vec<_> = proj.iter().map(|i| self.schema.field(*i).clone()).collect();
-                Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
-            } else {
-                self.schema.clone()
-            };
-
-            return Ok(Arc::new(EmptyExec::new(empty_schema)));
-        }
-
-        // 🔥 创建 MultiSegmentExec: 让DataFusion并行执行每个segment
-        // 每个segment作为一个partition,DataFusion会自动并行调度
-        Ok(Arc::new(MultiSegmentExec::new(
+        // 🚀 Partition 级别: 启动 tokio task，串行处理多个 Segments
+        Ok(Arc::new(PartitionExec::new(
+            self.partition.clone(),
             self.schema.clone(),
-            segment_scanners,
             filters.to_vec(),
             projection.cloned(),
             limit,
         )))
+    }
+}
+
+/// PartitionExec: 单个 Partition 的执行计划
+///
+/// **架构设计**:
+/// - 启动一个 tokio task
+/// - 串行处理 current_segment + frozen_segments (按 start 倒序)
+/// - 通过 bounded channel (容量 10) 推送数据
+/// - 外部通过 RecvStream 包装成 SendableRecordBatchStream
+pub struct PartitionExec {
+    partition: Arc<Partition>,
+    schema: SchemaRef,
+    filters: Vec<Expr>,
+    projection: Option<Vec<usize>>,
+    limit: Option<usize>,
+    properties: PlanProperties,
+}
+
+impl PartitionExec {
+    fn new(
+        partition: Arc<Partition>,
+        schema: SchemaRef,
+        filters: Vec<Expr>,
+        projection: Option<Vec<usize>>,
+        limit: Option<usize>,
+    ) -> Self {
+        // 计算投影后的 schema
+        let output_schema = if let Some(ref proj) = projection {
+            if proj.is_empty() {
+                Arc::new(datafusion::arrow::datatypes::Schema::empty())
+            } else {
+                let fields: Vec<_> = proj.iter().map(|i| schema.field(*i).clone()).collect();
+                Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
+            }
+        } else {
+            schema.clone()
+        };
+
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Final,
+            Boundedness::Bounded,
+        );
+
+        Self {
+            partition,
+            schema: output_schema,
+            filters,
+            projection,
+            limit,
+            properties,
+        }
+    }
+}
+
+impl std::fmt::Debug for PartitionExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PartitionExec: {}", self.partition.name())
+    }
+}
+
+impl std::fmt::Display for PartitionExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PartitionExec: {}", self.partition.name())
+    }
+}
+
+impl DisplayAs for PartitionExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "PartitionExec: {}", self.partition.name())
+    }
+}
+
+impl ExecutionPlan for PartitionExec {
+    fn name(&self) -> &str {
+        "PartitionExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        use datafusion::arrow::record_batch::RecordBatch;
+        use datafusion::error::DataFusionError;
+        use tokio::sync::mpsc;
+
+        let partition = self.partition.clone();
+        let full_schema = self.partition.arrow_schema.clone();
+        let output_schema = self.schema.clone();
+        let filters = self.filters.clone();
+        let projection = self.projection.clone();
+        let _limit = self.limit;
+
+        // 创建 bounded channel: 容量 10
+        let (tx, rx) = mpsc::channel::<Result<RecordBatch>>(10);
+
+        // 启动 tokio task 串行处理所有 Segments
+        tokio::spawn(async move {
+            if let Err(e) =
+                process_partition_segments(partition, full_schema, filters, projection, tx).await
+            {
+                log::error!("❌ [PartitionExec] Error processing segments: {}", e);
+            }
+        });
+
+        // 包装成 SendableRecordBatchStream
+        Ok(Box::pin(RecvStream::new(output_schema, rx)))
+    }
+}
+
+/// 串行处理单个 Partition 的所有 Segments
+async fn process_partition_segments(
+    partition: Arc<Partition>,
+    schema: SchemaRef,
+    filters: Vec<Expr>,
+    projection: Option<Vec<usize>>,
+    tx: mpsc::Sender<Result<RecordBatch>>,
+) -> Result<()> {
+    // 1. 处理 current_segment
+    {
+        let scanner_opt = {
+            let current_segment = partition.get_current_segment();
+            let doc_count = current_segment.doc_count();
+
+            if doc_count == 0 {
+                None
+            } else {
+                log::debug!(
+                    "  [PartitionExec] Processing current_segment: {} docs",
+                    doc_count
+                );
+                Some(SegmentScanner::new(
+                    schema.clone(),
+                    current_segment.get_row_data(),
+                    current_segment.get_index_readers(),
+                    doc_count,
+                    current_segment.get_deleted(),
+                ))
+            }
+        };
+
+        if let Some(scanner) = scanner_opt {
+            process_segment(&scanner, &filters, &projection, &tx).await?;
+        }
+    }
+
+    // 2. 处理 frozen_segments (按 start 倒序)
+    let mut scanners = {
+        let frozen_segments = partition.get_frozen_segments();
+        let mut scanners = Vec::new();
+
+        for (seg_id, segment) in frozen_segments.iter() {
+            let doc_count = segment.doc_count();
+            if doc_count == 0 {
+                continue;
+            }
+
+            log::debug!(
+                "  [PartitionExec] Preparing segment {} (start={}): {} docs",
+                seg_id,
+                segment.start,
+                doc_count
+            );
+            let scanner = SegmentScanner::new(
+                schema.clone(),
+                segment.get_row_data(),
+                segment.get_index_readers(),
+                doc_count,
+                segment.get_deleted(),
+            );
+            scanners.push((seg_id.clone(), segment.start, scanner));
+        }
+        scanners
+    };
+
+    // 按 start 倒序排序
+    scanners.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // 串行处理
+    for (_seg_id, _start, scanner) in scanners {
+        process_segment(&scanner, &filters, &projection, &tx).await?;
+    }
+
+    Ok(())
+}
+
+/// 处理单个 Segment
+async fn process_segment(
+    scanner: &SegmentScanner,
+    filters: &[Expr],
+    projection: &Option<Vec<usize>>,
+    tx: &mpsc::Sender<Result<RecordBatch>>,
+) -> Result<()> {
+    let plan = match scanner.create_plan(filters, projection.as_ref(), None, None) {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let context = Arc::new(TaskContext::default());
+    let mut stream = plan.execute(0, context)?;
+
+    // 逐批发送数据到 channel
+    while let Some(result) = futures::StreamExt::next(&mut stream).await {
+        if tx.send(result).await.is_err() {
+            // Channel 关闭，停止发送
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
+/// RecvStream: 包装 mpsc::Receiver 为 SendableRecordBatchStream
+struct RecvStream {
+    schema: SchemaRef,
+    rx: mpsc::Receiver<Result<RecordBatch>>,
+}
+
+impl RecvStream {
+    fn new(schema: SchemaRef, rx: mpsc::Receiver<Result<RecordBatch>>) -> Self {
+        Self { schema, rx }
+    }
+}
+
+impl RecordBatchStream for RecvStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl futures::Stream for RecvStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
     }
 }
 
