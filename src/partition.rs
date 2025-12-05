@@ -908,7 +908,7 @@ impl Partition {
     ///
     /// 调用后保证：所有数据已写入磁盘
     pub fn persist_all(&self) -> CoreResult<()> {
-        println!("[Partition {}] Starting persist_all...", self.name);
+        log::info!("[Partition {}] Starting persist_all...", self.name);
 
         // 1. Flush 当前活跃 segment
         let current_count = self.current_segment.read().unwrap().doc_count();
@@ -923,6 +923,7 @@ impl Partition {
 
         // 2. 持久化所有未持久化的 segments
         let unpersisted = self.get_unpersisted_segments();
+
         if unpersisted.is_empty() {
             log::info!("[Partition {}] All segments already persisted", self.name);
             return Ok(());

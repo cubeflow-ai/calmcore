@@ -55,11 +55,8 @@ impl Router {
             )),
 
             PartitionStrategy::None => {
-                // 单分区：所有数据路由到 partition_0
-                Ok(HashMap::from([(
-                    "partition_000000000000000000".to_string(),
-                    batch,
-                )]))
+                // 单分区：所有数据路由到 0000000000000000000
+                Ok(HashMap::from([("0000000000000000000".to_string(), batch)]))
             }
         }
     }

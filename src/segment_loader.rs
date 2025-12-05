@@ -71,7 +71,7 @@ impl SegmentLoader {
             .join("tables")
             .join(table_name)
             .join("partitions")
-            .join(partition_name)
+            .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(partition_name))
             .join("temp_load");
 
         std::fs::create_dir_all(&temp_dir)

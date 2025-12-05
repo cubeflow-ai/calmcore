@@ -308,7 +308,7 @@ impl Engine {
                 .join("tables")
                 .join(table_name)
                 .join("partitions")
-                .join(&partition_name);
+                .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(&partition_name));
 
             log::debug!(
                 "🔍 [DEBUG create_table] Creating partition {} at {:?}",
@@ -573,7 +573,7 @@ impl Engine {
             .join("tables")
             .join(table_name)
             .join("partitions")
-            .join(partition_name);
+            .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(partition_name));
         
         log::info!(
             "Creating partition {} for table '{}' at {:?}",
@@ -747,7 +747,7 @@ impl Engine {
 
             // frozen segments
             let frozen = partition.get_frozen_segments();
-            for (seg_id, seg) in frozen.iter() {
+            for (_, seg) in frozen.iter() {
                 // 估算绝对创建时间戳：当前时间戳减去 age
                 let age = seg.created_since_start();
                 let now_ts_ms = std::time::SystemTime::now()
@@ -756,7 +756,7 @@ impl Engine {
                     .as_millis() as u64;
                 let created_ts_ms = now_ts_ms.saturating_sub(age.as_millis() as u64);
                 infos.push((
-                    *seg_id,
+                    seg.start,
                     seg.doc_count() as u64,
                     created_ts_ms,
                     false, // is_current = false for frozen

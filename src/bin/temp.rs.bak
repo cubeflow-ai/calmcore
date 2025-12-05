@@ -64,9 +64,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // 扫描输出目录，找到已有文件的最大序号
+    let start_counter = find_max_output_file_number(output_dir)?;
+    println!("Starting from file number: {}", start_counter + 1);
+
     // 使用共享的文件队列和统计信息
     let file_queue = Arc::new(Mutex::new(VecDeque::from(parquet_files)));
-    let file_counter = Arc::new(Mutex::new(0usize));
+    let file_counter = Arc::new(Mutex::new(start_counter));
     let total_rows_read = Arc::new(Mutex::new(0u64));
     let total_rows_written = Arc::new(Mutex::new(0u64));
     let total_rows_filtered = Arc::new(Mutex::new(0u64));
@@ -306,6 +310,31 @@ fn process_file_to_writer(
     }
 
     Ok(())
+}
+
+/// 查找输出目录中已有文件的最大序号
+fn find_max_output_file_number(output_dir: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut max_number = 0;
+
+    if let Ok(entries) = fs::read_dir(output_dir) {
+        for entry in entries.flatten() {
+            if let Some(file_name) = entry.file_name().to_str() {
+                // 匹配 filtered_XXXX.parquet 格式
+                if file_name.starts_with("filtered_") && file_name.ends_with(".parquet") {
+                    if let Some(num_str) = file_name
+                        .strip_prefix("filtered_")
+                        .and_then(|s| s.strip_suffix(".parquet"))
+                    {
+                        if let Ok(num) = num_str.parse::<usize>() {
+                            max_number = max_number.max(num);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(max_number)
 }
 
 /// 加载已处理的文件列表
