@@ -535,7 +535,7 @@ impl ExecutionPlan for MultiSegmentExec {
 
         match plan {
             Some(segment_plan) => {
-                log::info!(
+                log::debug!(
                     "✅ [MultiSegmentExec] Partition {} created execution plan",
                     partition
                 );

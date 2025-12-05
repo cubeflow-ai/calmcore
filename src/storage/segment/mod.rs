@@ -1,4 +1,5 @@
 pub mod field_store;
+pub mod segment_loader;
 
 // Re-export field_store types that are used publicly
 pub use field_store::{IndexReader, IndexWriter, RowDataStore};

@@ -1,4 +1,5 @@
 /// Catalog 模块 - 管理表的元数据和目录结构
+pub mod schema;
 pub mod table_meta;
 
 pub use table_meta::{PartitionMeta, PartitionStrategy, SegmentInfo, SegmentStatus, TableMeta};

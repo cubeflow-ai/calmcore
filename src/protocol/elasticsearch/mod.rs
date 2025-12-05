@@ -1,4 +1,5 @@
 mod aggregation;
+pub mod query_rewriter;
 
 use std::sync::Arc;
 
