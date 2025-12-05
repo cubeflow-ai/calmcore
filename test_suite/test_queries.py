@@ -23,8 +23,8 @@ class Colors:
     NC = "\033[0m"
 
 
-def print_colored(color, text):
-    print(f"{color}{text}{Colors.NC}")
+def print_colored(color, text, end="\n"):
+    print(f"{color}{text}{Colors.NC}", end=end)
 
 
 def connect_calm(host="127.0.0.1", port=3307):
@@ -305,6 +305,26 @@ def test_nyc_taxi(calm_conn, mysql_conn):
             "15. HAVING clause",
             "SELECT payment_type, COUNT(*) as cnt FROM taxi_trips GROUP BY payment_type HAVING cnt > 1000 ORDER BY payment_type",
         ),
+        (
+            "16. NOT EQUAL (!=) - Exclude passenger count",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count != 1",
+        ),
+        (
+            "17. NOT EQUAL (<>) - Exclude payment type",
+            "SELECT COUNT(*) FROM taxi_trips WHERE payment_type <> 1",
+        ),
+        (
+            "18. LIKE pattern - Payment type wildcard",
+            "SELECT COUNT(*) FROM taxi_trips WHERE CAST(payment_type AS CHAR) LIKE '%1%'",
+        ),
+        (
+            "19. NOT EQUAL with multiple conditions",
+            "SELECT COUNT(*) FROM taxi_trips WHERE passenger_count != 0 AND trip_distance != 0",
+        ),
+        (
+            "20. NOT EQUAL aggregation",
+            "SELECT payment_type, COUNT(*) as cnt FROM taxi_trips WHERE fare_amount != 0 GROUP BY payment_type ORDER BY payment_type",
+        ),
     ]
 
     passed = 0
@@ -313,6 +333,9 @@ def test_nyc_taxi(calm_conn, mysql_conn):
     mysql_total_time = 0
     calm_times = []
     mysql_times = []
+
+    # 记录每个测试的详细结果
+    test_results = []
 
     # 合并生成的测试和手动测试
     all_tests = generated_tests + test_cases
@@ -340,11 +363,76 @@ def test_nyc_taxi(calm_conn, mysql_conn):
                 mysql_total_time += mysql_time
                 mysql_times.append(mysql_time)
 
+            # 记录测试结果
+            test_results.append(
+                {
+                    "name": name,
+                    "match": match,
+                    "calm_time": calm_time,
+                    "mysql_time": mysql_time,
+                    "sql": sql,
+                }
+            )
+
         except Exception as e:
             print_colored(Colors.RED, f"❌ Test failed with exception: {e}")
             failed += 1
+            test_results.append(
+                {
+                    "name": name,
+                    "match": False,
+                    "calm_time": 0,
+                    "mysql_time": 0,
+                    "sql": sql,
+                    "error": str(e),
+                }
+            )
 
         time.sleep(0.05)  # 短暂暂停，避免过快
+
+    # 显示详细测试结果列表
+    print_colored(Colors.BLUE, f"\n{'='*80}")
+    print_colored(Colors.BLUE, "=== Detailed Test Results ===")
+    print_colored(Colors.BLUE, f"{'='*80}")
+
+    print(
+        f"\n{'No.':<5} {'Status':<8} {'Calm(s)':<10} {'MySQL(s)':<10} {'Speedup':<10} {'Test Name':<60}"
+    )
+    print("-" * 120)
+
+    for idx, result in enumerate(test_results, 1):
+        status = "✓ PASS" if result["match"] else "✗ FAIL"
+        status_color = Colors.GREEN if result["match"] else Colors.RED
+
+        calm_t = result["calm_time"]
+        mysql_t = result["mysql_time"]
+
+        # 计算加速比
+        if calm_t > 0 and mysql_t > 0:
+            speedup = mysql_t / calm_t
+            if speedup > 1:
+                speedup_str = f"{speedup:.2f}x ⚡"
+                speedup_color = Colors.GREEN
+            else:
+                speedup_str = f"{1/speedup:.2f}x 🐌"
+                speedup_color = Colors.YELLOW
+        else:
+            speedup_str = "-"
+            speedup_color = Colors.NC
+
+        calm_str = f"{calm_t:.3f}" if calm_t > 0 else "-"
+        mysql_str = f"{mysql_t:.3f}" if mysql_t > 0 else "-"
+
+        # 截断测试名称如果太长
+        test_name = result["name"]
+        if len(test_name) > 57:
+            test_name = test_name[:54] + "..."
+
+        print(f"{idx:<5} ", end="")
+        print_colored(status_color, f"{status:<8}", end="")
+        print(f" {calm_str:<10} {mysql_str:<10} ", end="")
+        print_colored(speedup_color, f"{speedup_str:<10}", end="")
+        print(f" {test_name}")
 
     # 总结
     print_colored(Colors.BLUE, f"\n{'='*80}")

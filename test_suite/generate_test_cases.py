@@ -132,6 +132,39 @@ def generate_where_queries(table_name):
         f"SELECT COUNT(*) FROM {table_name} WHERE trip_distance > 50.0",
         f"SELECT COUNT(*) FROM {table_name} WHERE fare_amount > 50.0",
         f"SELECT COUNT(*) FROM {table_name} WHERE fare_amount > 100.0",
+        # 不等于条件 (!=)
+        f"SELECT COUNT(*) FROM {table_name} WHERE passenger_count != 0",
+        f"SELECT COUNT(*) FROM {table_name} WHERE payment_type != 1",
+        f"SELECT COUNT(*) FROM {table_name} WHERE payment_type != 2",
+        # 不等于条件 (<>)
+        f"SELECT COUNT(*) FROM {table_name} WHERE passenger_count <> 1",
+        f"SELECT COUNT(*) FROM {table_name} WHERE passenger_count <> 2",
+        f"SELECT COUNT(*) FROM {table_name} WHERE payment_type <> 1",
+        # 不等于 + 其他条件
+        f"SELECT COUNT(*) FROM {table_name} WHERE passenger_count != 0 AND fare_amount > 0",
+        f"SELECT COUNT(*) FROM {table_name} WHERE payment_type != 1 AND trip_distance > 5.0",
+        f"SELECT COUNT(*) FROM {table_name} WHERE fare_amount != 0 AND tip_amount != 0",
+    ]
+
+
+# LIKE 模式匹配查询
+def generate_like_queries(table_name):
+    return [
+        # 基础 LIKE 查询 (转换数值字段为字符串)
+        f"SELECT COUNT(*) FROM {table_name} WHERE CAST(payment_type AS CHAR) LIKE '1%'",
+        f"SELECT COUNT(*) FROM {table_name} WHERE CAST(payment_type AS CHAR) LIKE '%1'",
+        f"SELECT COUNT(*) FROM {table_name} WHERE CAST(payment_type AS CHAR) LIKE '%1%'",
+        f"SELECT COUNT(*) FROM {table_name} WHERE CAST(passenger_count AS CHAR) LIKE '1%'",
+        f"SELECT COUNT(*) FROM {table_name} WHERE CAST(passenger_count AS CHAR) LIKE '%2%'",
+        # NOT LIKE
+        f"SELECT COUNT(*) FROM {table_name} WHERE CAST(payment_type AS CHAR) NOT LIKE '%1%'",
+        f"SELECT COUNT(*) FROM {table_name} WHERE CAST(passenger_count AS CHAR) NOT LIKE '0%'",
+        # LIKE 配合其他条件
+        f"SELECT COUNT(*) FROM {table_name} WHERE CAST(payment_type AS CHAR) LIKE '%1%' AND fare_amount > 10.0",
+        f"SELECT COUNT(*) FROM {table_name} WHERE CAST(passenger_count AS CHAR) LIKE '%2%' AND trip_distance > 5.0",
+        # GROUP BY with LIKE
+        f"SELECT payment_type, COUNT(*) FROM {table_name} WHERE CAST(payment_type AS CHAR) LIKE '%1%' GROUP BY payment_type",
+        f"SELECT passenger_count, COUNT(*) FROM {table_name} WHERE CAST(passenger_count AS CHAR) LIKE '%1%' GROUP BY passenger_count",
     ]
 
 
@@ -239,6 +272,7 @@ def generate_all_test_cases(table_name="taxi_trips"):
     all_tests.extend([("聚合函数", q) for q in generate_aggregate_queries(table_name)])
     all_tests.extend([("GROUP BY", q) for q in generate_group_by_queries(table_name)])
     all_tests.extend([("WHERE 条件", q) for q in generate_where_queries(table_name)])
+    all_tests.extend([("LIKE 模式", q) for q in generate_like_queries(table_name)])
     all_tests.extend(
         [("ORDER BY & LIMIT", q) for q in generate_order_limit_queries(table_name)]
     )
