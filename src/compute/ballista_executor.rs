@@ -199,11 +199,16 @@ impl DataFusionExecutor {
 
     /// 从 SQL 中提取表名 (简化版本)
     fn extract_table_name(&self, sql: &str) -> CoreResult<String> {
+        log::debug!("[extract_table_name] Input SQL: {}", sql);
+        
         let sql_upper = sql.to_uppercase();
+        log::debug!("[extract_table_name] Uppercase SQL: {}", sql_upper);
 
         // 查找 FROM 关键字
         if let Some(from_pos) = sql_upper.find(" FROM ") {
+            // 使用原始 SQL 的位置提取表名（保持原始大小写）
             let after_from = &sql[from_pos + 6..].trim();
+            log::debug!("[extract_table_name] After FROM: {}", after_from);
 
             // 提取表名（可能包含 schema.table 格式）
             let table_name = after_from
@@ -212,13 +217,16 @@ impl DataFusionExecutor {
                 .unwrap_or("")
                 .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
 
+            log::debug!("[extract_table_name] Extracted table name: {}", table_name);
+            
             if !table_name.is_empty() {
                 return Ok(table_name.to_string());
             }
         }
 
+        log::error!("[extract_table_name] Could not find FROM clause in SQL: {}", sql);
         Err(CoreError::InvalidParam(
-            "Could not extract table name from SQL".to_string(),
+            format!("Could not extract table name from SQL: {}", sql),
         ))
     }
 }

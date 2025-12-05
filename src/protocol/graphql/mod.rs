@@ -320,38 +320,228 @@ pub enum TimeGranularityType {
 /// ```
 /// - 适合: <100万行的表
 /// - 优点: 简单,无分区开销
+
+// ===== OneofObject 分区策略配置 =====
+
+/// PKHash 分区配置 - 基于主键哈希分区
+///
+/// 使用主键的哈希值均匀分布数据到多个分区。
+///
+/// # 示例
+/// ```graphql
+/// partitionStrategy: {
+///   pkHash: {
+///     numPartitions: 4
+///   }
+/// }
+/// ```
 #[derive(async_graphql::InputObject)]
-pub struct PartitionStrategyInput {
-    /// 分区策略类型 - PKHASH(主键), HASH(无主键), RANGE(旰值范围), DATETIMERANGE(时序优化), CUSTOM(高级), NONE(小表)
-    pub strategy_type: PartitionStrategyType,
-
-    /// 分区字段名 - Hash/Range/DatetimeRange 策略必需。Hash:主键, Range:数值, DatetimeRange:Timestamp类型
-    pub field: Option<String>,
-
-    /// 分区数量 - PKHash/Hash 策略必需。建议 2-16,推荐 CPU 核心数或 2 的幂次
-    pub num_partitions: Option<u64>,
-
-    /// Range 起始值 - Range 策略必需。支持负数（默认 0）
-    pub range_start: Option<i64>,
-
-    /// Range 步长 - Range 策略必需。每个分区的范围大小
-    pub range_step: Option<i64>,
-
-    /// Range 并行度 - Range 策略可选。每个 range 内创建多个子分区以提高并行写入性能
-    /// 例如: parallelism=2 会创建 partition_xxx_0 和 partition_xxx_1
-    pub range_parallelism: Option<u64>,
-
-    /// 时间粒度 - DatetimeRange 策略必需。可选: YEAR(2024)/MONTH(202401)/WEEK(2024W01)/DAY(20240101)/HOUR(2024010108)
-    pub time_granularity: Option<TimeGranularityType>,
-
-    /// 时区 - DatetimeRange 策略可选。当前支持: "UTC" 或 None(本地时区)。未来将支持 IANA 时区(Asia/Shanghai 等)
-    pub timezone: Option<String>,
-
-    /// 时间并行度 - DatetimeRange 策略可选。每个时间段内创建多个子分区以提高并行写入性能
-    /// 例如: parallelism=2 会创建 partition_20240101_0 和 partition_20240101_1
-    pub datetime_parallelism: Option<u64>,
+pub struct PKHashPartitionConfig {
+    /// 分区数量 - 建议 2-16,推荐 CPU 核心数或 2 的幂次
+    pub num_partitions: u64,
 }
 
+/// Hash 分区配置 - 基于指定字段哈希分区
+///
+/// 使用指定字段的哈希值均匀分布数据,适合 ID 类字段。
+///
+/// # 示例
+/// ```graphql
+/// partitionStrategy: {
+///   hash: {
+///     field: "user_id"
+///     numPartitions: 8
+///   }
+/// }
+/// ```
+#[derive(async_graphql::InputObject)]
+pub struct HashPartitionConfig {
+    /// 用于分区的字段名 - 通常是 ID 类字段
+    pub field: String,
+    /// 分区数量 - 建议 2-16,推荐 CPU 核心数或 2 的幂次
+    pub num_partitions: u64,
+}
+
+/// Range 分区配置 - 基于数值范围分区
+///
+/// 将数值字段按范围划分到不同分区,适合时序数据。
+///
+/// # 示例
+/// ```graphql
+/// partitionStrategy: {
+///   range: {
+///     field: "timestamp"
+///     start: 0
+///     step: 86400000  # 1天的毫秒数
+///     numPartitions: 30
+///     parallelism: 2   # 可选,每个范围内2个子分区
+///   }
+/// }
+/// ```
+#[derive(async_graphql::InputObject)]
+pub struct RangePartitionConfig {
+    /// 用于分区的字段名 - 通常是时间戳或递增ID
+    pub field: String,
+    /// 起始值 - 支持负数,默认 0
+    pub start: i64,
+    /// 步长 - 每个分区的范围大小
+    pub step: i64,
+    /// 分区数量
+    pub num_partitions: u64,
+    /// 并行度 - 每个 range 内创建多个子分区以提高并行写入性能。默认 1
+    #[graphql(default = 1)]
+    pub parallelism: u64,
+}
+
+/// DatetimeRange 分区配置 - 时序数据优化分区
+///
+/// 专为时间序列数据设计,按时间粒度自动创建分区。
+///
+/// # 示例
+/// ```graphql
+/// partitionStrategy: {
+///   datetimeRange: {
+///     field: "event_time"
+///     granularity: DAY
+///     timezone: "UTC"       # 可选,默认 UTC
+///     parallelism: 2        # 可选,默认 1
+///   }
+/// }
+/// ```
+#[derive(async_graphql::InputObject)]
+pub struct DatetimeRangePartitionConfig {
+    /// 用于分区的时间字段名 - 必须是 Timestamp 类型
+    pub field: String,
+    /// 时间粒度 - YEAR(2024)/MONTH(202401)/WEEK(2024W01)/DAY(20240101)/HOUR(2024010108)
+    pub granularity: TimeGranularityType,
+    /// 时区 - 支持 "UTC"(默认) 或 "Local"
+    #[graphql(default = "UTC")]
+    pub timezone: String,
+    /// 并行度 - 每个时间段内创建多个子分区以提高并行写入性能。默认 1
+    #[graphql(default = 1)]
+    pub parallelism: u64,
+}
+
+/// Custom 分区配置 - 用户自定义分区逻辑
+///
+/// 允许用户手动管理分区元数据,适合特殊需求。
+///
+/// # 示例
+/// ```graphql
+/// partitionStrategy: {
+///   custom: {
+///     expression: "custom_logic"
+///   }
+/// }
+/// ```
+#[derive(async_graphql::InputObject)]
+pub struct CustomPartitionConfig {
+    /// 自定义分区表达式
+    pub expression: String,
+}
+
+/// None 分区配置 - 无分区(所有数据在单分区)
+///
+/// 适合小表(<100万行),无分区开销。
+///
+/// # 示例
+/// ```graphql
+/// partitionStrategy: {
+///   none: { enabled: true }
+/// }
+/// ```
+#[derive(async_graphql::InputObject)]
+pub struct NonePartitionConfig {
+    /// 是否启用 None 分区 - 必须为 true
+    #[graphql(default = true)]
+    pub enabled: bool,
+}
+
+/// 分区策略配置 (OneofObject)
+///
+/// 使用 GraphQL OneOf 模式,确保只能指定一种分区策略。
+/// 每种策略都有明确的必填字段,避免配置错误。
+///
+/// # MCP 提示
+///
+/// **PKHash 分区(推荐 - 有主键):**
+/// ```graphql
+/// partitionStrategy: {
+///   pkHash: { numPartitions: 4 }
+/// }
+/// ```
+/// - 适合: 有主键的表,自动基于主键哈希分区
+/// - 优点: 配置最简单,数据均衡
+/// - 建议: 分区数 = CPU 核心数 或 2^n
+///
+/// **Hash 分区(推荐 - 无主键):**
+/// ```graphql
+/// partitionStrategy: {
+///   hash: {
+///     field: "user_id"
+///     numPartitions: 8
+///   }
+/// }
+/// ```
+/// - 适合: 无主键,基于某个 ID 字段分区
+/// - 优点: 数据均衡,查询并行度高
+/// - 建议: 选择基数高的字段(如 user_id, order_id)
+///
+/// **Range 分区:**
+/// ```graphql
+/// partitionStrategy: {
+///   range: {
+///     field: "created_at"
+///     start: 1704067200000  # 2024-01-01 00:00:00 UTC
+///     step: 86400000        # 1天
+///     numPartitions: 365
+///     parallelism: 1
+///   }
+/// }
+/// ```
+/// - 适合: 时序数据,需要手动控制范围
+/// - 优点: 范围查询快(WHERE date BETWEEN ...)
+/// - 建议: 按月/周/日划分,根据查询模式调整
+///
+/// **DatetimeRange 分区(时序数据优化):**
+/// ```graphql
+/// partitionStrategy: {
+///   datetimeRange: {
+///     field: "event_time"
+///     granularity: DAY
+///     timezone: "UTC"
+///     parallelism: 2
+///   }
+/// }
+/// ```
+/// - 适合: 时间序列数据(日志、监控、IoT)
+/// - 优点: 按需创建、紧凑命名(20240101)、时区支持
+/// - 粒度: YEAR/MONTH/WEEK/DAY/HOUR
+/// - 建议: 根据数据量选择粒度(大数据量用 HOUR, 小数据量用 DAY/MONTH)
+///
+/// **None 分区(小表):**
+/// ```graphql
+/// partitionStrategy: {
+///   none: {}
+/// }
+/// ```
+/// - 适合: <100万行的表
+/// - 优点: 简单,无分区开销
+#[derive(async_graphql::OneofObject)]
+pub enum PartitionStrategyInput {
+    /// PKHash 分区 - 基于主键哈希,适合有主键的表
+    PkHash(PKHashPartitionConfig),
+    /// Hash 分区 - 基于指定字段哈希,适合 ID 类字段
+    Hash(HashPartitionConfig),
+    /// Range 分区 - 基于数值范围,适合时序数据
+    Range(RangePartitionConfig),
+    /// DatetimeRange 分区 - 时序数据优化,按时间粒度自动创建
+    DatetimeRange(DatetimeRangePartitionConfig),
+    /// Custom 分区 - 用户自定义分区逻辑
+    Custom(CustomPartitionConfig),
+    /// None 分区 - 无分区,所有数据在单分区
+    None(NonePartitionConfig),
+}
 /// 持久化策略配置
 ///
 /// 控制内存段(Segment)何时刷新到磁盘,影响性能和数据持久性。
@@ -399,16 +589,15 @@ pub struct PersistPolicyInput {
 /// - `partition_strategy`: 分区配置（不指定则默认 None）
 /// - `store_source`: 是否存储原始 JSON (默认 true)
 ///
-/// **快速开始模板:**
+/// **快速开始模板 (PKHash 分区):**
 /// ```graphql
 /// mutation {
 ///   createTable(input: {
 ///     name: "users"                          # 表名
 ///     description: "用户信息表"               # 表描述
 ///     primary_key: "user_id"                 # 主键
-///     partitionStrategy: {                   # PKHash 分区
-///       strategyType: PKHASH
-///       numPartitions: 4
+///     partitionStrategy: {                   # PKHash 分区 (最简单)
+///       pkHash: { numPartitions: 4 }
 ///     }
 ///     
 ///     fields: [                              # 字段定义
@@ -439,28 +628,68 @@ pub struct PersistPolicyInput {
 /// }
 /// ```
 ///
-/// **高级配置模板(带分区策略):**
+/// **Hash 分区模板 (无主键表):**
+/// ```graphql
+/// mutation {
+///   createTable(input: {
+///     name: "events"
+///     description: "事件表,按 user_id 哈希分区"
+///     
+///     partitionStrategy: {
+///       hash: {
+///         field: "user_id"      # 分区字段
+///         numPartitions: 8      # 分区数量
+///       }
+///     }
+///     
+///     fields: [...]
+///   }) { name }
+/// }
+/// ```
+///
+/// **时序数据模板 (DatetimeRange 分区):**
+/// ```graphql
+/// mutation {
+///   createTable(input: {
+///     name: "logs"
+///     description: "日志表,按天分区"
+///     primary_key: "log_id"
+///     
+///     partitionStrategy: {
+///       datetimeRange: {
+///         field: "timestamp"       # 时间字段
+///         granularity: DAY         # 按天分区
+///         timezone: "UTC"          # 可选,默认 UTC
+///         parallelism: 2           # 可选,默认 1
+///       }
+///     }
+///     
+///     persist_policy: {
+///       max_docs_per_segment: 500000         # 50万文档持久化
+///       max_segment_age_secs: 600            # 10分钟持久化
+///     }
+///     
+///     fields: [...]
+///   }) { name }
+/// }
+/// ```
+///
+/// **Range 分区模板 (手动控制范围):**
 /// ```graphql
 /// mutation {
 ///   createTable(input: {
 ///     name: "orders"
-///     description: "订单表,按时间范围分区"
+///     description: "订单表,按时间戳范围分区"
 ///     primary_key: "order_id"
 ///     
-///     # 自定义 Range 分区
-///     partition_strategy: {
-///       strategy_type: RANGE
-///       field: "created_at"
-///       ranges: [
-///         { partition_id: 0, start: {int_value: 0}, end: {int_value: 1704067200000} }
-///         { partition_id: 1, start: {int_value: 1704067200000}, end: {int_value: 9999999999999} }
-///       ]
-///     }
-///     
-///     # 持久化策略
-///     persist_policy: {
-///       max_docs_per_segment: 500000         # 50万文档持久化
-///       max_segment_age_secs: 600            # 10分钟持久化
+///     partitionStrategy: {
+///       range: {
+///         field: "created_at"
+///         start: 1704067200000       # 2024-01-01 00:00:00 UTC
+///         step: 86400000             # 1天 (毫秒)
+///         numPartitions: 365         # 365 个分区
+///         parallelism: 1             # 可选,默认 1
+///       }
 ///     }
 ///     
 ///     fields: [...]
@@ -1440,125 +1669,85 @@ impl MutationRoot {
             input.description.clone(),
         );
 
-        // 构建分区策略
-        let (partition_strategy, num_partitions) = if let Some(strategy_input) =
-            input.partition_strategy
-        {
-            match strategy_input.strategy_type {
-                PartitionStrategyType::PKHash => {
-                    let num_partitions = strategy_input.num_partitions.ok_or_else(|| {
-                        async_graphql::Error::new(
-                            "PKHash strategy requires 'num_partitions' parameter",
-                        )
-                    })? as usize;
-
-                    (PartitionStrategy::PKHash { num_partitions }, num_partitions)
-                }
-                PartitionStrategyType::Hash => {
-                    let field = strategy_input.field.ok_or_else(|| {
-                        async_graphql::Error::new("Hash strategy requires 'field' parameter")
-                    })?;
-                    let num_partitions = strategy_input.num_partitions.ok_or_else(|| {
-                        async_graphql::Error::new(
-                            "Hash strategy requires 'num_partitions' parameter",
-                        )
-                    })? as usize;
-
-                    (
-                        PartitionStrategy::Hash {
-                            field,
+        // 构建分区策略 (使用 OneofObject 模式)
+        let (partition_strategy, num_partitions) =
+            if let Some(strategy_input) = input.partition_strategy {
+                match strategy_input {
+                    PartitionStrategyInput::PkHash(config) => {
+                        let num_partitions = config.num_partitions as usize;
+                        (PartitionStrategy::PKHash { num_partitions }, num_partitions)
+                    }
+                    PartitionStrategyInput::Hash(config) => {
+                        let num_partitions = config.num_partitions as usize;
+                        (
+                            PartitionStrategy::Hash {
+                                field: config.field.to_lowercase(), // 自动转换为小写
+                                num_partitions,
+                            },
                             num_partitions,
-                        },
-                        num_partitions,
-                    )
-                }
-                PartitionStrategyType::Range => {
-                    let field = strategy_input.field.ok_or_else(|| {
-                        async_graphql::Error::new("Range strategy requires 'field' parameter")
-                    })?;
-                    let start = strategy_input.range_start.ok_or_else(|| {
-                        async_graphql::Error::new("Range strategy requires 'range_start' parameter")
-                    })?;
-                    let step = strategy_input.range_step.ok_or_else(|| {
-                        async_graphql::Error::new("Range strategy requires 'range_step' parameter")
-                    })?;
-
-                    // 可选的并行度参数
-                    let parallelism = strategy_input.range_parallelism.and_then(|p| {
-                        if p > 1 {
-                            Some(p as usize)
+                        )
+                    }
+                    PartitionStrategyInput::Range(config) => {
+                        // 可选的并行度参数
+                        let parallelism = if config.parallelism > 1 {
+                            Some(config.parallelism as usize)
                         } else {
                             None
-                        }
-                    });
+                        };
 
-                    // Range 分区按需创建,不需要预先指定 num_partitions
-                    (
-                        PartitionStrategy::Range {
-                            field,
-                            start,
-                            step,
-                            parallelism,
-                        },
-                        0,
-                    )
-                }
-                PartitionStrategyType::DatetimeRange => {
-                    use crate::catalog::TimeGranularity;
-
-                    let field = strategy_input.field.ok_or_else(|| {
-                        async_graphql::Error::new(
-                            "DatetimeRange strategy requires 'field' parameter",
+                        // Range 分区按需创建,不需要预先指定 num_partitions
+                        (
+                            PartitionStrategy::Range {
+                                field: config.field.to_lowercase(), // 自动转换为小写
+                                start: config.start,
+                                step: config.step,
+                                parallelism,
+                            },
+                            0,
                         )
-                    })?;
-                    let granularity = match strategy_input.time_granularity.ok_or_else(|| {
-                        async_graphql::Error::new(
-                            "DatetimeRange strategy requires 'time_granularity' parameter",
-                        )
-                    })? {
-                        TimeGranularityType::Year => TimeGranularity::Year,
-                        TimeGranularityType::Month => TimeGranularity::Month,
-                        TimeGranularityType::Week => TimeGranularity::Week,
-                        TimeGranularityType::Day => TimeGranularity::Day,
-                        TimeGranularityType::Hour => TimeGranularity::Hour,
-                    };
+                    }
+                    PartitionStrategyInput::DatetimeRange(config) => {
+                        use crate::catalog::TimeGranularity;
 
-                    // 可选的时区参数
-                    let timezone = strategy_input.timezone;
+                        let granularity = match config.granularity {
+                            TimeGranularityType::Year => TimeGranularity::Year,
+                            TimeGranularityType::Month => TimeGranularity::Month,
+                            TimeGranularityType::Week => TimeGranularity::Week,
+                            TimeGranularityType::Day => TimeGranularity::Day,
+                            TimeGranularityType::Hour => TimeGranularity::Hour,
+                        };
 
-                    // 可选的并行度参数
-                    let parallelism = strategy_input.datetime_parallelism.and_then(|p| {
-                        if p > 1 {
-                            Some(p as usize)
+                        // 可选的并行度参数
+                        let parallelism = if config.parallelism > 1 {
+                            Some(config.parallelism as usize)
                         } else {
                             None
-                        }
-                    });
+                        };
 
-                    // DatetimeRange 分区按需创建,不需要预先指定 num_partitions
-                    (
-                        PartitionStrategy::DatetimeRange {
-                            field,
-                            granularity,
-                            timezone,
-                            parallelism,
-                        },
-                        0,
-                    )
+                        // DatetimeRange 分区按需创建,不需要预先指定 num_partitions
+                        (
+                            PartitionStrategy::DatetimeRange {
+                                field: config.field.to_lowercase(), // 自动转换为小写
+                                granularity,
+                                timezone: Some(config.timezone),
+                                parallelism,
+                            },
+                            0,
+                        )
+                    }
+                    PartitionStrategyInput::Custom(_config) => {
+                        // Custom 分区不需要其他参数
+                        (PartitionStrategy::Custom, 0)
+                    }
+                    PartitionStrategyInput::None(_) => {
+                        // None 分区策略，所有数据在一个 partition
+                        (PartitionStrategy::None, 1)
+                    }
                 }
-                PartitionStrategyType::Custom => {
-                    // Custom 分区不需要其他参数
-                    (PartitionStrategy::Custom, 0)
-                }
-                PartitionStrategyType::None => {
-                    // None 分区策略，所有数据在一个 partition
-                    (PartitionStrategy::None, 1)
-                }
-            }
-        } else {
-            // 未指定分区策略，默认使用 None（无分区）
-            (PartitionStrategy::None, 1)
-        };
+            } else {
+                // 未指定分区策略，默认使用 None（无分区）
+                (PartitionStrategy::None, 1)
+            };
 
         // 创建表
         engine
@@ -1750,12 +1939,29 @@ impl MutationRoot {
                 }
             };
 
+            // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
+            let normalized_data: Vec<serde_json::Value> = input
+                .data
+                .iter()
+                .map(|value| {
+                    if let serde_json::Value::Object(map) = value {
+                        let mut new_map = serde_json::Map::new();
+                        for (key, val) in map {
+                            new_map.insert(key.to_lowercase(), val.clone());
+                        }
+                        serde_json::Value::Object(new_map)
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect();
+
             // 批量插入所有数据到指定分区
             partition
-                .upsert_json(&input.data)
+                .upsert_json(&normalized_data)
                 .map_err(|e| async_graphql::Error::new(format!("Insert failed: {}", e)))?;
 
-            let total_inserted = input.data.len();
+            let total_inserted = normalized_data.len();
 
             return Ok(InsertResult {
                 success: true,
@@ -1768,9 +1974,26 @@ impl MutationRoot {
         }
 
         // 情况 2: 未指定 partition,使用统一路由接口
-        // 将 JSON 数据转换为 RecordBatch
+        // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
+        let normalized_data: Vec<serde_json::Value> = input
+            .data
+            .iter()
+            .map(|value| {
+                if let serde_json::Value::Object(map) = value {
+                    let mut new_map = serde_json::Map::new();
+                    for (key, val) in map {
+                        new_map.insert(key.to_lowercase(), val.clone());
+                    }
+                    serde_json::Value::Object(new_map)
+                } else {
+                    value.clone()
+                }
+            })
+            .collect();
+
+        // 将标准化后的 JSON 数据转换为 RecordBatch
         let batch = crate::utils::arrow_utils::json_to_record_batch(
-            &input.data,
+            &normalized_data,
             meta.schema.to_arrow_schema(),
         )
         .map_err(|e| async_graphql::Error::new(format!("Failed to convert data: {}", e)))?;

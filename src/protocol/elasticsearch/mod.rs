@@ -750,9 +750,25 @@ async fn bulk_operation_impl(
             // 提取文档和ID
             let (doc_ids, docs): (Vec<String>, Vec<Value>) = doc_id_docs.into_iter().unzip();
 
+            // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
+            let normalized_docs: Vec<Value> = docs
+                .into_iter()
+                .map(|value| {
+                    if let Value::Object(map) = value {
+                        let mut new_map = serde_json::Map::new();
+                        for (key, val) in map {
+                            new_map.insert(key.to_lowercase(), val);
+                        }
+                        Value::Object(new_map)
+                    } else {
+                        value
+                    }
+                })
+                .collect();
+
             // 将 JSON 文档转换为 RecordBatch
             let batch = match crate::utils::arrow_utils::json_to_record_batch(
-                &docs,
+                &normalized_docs,
                 table_meta.schema.to_arrow_schema(),
             ) {
                 Ok(b) => b,

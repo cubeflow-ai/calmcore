@@ -37,12 +37,30 @@ impl DatetimeRouter {
     ) -> CoreResult<RoutedBatches> {
         // 1. 提取时间戳字段
         let column = batch.column_by_name(field).ok_or_else(|| {
+            log::error!(
+                "[DatetimeRouter] Field '{}' not found in batch. Available fields: {:?}",
+                field,
+                batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect::<Vec<_>>()
+            );
             CoreError::Internal(format!("Datetime field '{}' not found in batch", field))
         })?;
 
+        log::info!(
+            "[DatetimeRouter] Found column '{}', data_type={:?}, length={}, null_count={}",
+            field,
+            column.data_type(),
+            column.len(),
+            column.null_count()
+        );
+
         // 2. 计算每行的 partition_name
         let partition_names =
-            Self::compute_partition_names(column, granularity, timezone, parallelism)?;
+            Self::compute_partition_names(column, field, granularity, timezone, parallelism)?;
 
         // 3. 按 partition_name 分组
         Self::split_batch_by_names(batch, partition_names)
@@ -51,6 +69,7 @@ impl DatetimeRouter {
     /// 计算每行应该路由到的 partition_name
     fn compute_partition_names(
         column: &Arc<dyn Array>,
+        field: &str,
         granularity: TimeGranularity,
         timezone: Option<String>,
         parallelism: Option<usize>,
@@ -74,11 +93,16 @@ impl DatetimeRouter {
                         (0..array.len())
                             .map(|i| {
                                 if array.is_null(i) {
+                                    log::error!("[DatetimeRouter] Row {} has NULL value in timestamp field '{}' (TimeUnit::Second)", i, field);
                                     Err(CoreError::Internal(
-                                        "Datetime field contains null values".into(),
+                                        format!("Datetime field '{}' contains null value at row {}", field, i)
                                     ))
                                 } else {
-                                    Ok(array.value(i) * 1000) // 秒转毫秒
+                                    let val = array.value(i) * 1000;
+                                    if i < 3 {
+                                        log::debug!("[DatetimeRouter] Row {} timestamp: {} seconds -> {} ms", i, array.value(i), val);
+                                    }
+                                    Ok(val) // 秒转毫秒
                                 }
                             })
                             .collect::<CoreResult<Vec<_>>>()?
@@ -96,11 +120,16 @@ impl DatetimeRouter {
                         (0..array.len())
                             .map(|i| {
                                 if array.is_null(i) {
+                                    log::error!("[DatetimeRouter] Row {} has NULL value in timestamp field '{}' (TimeUnit::Millisecond)", i, field);
                                     Err(CoreError::Internal(
-                                        "Datetime field contains null values".into(),
+                                        format!("Datetime field '{}' contains null value at row {}", field, i)
                                     ))
                                 } else {
-                                    Ok(array.value(i))
+                                    let val = array.value(i);
+                                    if i < 3 {
+                                        log::debug!("[DatetimeRouter] Row {} timestamp: {} ms", i, val);
+                                    }
+                                    Ok(val)
                                 }
                             })
                             .collect::<CoreResult<Vec<_>>>()?
@@ -118,8 +147,9 @@ impl DatetimeRouter {
                         (0..array.len())
                             .map(|i| {
                                 if array.is_null(i) {
+                                    log::error!("[DatetimeRouter] Row {} has NULL value in timestamp field '{}' (TimeUnit::Microsecond)", i, field);
                                     Err(CoreError::Internal(
-                                        "Datetime field contains null values".into(),
+                                        format!("Datetime field '{}' contains null value at row {}", field, i)
                                     ))
                                 } else {
                                     Ok(array.value(i) / 1000) // 微秒转毫秒
@@ -140,8 +170,9 @@ impl DatetimeRouter {
                         (0..array.len())
                             .map(|i| {
                                 if array.is_null(i) {
+                                    log::error!("[DatetimeRouter] Row {} has NULL value in timestamp field '{}' (TimeUnit::Nanosecond)", i, field);
                                     Err(CoreError::Internal(
-                                        "Datetime field contains null values".into(),
+                                        format!("Datetime field '{}' contains null value at row {}", field, i)
                                     ))
                                 } else {
                                     Ok(array.value(i) / 1_000_000) // 纳秒转毫秒

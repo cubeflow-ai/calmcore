@@ -1,0 +1,61 @@
+# 修正后的 GraphQL mutation
+
+mutation {
+  createTable(
+    input: {
+      name: "label_event_v1"
+      fields: [
+        { name: "userbasicinfo_extmap", fieldType: KEYWORD, indexed: false, caseSensitive: false }
+        { name: "appclient_clientname", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "trafficTag_functionId", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "envSetting_timeZone", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "appClient_ip", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "appClient_model", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "traceFrom_preFrom", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "contextSize", fieldType: I32, indexed: true }
+        { name: "action", fieldType: I32, indexed: true }
+        { name: "trafficTag_forcebot", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "trafficTag_trafficName", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "traceFrom_api", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "instanceId", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "trafficTag_requestId", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "trafficTag_trafficId", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "abTag_extMap", fieldType: KEYWORD, indexed: false, caseSensitive: false }
+        { name: "appClient_extMap", fieldType: KEYWORD, indexed: false, caseSensitive: false }
+        { name: "traceFrom_from", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "envSetting_extMap", fieldType: KEYWORD, indexed: false, caseSensitive: false }
+        { name: "traceFrom_requestId", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "abTag_expInfo", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "app", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "envSetting_currency", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "envSetting_language", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "appClient_openudid", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "appClient_clientVersion", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "jdosEnv", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "userBasicInfo_pin", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "ip", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "pfinderTraceId", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "appClient_uuid", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "updateTime", fieldType: TIMESTAMP, indexed: true, format: "milliseconds" }
+        { name: "trafficTag_extMap", fieldType: KEYWORD, indexed: false, caseSensitive: false }
+        { name: "appClient_osVersion", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "traceFrom_sampling", fieldType: BOOLEAN, indexed: true }
+        { name: "appClient_eid", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "appClient_brand", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "appClient_areaParam", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "appClient_appId", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+        { name: "jdosGroup", fieldType: KEYWORD, indexed: true, caseSensitive: false }
+      ]
+      partitionStrategy: {
+        datetimeRange: {
+          field: "updateTime"
+          granularity: DAY
+          parallelism: 2
+        }
+      }
+    }
+  ) {
+    name
+    partitionCount
+  }
+}

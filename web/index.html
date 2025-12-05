@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CalmCore Data Explorer</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #app {
+            display: grid;
+            grid-template-columns: var(--left-width, 250px) 4px 1fr 4px var(--right-width, 350px);
+            grid-template-rows: 60px 1fr 4px var(--bottom-height, 200px);
+            height: 100vh;
+            gap: 0;
+        }
+
+        /* Header */
+        .header {
+            grid-column: 1 / -1;
+            grid-row: 1;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .header .connection-status {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #4ade80;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        /* 分隔条 */
+        .divider-vertical {
+            background: #e2e8f0;
+            cursor: col-resize;
+            transition: background 0.2s;
+            user-select: none;
+        }
+
+        .divider-vertical:hover {
+            background: #cbd5e1;
+        }
+
+        .divider-vertical:active {
+            background: #6366f1;
+        }
+
+        .divider-horizontal {
+            grid-column: 1 / -1;
+            background: #e2e8f0;
+            cursor: row-resize;
+            transition: background 0.2s;
+            user-select: none;
+        }
+
+        .divider-horizontal:hover {
+            background: #cbd5e1;
+        }
+
+        .divider-horizontal:active {
+            background: #6366f1;
+        }
+
+        /* Table List */
+        .table-list {
+            grid-column: 1;
+            grid-row: 2;
+            background: #f8fafc;
+            border-right: 1px solid #e2e8f0;
+            overflow-y: auto;
+        }
+
+        .table-list-header {
+            padding: 15px;
+            background: white;
+            border-bottom: 1px solid #e2e8f0;
+            font-weight: 600;
+            color: #334155;
+        }
+
+        .table-item {
+            padding: 12px 15px;
+            cursor: pointer;
+            border-bottom: 1px solid #e2e8f0;
+            transition: all 0.2s;
+        }
+
+        .table-item:hover {
+            background: #e0e7ff;
+        }
+
+        .table-item.active {
+            background: #6366f1;
+            color: white;
+        }
+
+        .table-name {
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .table-meta {
+            font-size: 12px;
+            color: #64748b;
+        }
+
+        /* Data Show */
+        .data-show {
+            grid-column: 3;
+            grid-row: 2;
+            background: white;
+            overflow: auto;
+            padding: 20px;
+        }
+
+        .data-show-header {
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .data-show-header h2 {
+            font-size: 18px;
+            color: #1e293b;
+        }
+
+        .result-meta {
+            font-size: 14px;
+            color: #64748b;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        .data-table th {
+            background: #f1f5f9;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #475569;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .data-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .data-table tr:hover {
+            background: #f8fafc;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #94a3b8;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        /* AI Chat */
+        .ai-chat {
+            grid-column: 5;
+            grid-row: 2;
+            background: #f8fafc;
+            border-left: 1px solid #e2e8f0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .ai-chat-header {
+            padding: 15px;
+            background: white;
+            border-bottom: 1px solid #e2e8f0;
+            font-weight: 600;
+            color: #334155;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .message-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #6366f1;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+
+        .message.user .message-avatar {
+            background: #10b981;
+        }
+
+        .message-content {
+            background: white;
+            padding: 10px 14px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            flex: 1;
+        }
+
+        .message.user .message-content {
+            background: #dcfce7;
+        }
+
+        .chat-input-area {
+            padding: 15px;
+            background: white;
+            border-top: 1px solid #e2e8f0;
+            flex-shrink: 0;
+        }
+
+        .chat-input {
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-input textarea {
+            flex: 1;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 10px;
+            resize: none;
+            font-family: inherit;
+            font-size: 14px;
+            min-height: 40px;
+            max-height: 120px;
+        }
+
+        .chat-input textarea:focus {
+            outline: none;
+            border-color: #6366f1;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #6366f1;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #4f46e5;
+        }
+
+        .btn-primary:disabled {
+            background: #cbd5e1;
+            cursor: not-allowed;
+        }
+
+        /* Console */
+        .console {
+            grid-column: 1 / -1;
+            grid-row: 4;
+            background: #1e293b;
+            color: #e2e8f0;
+            border-top: 1px solid #334155;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .console-header {
+            padding: 10px 20px;
+            background: #0f172a;
+            border-bottom: 1px solid #334155;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 14px;
+        }
+
+        .console-body {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            padding: 15px 20px;
+        }
+
+        .console-input {
+            width: 100%;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            color: #e2e8f0;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            resize: none;
+            height: calc(100% - 60px);
+            min-height: 60px;
+        }
+
+        .console-input:focus {
+            outline: none;
+            border-color: #6366f1;
+        }
+
+        .console-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+            flex-shrink: 0;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid #e2e8f0;
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <!-- Header -->
+        <div class="header">
+            <h1>🚀 CalmCore Data Explorer</h1>
+            <div class="connection-status">
+                <span class="status-dot"></span>
+                <span>{{ connectionStatus }}</span>
+            </div>
+        </div>
+
+        <!-- Table List -->
+        <div class="table-list">
+            <div class="table-list-header">📋 Tables</div>
+            <div v-if="tables.length === 0" style="padding: 20px; text-align: center; color: #94a3b8;">
+                <div v-if="loading">
+                    <div class="loading" style="margin: 10px auto;"></div>
+                    <div>加载中...</div>
+                </div>
+                <div v-else-if="loadError">
+                    <div style="color: #ef4444; margin-bottom: 10px;">❌ {{ loadError }}</div>
+                    <button class="btn btn-primary" @click="loadTables" style="font-size: 12px; padding: 6px 12px;">
+                        重试
+                    </button>
+                </div>
+                <div v-else>暂无表格</div>
+            </div>
+            <div v-for="table in tables" :key="table.name" class="table-item"
+                :class="{ active: selectedTable === table.name }" @click="selectTable(table.name)">
+                <div class="table-name">{{ table.name }}</div>
+                <div class="table-meta">{{ table.doc_count || 0 }} 条记录</div>
+            </div>
+        </div>
+
+        <!-- 左侧分隔条 -->
+        <div class="divider-vertical" @mousedown="startDrag('left', $event)"></div>
+
+        <!-- Data Show -->
+        <div class="data-show">
+            <div class="data-show-header">
+                <h2>{{ selectedTable || 'Data Preview' }}</h2>
+                <div class="result-meta" v-if="queryResult.rows">
+                    {{ queryResult.rows.length }} 行
+                </div>
+            </div>
+
+            <div v-if="queryResult.rows && queryResult.rows.length > 0">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th v-for="col in queryResult.columns" :key="col">{{ col }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="(row, idx) in queryResult.rows" :key="idx">
+                            <td v-for="col in queryResult.columns" :key="col">
+                                {{ formatValue(row[col]) }}
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div v-else class="empty-state">
+                <div class="empty-state-icon">📊</div>
+                <div>选择表格或输入查询开始探索数据</div>
+            </div>
+        </div>
+
+        <!-- 右侧分隔条 -->
+        <div class="divider-vertical" @mousedown="startDrag('right', $event)"></div>
+
+        <!-- AI Chat -->
+        <div class="ai-chat">
+            <div class="ai-chat-header">💬 AI Assistant</div>
+            <div class="chat-messages" ref="chatMessages">
+                <div v-for="msg in chatHistory" :key="msg.id" :class="['message', msg.role]">
+                    <div class="message-avatar">{{ msg.role === 'user' ? '👤' : '🤖' }}</div>
+                    <div class="message-content">{{ msg.content }}</div>
+                </div>
+                <div v-if="aiThinking" class="message assistant">
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">
+                        <span class="loading"></span> 思考中...
+                    </div>
+                </div>
+            </div>
+            <div class="chat-input-area">
+                <div class="chat-input">
+                    <textarea v-model="userInput" placeholder="输入你的需求，例如：查询所有用户..." rows="2"
+                        @keydown.ctrl.enter="sendMessage"></textarea>
+                    <button class="btn btn-primary" @click="sendMessage" :disabled="!userInput.trim() || aiThinking">
+                        发送
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 底部分隔条 -->
+        <div class="divider-horizontal" @mousedown="startDrag('bottom', $event)"></div>
+
+        <!-- Console -->
+        <div class="console">
+            <div class="console-header">
+                <span>🔧 GraphQL Console</span>
+                <span style="font-size: 12px; color: #94a3b8;">Ctrl+Enter 执行</span>
+            </div>
+            <div class="console-body">
+                <textarea v-model="consoleQuery" class="console-input" placeholder="输入 GraphQL 查询..."
+                    @keydown.ctrl.enter="executeQuery"></textarea>
+                <div class="console-actions">
+                    <button class="btn btn-primary" @click="executeQuery" :disabled="!consoleQuery.trim() || executing">
+                        {{ executing ? '执行中...' : '▶ 执行查询' }}
+                    </button>
+                    <button class="btn" style="background: #334155; color: white;" @click="clearConsole">
+                        清空
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+
+        createApp({
+            data() {
+                return {
+                    connectionStatus: '已连接',
+                    graphqlEndpoint: 'http://localhost:9567/graphql', // CalmCore GraphQL 端点
+
+                    // Tables
+                    tables: [],
+                    selectedTable: null,
+                    loading: false,
+                    loadError: null,
+
+                    // Query Result
+                    queryResult: {},
+
+                    // AI Chat
+                    chatHistory: [
+                        {
+                            id: 1,
+                            role: 'assistant',
+                            content: '你好！我是 AI 助手，可以帮你生成数据查询。试试告诉我：查询用户表前10条数据'
+                        }
+                    ],
+                    userInput: '',
+                    aiThinking: false,
+
+                    // Console
+                    consoleQuery: '',
+                    executing: false,
+
+                    // 拖拽相关
+                    dragging: null,
+                    startX: 0,
+                    startY: 0,
+                    startLeftWidth: 250,
+                    startRightWidth: 350,
+                    startBottomHeight: 200
+                }
+            },
+
+            mounted() {
+                this.loadTables();
+
+                // 添加全局鼠标事件监听
+                document.addEventListener('mousemove', this.onDrag);
+                document.addEventListener('mouseup', this.stopDrag);
+            },
+
+            beforeUnmount() {
+                document.removeEventListener('mousemove', this.onDrag);
+                document.removeEventListener('mouseup', this.stopDrag);
+            },
+
+            methods: {
+                // 开始拖拽
+                startDrag(type, event) {
+                    this.dragging = type;
+                    this.startX = event.clientX;
+                    this.startY = event.clientY;
+
+                    const style = getComputedStyle(document.documentElement);
+                    this.startLeftWidth = parseInt(style.getPropertyValue('--left-width') || '250');
+                    this.startRightWidth = parseInt(style.getPropertyValue('--right-width') || '350');
+                    this.startBottomHeight = parseInt(style.getPropertyValue('--bottom-height') || '200');
+
+                    event.preventDefault();
+                },
+
+                // 拖拽中
+                onDrag(event) {
+                    if (!this.dragging) return;
+
+                    if (this.dragging === 'left') {
+                        const deltaX = event.clientX - this.startX;
+                        const newWidth = Math.max(150, Math.min(600, this.startLeftWidth + deltaX));
+                        document.documentElement.style.setProperty('--left-width', newWidth + 'px');
+                    } else if (this.dragging === 'right') {
+                        const deltaX = event.clientX - this.startX;
+                        const newWidth = Math.max(200, Math.min(800, this.startRightWidth - deltaX));
+                        document.documentElement.style.setProperty('--right-width', newWidth + 'px');
+                    } else if (this.dragging === 'bottom') {
+                        const deltaY = event.clientY - this.startY;
+                        const newHeight = Math.max(100, Math.min(500, this.startBottomHeight - deltaY));
+                        document.documentElement.style.setProperty('--bottom-height', newHeight + 'px');
+                    }
+                },
+
+                // 停止拖拽
+                stopDrag() {
+                    this.dragging = null;
+                },
+
+
+                // 加载表列表
+                async loadTables() {
+                    this.loading = true;
+                    this.loadError = null;
+                    console.log('🔄 开始加载表列表...');
+                    console.log('📍 GraphQL 端点:', this.graphqlEndpoint);
+
+                    try {
+                        // 1. 先获取所有表名
+                        const tablesQuery = `query { tables }`;
+                        console.log('📤 发送查询:', tablesQuery);
+                        const tablesResult = await this.executeGraphQL(tablesQuery);
+                        console.log('📥 收到表名列表:', tablesResult);
+
+                        const tableNames = tablesResult.data.tables || [];
+                        console.log('✅ 找到', tableNames.length, '个表:', tableNames);
+
+                        // 2. 获取每个表的详细信息
+                        this.tables = [];
+                        for (const tableName of tableNames) {
+                            try {
+                                const detailQuery = `
+                                    query {
+                                        tableDetail(name: "${tableName}") {
+                                            name
+                                            totalDocuments
+                                        }
+                                    }
+                                `;
+                                const detailResult = await this.executeGraphQL(detailQuery);
+                                const detail = detailResult.data.tableDetail;
+
+                                this.tables.push({
+                                    name: tableName,
+                                    doc_count: detail?.totalDocuments || 0
+                                });
+                            } catch (error) {
+                                // 如果获取详情失败，至少显示表名
+                                console.warn('获取表详情失败:', tableName, error);
+                                this.tables.push({
+                                    name: tableName,
+                                    doc_count: 0
+                                });
+                            }
+                        }
+
+                        console.log('✅ 加载完成，共', this.tables.length, '个表');
+                        this.connectionStatus = '已连接';
+                    } catch (error) {
+                        console.error('❌ 加载表列表失败:', error);
+                        this.loadError = error.message || '连接失败';
+                        this.connectionStatus = '连接失败';
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                // 选择表
+                selectTable(tableName) {
+                    this.selectedTable = tableName;
+                    const query = `
+                        query {
+                            query(sql: "SELECT * FROM ${tableName} LIMIT 50") {
+                                columns
+                                rows
+                            }
+                        }
+                    `;
+                    this.consoleQuery = query;
+                    this.executeQuery();
+                },
+
+                // 执行 GraphQL 查询
+                async executeGraphQL(query) {
+                    try {
+                        const response = await axios.post(this.graphqlEndpoint, {
+                            query: query
+                        }, {
+                            headers: {
+                                'Content-Type': 'application/json'
+                            }
+                        });
+
+                        if (response.data.errors) {
+                            console.error('GraphQL Errors:', response.data.errors);
+                            throw new Error(response.data.errors[0].message);
+                        }
+
+                        return response.data;
+                    } catch (error) {
+                        if (error.response) {
+                            // 服务器返回错误
+                            throw new Error(`服务器错误 (${error.response.status}): ${error.response.statusText}`);
+                        } else if (error.request) {
+                            // 请求发送但没有响应
+                            throw new Error('无法连接到服务器，请确认服务已启动');
+                        } else {
+                            // 其他错误
+                            throw error;
+                        }
+                    }
+                },
+
+                // 执行控制台查询
+                async executeQuery() {
+                    if (!this.consoleQuery.trim() || this.executing) return;
+
+                    this.executing = true;
+                    try {
+                        const result = await this.executeGraphQL(this.consoleQuery);
+
+                        // 处理结果
+                        if (result.data.query) {
+                            this.queryResult = result.data.query;
+                        } else {
+                            this.queryResult = { rows: [], columns: [] };
+                            alert('查询成功，但没有返回数据');
+                        }
+                    } catch (error) {
+                        alert('查询失败: ' + error.message);
+                    } finally {
+                        this.executing = false;
+                    }
+                },
+
+                // 清空控制台
+                clearConsole() {
+                    this.consoleQuery = '';
+                    this.queryResult = {};
+                },
+
+                // AI 消息发送
+                async sendMessage() {
+                    if (!this.userInput.trim() || this.aiThinking) return;
+
+                    const userMessage = {
+                        id: Date.now(),
+                        role: 'user',
+                        content: this.userInput
+                    };
+                    this.chatHistory.push(userMessage);
+                    this.userInput = '';
+                    this.aiThinking = true;
+
+                    // 滚动到底部
+                    this.$nextTick(() => {
+                        this.$refs.chatMessages.scrollTop = this.$refs.chatMessages.scrollHeight;
+                    });
+
+                    try {
+                        // 模拟 AI 响应（这里你需要调用实际的 AI API）
+                        const aiResponse = await this.getAIResponse(userMessage.content);
+
+                        this.chatHistory.push({
+                            id: Date.now(),
+                            role: 'assistant',
+                            content: aiResponse.message
+                        });
+
+                        // 如果 AI 生成了查询，自动填入控制台
+                        if (aiResponse.query) {
+                            this.consoleQuery = aiResponse.query;
+                        }
+                    } catch (error) {
+                        this.chatHistory.push({
+                            id: Date.now(),
+                            role: 'assistant',
+                            content: '抱歉，我遇到了一些问题: ' + error.message
+                        });
+                    } finally {
+                        this.aiThinking = false;
+                        this.$nextTick(() => {
+                            this.$refs.chatMessages.scrollTop = this.$refs.chatMessages.scrollHeight;
+                        });
+                    }
+                },
+
+                // AI 响应（模拟，需要替换为实际 API）
+                async getAIResponse(userMessage) {
+                    // TODO: 调用 OpenAI API 或其他 AI 服务
+                    // 这里先返回模拟响应
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+
+                    // 简单的关键词匹配生成查询
+                    let query = '';
+                    let message = '';
+
+                    if (userMessage.includes('查询') || userMessage.includes('显示')) {
+                        const tableName = this.tables.length > 0 ? this.tables[0].name : 'users';
+                        query = `query {
+  query(sql: "SELECT * FROM ${tableName} LIMIT 10") {
+    columns
+    rows
+  }
+}`;
+                        message = `好的，我为你生成了查询 ${tableName} 表的 GraphQL 语句，已填入控制台，点击执行即可查看结果。`;
+                    } else {
+                        message = '我可以帮你生成 GraphQL 查询。请告诉我你想查询哪个表的数据？';
+                    }
+
+                    return { message, query };
+                },
+
+                // 格式化值
+                formatValue(value) {
+                    if (value === null || value === undefined) return '-';
+                    if (typeof value === 'object') return JSON.stringify(value);
+                    return String(value);
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+
+</html>
