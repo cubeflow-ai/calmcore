@@ -363,6 +363,25 @@ impl Engine {
                 Ok(PartitionStrategy::format_partition_id(partition_start))
             }
 
+            PartitionStrategy::DatetimeRange { .. } => {
+                // DatetimeRange 分区：期望传入时间戳（毫秒）
+                let timestamp_ms = partition_value.parse::<i64>().map_err(|e| {
+                    CoreError::Internal(format!(
+                        "Failed to parse datetime value '{}' as timestamp: {}",
+                        partition_value, e
+                    ))
+                })?;
+
+                meta.partition_strategy
+                    .calculate_datetime_partition(timestamp_ms)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "Failed to calculate datetime partition for timestamp {}",
+                            timestamp_ms
+                        ))
+                    })
+            }
+
             PartitionStrategy::Custom => {
                 // Custom 分区：用户自定义，直接使用 partition_value 作为 partition_name
                 Ok(partition_value.to_string())

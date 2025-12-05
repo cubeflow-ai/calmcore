@@ -2,7 +2,9 @@
 pub mod schema;
 pub mod table_meta;
 
-pub use table_meta::{PartitionMeta, PartitionStrategy, SegmentInfo, SegmentStatus, TableMeta};
+pub use table_meta::{
+    PartitionMeta, PartitionStrategy, SegmentInfo, SegmentStatus, TableMeta, TimeGranularity,
+};
 
 use crate::utils::error::{CoreError, CoreResult};
 use std::collections::HashMap;

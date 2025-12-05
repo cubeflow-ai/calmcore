@@ -17,7 +17,7 @@ use crate::utils::error::CoreResult;
 use ballista_executor::DataFusionExecutor;
 
 // Re-exports
-pub use sql_normalizer::SqlNormalizer;
+pub use sql_normalizer::{NormalizedSql, PartitionFilters, SqlNormalizer};
 pub use table_provider::{PartitionTableProvider, UnionTableProvider};
 
 /// 查询执行器（路由器）

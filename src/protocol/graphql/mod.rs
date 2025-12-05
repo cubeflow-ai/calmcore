@@ -200,12 +200,38 @@ pub enum PartitionStrategyType {
     PKHash,
     /// 哈希分区 - 基于字段哈希值均匀分布,适合 ID 类字段。需要 field 和 num_partitions
     Hash,
-    /// 范围分区 - 基于字段值范围划分,适合时序数据。需要 field、range_start 和 range_step
+    /// 范围分区 - 基于数值范围划分,适合数值类数据。需要 field、range_start 和 range_step
     Range,
+    /// 时间范围分区 - 专为时序数据优化,按时间粒度划分。需要 field、time_granularity 和可选的 timezone
+    DatetimeRange,
     /// 自定义分区 - 用户手动管理分区元数据,适合特殊需求
     Custom,
     /// 无分区 - 所有数据在单分区,适合小表(<100万行)
     None,
+}
+
+/// 时间分区粒度
+///
+/// 定义时间分区的时间粒度,用于 DatetimeRange 策略。
+///
+/// # 说明
+/// - Year: 按年分区 (格式: 2024)
+/// - Month: 按月分区 (格式: 202401)
+/// - Week: 按周分区,使用 ISO 8601 周编号 (格式: 2024W01)
+/// - Day: 按天分区 (格式: 20240101)
+/// - Hour: 按小时分区 (格式: 2024010108)
+#[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq)]
+pub enum TimeGranularityType {
+    /// 按年分区 - 格式: 2024
+    Year,
+    /// 按月分区 - 格式: 202401
+    Month,
+    /// 按周分区 - 格式: 2024W01 (ISO 8601 周编号)
+    Week,
+    /// 按天分区 - 格式: 20240101
+    Day,
+    /// 按小时分区 - 格式: 2024010108
+    Hour,
 }
 
 /// 分区值枚举(用于 Range 分区)
@@ -270,6 +296,21 @@ pub enum PartitionStrategyType {
 /// - 优点: 范围查询快(WHERE date BETWEEN ...)
 /// - 建议: 按月/周/日划分
 ///
+/// **DatetimeRange 分区(时序数据优化):**
+/// ```graphql
+/// partition_strategy: {
+///   strategy_type: DATETIMERANGE
+///   field: "event_time"           # Timestamp 类型字段
+///   time_granularity: DAY          # 按天分区
+///   timezone: "UTC"                # 可选: UTC 或本地时区
+///   datetime_parallelism: 2        # 可选: 每天创建 2 个并行分区
+/// }
+/// ```
+/// - 适合: 时间序列数据(日志、监控、IoT)
+/// - 优点: 按需创建、紧凑命名(20240101)、时区支持
+/// - 粒度: YEAR/MONTH/WEEK/DAY/HOUR
+/// - 建议: 根据数据量选择粒度(大数据量用 HOUR, 小数据量用 DAY/MONTH)
+///
 /// **None 分区(小表):**
 /// ```graphql
 /// partition_strategy: {
@@ -281,10 +322,10 @@ pub enum PartitionStrategyType {
 /// - 优点: 简单,无分区开销
 #[derive(async_graphql::InputObject)]
 pub struct PartitionStrategyInput {
-    /// 分区策略类型 - PKHASH(主键), HASH(无主键), RANGE(时序), CUSTOM(高级), NONE(小表)
+    /// 分区策略类型 - PKHASH(主键), HASH(无主键), RANGE(旰值范围), DATETIMERANGE(时序优化), CUSTOM(高级), NONE(小表)
     pub strategy_type: PartitionStrategyType,
 
-    /// 分区字段名 - Hash/Range 策略必需。通常选择主键(Hash)或时间戳(Range)
+    /// 分区字段名 - Hash/Range/DatetimeRange 策略必需。Hash:主键, Range:数值, DatetimeRange:Timestamp类型
     pub field: Option<String>,
 
     /// 分区数量 - PKHash/Hash 策略必需。建议 2-16,推荐 CPU 核心数或 2 的幂次
@@ -299,6 +340,16 @@ pub struct PartitionStrategyInput {
     /// Range 并行度 - Range 策略可选。每个 range 内创建多个子分区以提高并行写入性能
     /// 例如: parallelism=2 会创建 partition_xxx_0 和 partition_xxx_1
     pub range_parallelism: Option<u64>,
+
+    /// 时间粒度 - DatetimeRange 策略必需。可选: YEAR(2024)/MONTH(202401)/WEEK(2024W01)/DAY(20240101)/HOUR(2024010108)
+    pub time_granularity: Option<TimeGranularityType>,
+
+    /// 时区 - DatetimeRange 策略可选。当前支持: "UTC" 或 None(本地时区)。未来将支持 IANA 时区(Asia/Shanghai 等)
+    pub timezone: Option<String>,
+
+    /// 时间并行度 - DatetimeRange 策略可选。每个时间段内创建多个子分区以提高并行写入性能
+    /// 例如: parallelism=2 会创建 partition_20240101_0 和 partition_20240101_1
+    pub datetime_parallelism: Option<u64>,
 }
 
 /// 持久化策略配置
@@ -1447,6 +1498,49 @@ impl MutationRoot {
                             field,
                             start,
                             step,
+                            parallelism,
+                        },
+                        0,
+                    )
+                }
+                PartitionStrategyType::DatetimeRange => {
+                    use crate::catalog::TimeGranularity;
+
+                    let field = strategy_input.field.ok_or_else(|| {
+                        async_graphql::Error::new(
+                            "DatetimeRange strategy requires 'field' parameter",
+                        )
+                    })?;
+                    let granularity = match strategy_input.time_granularity.ok_or_else(|| {
+                        async_graphql::Error::new(
+                            "DatetimeRange strategy requires 'time_granularity' parameter",
+                        )
+                    })? {
+                        TimeGranularityType::Year => TimeGranularity::Year,
+                        TimeGranularityType::Month => TimeGranularity::Month,
+                        TimeGranularityType::Week => TimeGranularity::Week,
+                        TimeGranularityType::Day => TimeGranularity::Day,
+                        TimeGranularityType::Hour => TimeGranularity::Hour,
+                    };
+
+                    // 可选的时区参数
+                    let timezone = strategy_input.timezone;
+
+                    // 可选的并行度参数
+                    let parallelism = strategy_input.datetime_parallelism.and_then(|p| {
+                        if p > 1 {
+                            Some(p as usize)
+                        } else {
+                            None
+                        }
+                    });
+
+                    // DatetimeRange 分区按需创建,不需要预先指定 num_partitions
+                    (
+                        PartitionStrategy::DatetimeRange {
+                            field,
+                            granularity,
+                            timezone,
                             parallelism,
                         },
                         0,

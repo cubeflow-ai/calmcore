@@ -51,7 +51,7 @@ pub enum PartitionStrategy {
         num_partitions: usize,
     },
 
-    /// 范围分区（按需创建，适合时序数据）
+    /// 范围分区（按需创建，适合数值范围数据）
     ///
     /// partition 不会提前创建，插入时按需创建
     /// partition 命名格式：partition_{start:019} 或 partition_{start:019}_{parallelism_index}
@@ -77,6 +77,35 @@ pub enum PartitionStrategy {
         parallelism: Option<usize>,
     },
 
+    /// 时间范围分区（按需创建，专为时序数据优化）
+    ///
+    /// partition 不会提前创建，插入时按需创建
+    /// partition 命名格式：紧凑的数字格式，便于排序和识别
+    ///
+    /// 例如：granularity=Day, timezone=None
+    ///   → partition_20240101 (本地时区 2024-01-01)
+    ///   → partition_20240102 (本地时区 2024-01-02)
+    ///
+    /// 例如：granularity=Hour, timezone=Some("Asia/Shanghai"), parallelism=Some(2)
+    ///   → partition_2024010108_0 (东八区 2024-01-01 08:00, 并行索引 0)
+    ///   → partition_2024010108_1 (东八区 2024-01-01 08:00, 并行索引 1)
+    ///
+    /// 例如：granularity=Month, timezone=Some("UTC")
+    ///   → partition_202401 (UTC 2024-01)
+    ///   → partition_202402 (UTC 2024-02)
+    DatetimeRange {
+        /// 分区字段名（必须是 Timestamp 类型）
+        field: String,
+        /// 时间粒度
+        granularity: TimeGranularity,
+        /// 时区（可选，默认使用机器本地时区）
+        /// 例如："UTC", "Asia/Shanghai", "America/New_York"
+        /// None 表示使用本地时区
+        timezone: Option<String>,
+        /// 并行度（可选，用于提高单个时间段内的写入并行度）
+        parallelism: Option<usize>,
+    },
+
     /// 自定义分区（按需创建）
     ///
     /// partition 不会提前创建
@@ -90,6 +119,26 @@ pub enum PartitionStrategy {
     None,
 }
 
+/// 时间分区粒度
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimeGranularity {
+    /// 按年分区
+    /// 格式：2024
+    Year,
+    /// 按月分区
+    /// 格式：202401
+    Month,
+    /// 按周分区（ISO 8601 周编号）
+    /// 格式：2024W01
+    Week,
+    /// 按天分区
+    /// 格式：20240101
+    Day,
+    /// 按小时分区
+    /// 格式：2024010108
+    Hour,
+}
+
 impl PartitionStrategy {
     /// 获取路由字段名
     pub fn router_field(&self) -> Option<&String> {
@@ -97,6 +146,7 @@ impl PartitionStrategy {
             PartitionStrategy::PKHash { .. } => None, // PKHash 使用主键，由调用方决定
             PartitionStrategy::Hash { field, .. } => Some(field),
             PartitionStrategy::Range { field, .. } => Some(field),
+            PartitionStrategy::DatetimeRange { field, .. } => Some(field),
             PartitionStrategy::Custom => None,
             PartitionStrategy::None => None,
         }
@@ -108,6 +158,7 @@ impl PartitionStrategy {
             PartitionStrategy::PKHash { num_partitions, .. } => Some(*num_partitions),
             PartitionStrategy::Hash { num_partitions, .. } => Some(*num_partitions),
             PartitionStrategy::Range { .. } => None, // 按需创建
+            PartitionStrategy::DatetimeRange { .. } => None, // 按需创建
             PartitionStrategy::Custom => None,       // 按需创建
             PartitionStrategy::None => Some(1),      // 单分区
         }
@@ -142,6 +193,10 @@ impl PartitionStrategy {
                 // Range 分区：按需创建
                 None
             }
+            PartitionStrategy::DatetimeRange { .. } => {
+                // DatetimeRange 分区：按需创建
+                None
+            }
             PartitionStrategy::Custom => {
                 // Custom 分区：按需创建
                 None
@@ -151,6 +206,119 @@ impl PartitionStrategy {
                 Some(vec![format!("{:019}", 0)])
             }
         }
+    }
+
+    /// 根据时间戳计算 DatetimeRange 分区名
+    ///
+    /// # 参数
+    /// - `timestamp_millis`: Unix 时间戳（毫秒）
+    ///
+    /// # 返回
+    /// 分区名，例如：20240101, 2024010108_0 等
+    ///
+    /// # 例子
+    /// - granularity=Day, timezone=None → "20240101"
+    /// - granularity=Hour, timezone=Some("UTC"), parallelism=Some(2) → "2024010108_0" 或 "2024010108_1"
+    pub fn calculate_datetime_partition(&self, timestamp_millis: i64) -> Option<String> {
+        match self {
+            PartitionStrategy::DatetimeRange {
+                granularity,
+                timezone,
+                parallelism,
+                ..
+            } => {
+                use chrono::{Local, TimeZone, Utc};
+
+                // 1. 将毫秒时间戳转换为秒和纳秒
+                let secs = timestamp_millis / 1000;
+                let nsecs = ((timestamp_millis % 1000) * 1_000_000) as u32;
+
+                // 2. 根据时区创建 DateTime
+                let partition_key = if let Some(tz_str) = timezone {
+                    // 使用指定时区（目前只支持 UTC，未来可扩展 chrono-tz）
+                    if tz_str == "UTC" {
+                        let dt = Utc.timestamp_opt(secs, nsecs).single()?;
+                        Self::format_datetime_partition(*granularity, &dt)
+                    } else {
+                        // 暂不支持其他时区，使用本地时区
+                        log::warn!(
+                            "Timezone '{}' not yet supported, using local timezone",
+                            tz_str
+                        );
+                        let dt = Local.timestamp_opt(secs, nsecs).single()?;
+                        Self::format_datetime_partition(*granularity, &dt)
+                    }
+                } else {
+                    // 使用本地时区
+                    let dt = Local.timestamp_opt(secs, nsecs).single()?;
+                    Self::format_datetime_partition(*granularity, &dt)
+                };
+
+                // 3. 处理并行度
+                if let Some(p) = parallelism {
+                    if *p > 1 {
+                        let parallel_idx = Self::hash_for_parallel(timestamp_millis, *p);
+                        return Some(format!("{}_{}", partition_key, parallel_idx));
+                    }
+                }
+
+                Some(partition_key)
+            }
+            _ => None,
+        }
+    }
+
+    /// 格式化时间分区名（紧凑数字格式）
+    fn format_datetime_partition<Tz: chrono::TimeZone>(
+        granularity: TimeGranularity,
+        dt: &chrono::DateTime<Tz>,
+    ) -> String
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        use chrono::{Datelike, Timelike};
+        match granularity {
+            TimeGranularity::Year => {
+                format!("{:04}", dt.year())
+            }
+            TimeGranularity::Month => {
+                format!("{:04}{:02}", dt.year(), dt.month())
+            }
+            TimeGranularity::Week => {
+                // ISO 8601 周编号
+                format!("{:04}W{:02}", dt.iso_week().year(), dt.iso_week().week())
+            }
+            TimeGranularity::Day => {
+                format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day())
+            }
+            TimeGranularity::Hour => {
+                format!(
+                    "{:04}{:02}{:02}{:02}",
+                    dt.year(),
+                    dt.month(),
+                    dt.day(),
+                    dt.hour()
+                )
+            }
+        }
+    }
+
+    /// 根据值计算并行索引（使用哈希）
+    fn hash_for_parallel(value: i64, parallelism: usize) -> usize {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        // 结合时间戳和纳秒来生成随机性
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        now.hash(&mut hasher);
+        value.hash(&mut hasher);
+
+        let hash = hasher.finish();
+        (hash as usize) % parallelism
     }
 
     /// 根据字段值计算 Range 分区名（随机选择并行分区）
@@ -183,21 +351,7 @@ impl PartitionStrategy {
                 // 如果启用了并行度，随机选择一个子分区
                 if let Some(p) = parallelism {
                     if *p > 1 {
-                        // 使用哈希值作为随机源，避免依赖 rand crate
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-
-                        let mut hasher = DefaultHasher::new();
-                        // 结合时间戳和值来生成随机性
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_nanos();
-                        now.hash(&mut hasher);
-                        value.hash(&mut hasher);
-
-                        let hash = hasher.finish();
-                        let parallel_index = (hash as usize) % p;
+                        let parallel_index = Self::hash_for_parallel(value, *p);
                         return Some(format!("{}_{}", base_name, parallel_index));
                     }
                 }

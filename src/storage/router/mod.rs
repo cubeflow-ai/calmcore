@@ -10,10 +10,12 @@ use datafusion::arrow::record_batch::RecordBatch;
 use crate::catalog::{PartitionStrategy, TableMeta};
 use crate::utils::error::CoreResult;
 
+mod datetime_router;
 mod hash_router;
 mod range_router;
 mod utils;
 
+pub use datetime_router::DatetimeRouter;
 pub use hash_router::HashRouter;
 pub use range_router::RangeRouter;
 pub use utils::{compute_hash_indices, split_batch_by_indices, take_rows};
@@ -49,6 +51,14 @@ impl Router {
                 step,
                 parallelism,
             } => RangeRouter::route(batch, field, *start, *step, *parallelism),
+
+            PartitionStrategy::DatetimeRange {
+                field,
+                granularity,
+                timezone,
+                parallelism,
+                ..
+            } => DatetimeRouter::route(batch, field, *granularity, timezone.clone(), *parallelism),
 
             PartitionStrategy::Custom => Err(crate::utils::error::CoreError::Internal(
                 "Custom partition requires explicit partition_name".into(),

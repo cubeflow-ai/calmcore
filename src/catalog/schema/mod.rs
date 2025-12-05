@@ -3,6 +3,11 @@ pub mod field;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+mod intrnal_field {
+    pub const DOC_ID_FIELD: &str = "_internal_id";
+    pub const PARTITION_FIELD: &str = "_partition";
+}
+
 /// Segment 持久化策略配置
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistPolicy {

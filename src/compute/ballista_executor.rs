@@ -49,20 +49,41 @@ impl DataFusionExecutor {
     pub async fn execute_sql_stream(&self, sql: &str) -> CoreResult<SendableRecordBatchStream> {
         log::info!("🚀 [DataFusion Executor] Executing SQL (stream): {}", sql);
 
-        // 🔧 标准化 SQL
-        let (_statement, normalized_sql) = SqlNormalizer::normalize(sql)?;
+        // 🔧 标准化 SQL 并提取分区过滤条件
+        let normalized = SqlNormalizer::normalize(sql)?;
 
-        if normalized_sql != sql {
-            log::info!("🔄 [SQL Normalized] {} -> {}", sql, normalized_sql);
+        if normalized.rewritten_sql != sql {
+            log::info!(
+                "🔄 [SQL Normalized] {} -> {}",
+                sql,
+                normalized.rewritten_sql
+            );
+        }
+
+        // 🎯 显示分区过滤信息
+        if normalized.partition_filters.has_filter {
+            log::info!("🎯 [Partition Filter] Detected partition conditions");
+            if !normalized.partition_filters.exact_matches.is_empty() {
+                log::info!(
+                    "  Exact matches: {:?}",
+                    normalized.partition_filters.exact_matches
+                );
+            }
+            if !normalized.partition_filters.like_patterns.is_empty() {
+                log::info!(
+                    "  LIKE patterns: {:?}",
+                    normalized.partition_filters.like_patterns
+                );
+            }
         }
 
         // 🗂️ 特殊处理: INFORMATION_SCHEMA 查询
-        let normalized_upper = normalized_sql.to_uppercase();
+        let normalized_upper = normalized.rewritten_sql.to_uppercase();
         if normalized_upper.contains("INFORMATION_SCHEMA") {
             log::info!("🗂️ [INFORMATION_SCHEMA] Detected metadata query");
             return self
                 .information_schema_executor
-                .execute_stream(&normalized_sql)
+                .execute_stream(&normalized.rewritten_sql)
                 .await;
         }
 
@@ -75,7 +96,7 @@ impl DataFusionExecutor {
             // 使用 execute_natural_cursor 获取流式结果
             let stream_result = self
                 .natural_order_executor
-                .execute_natural_cursor(&normalized_sql)
+                .execute_natural_cursor(&normalized.rewritten_sql)
                 .await?;
 
             // 将 mpsc::Receiver<CoreResult<RecordBatch>> 转换为 SendableRecordBatchStream
@@ -111,13 +132,33 @@ impl DataFusionExecutor {
         let ctx = SessionContext::new_with_config(config);
 
         // 提取表名
-        let table_name = self.extract_table_name(&normalized_sql)?;
+        let table_name = self.extract_table_name(&normalized.rewritten_sql)?;
 
-        // 获取 partitions 并注册表
-        let partition_names = self.engine.list_partitions(&table_name).await;
+        // 🎯 根据分区过滤条件确定要扫描的分区
+        let all_partition_names = self.engine.list_partitions(&table_name).await;
+        let target_partition_names = if normalized.partition_filters.has_filter {
+            // 有分区过滤条件，只扫描匹配的分区
+            let matched = normalized
+                .partition_filters
+                .resolve_partitions(&all_partition_names);
+            log::info!(
+                "📂 [Partitions] Scanning {} out of {} partitions (filtered)",
+                matched.len(),
+                all_partition_names.len()
+            );
+            matched
+        } else {
+            // 没有分区过滤条件，扫描所有分区
+            log::info!(
+                "📂 [Partitions] Scanning all {} partitions",
+                all_partition_names.len()
+            );
+            all_partition_names
+        };
+
+        // 获取目标分区对象
         let mut partitions = Vec::new();
-
-        for partition_name in partition_names {
+        for partition_name in target_partition_names {
             if let Some(partition) = self
                 .engine
                 .get_partition(&table_name, &partition_name)
@@ -142,7 +183,7 @@ impl DataFusionExecutor {
 
         // 执行查询，返回 Stream
         let df = ctx
-            .sql(&normalized_sql)
+            .sql(&normalized.rewritten_sql)
             .await
             .map_err(|e| CoreError::Internal(format!("Query execution error: {}", e)))?;
 
