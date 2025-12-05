@@ -50,7 +50,7 @@ impl DatetimeRouter {
             CoreError::Internal(format!("Datetime field '{}' not found in batch", field))
         })?;
 
-        log::info!(
+        log::debug!(
             "[DatetimeRouter] Found column '{}', data_type={:?}, length={}, null_count={}",
             field,
             column.data_type(),

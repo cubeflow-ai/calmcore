@@ -799,7 +799,7 @@ async fn bulk_operation_impl(
                 .await
             {
                 Ok(stats) => {
-                    log::info!(
+                    log::debug!(
                         "✅ Bulk insert: {} rows into {} partitions of '{}'",
                         stats.rows_inserted,
                         stats.partitions_affected,
