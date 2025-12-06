@@ -1,4 +1,5 @@
 use calm::cluster::ClusterConfig;
+use calm::compute::distributed::DistributedConfig;
 use calm::engine::EngineConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -42,6 +43,10 @@ pub struct Config {
     /// 集群配置
     #[serde(default)]
     pub cluster: ClusterSettings,
+
+    /// 分布式查询配置
+    #[serde(default)]
+    pub distributed: DistributedSettings,
 }
 
 /// 日志配置
@@ -169,6 +174,7 @@ impl Default for Config {
             log: LogSettings::default(),
             engine: EngineSettings::default(),
             cluster: ClusterSettings::default(),
+            distributed: DistributedSettings::default(),
         }
     }
 }
@@ -290,6 +296,80 @@ impl Default for ClusterSettings {
             suspect_timeout_secs: default_suspect_timeout_secs(),
             vote_timeout_secs: default_vote_timeout_secs(),
             min_cluster_size: default_min_cluster_size(),
+        }
+    }
+}
+
+/// 分布式查询配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributedSettings {
+    /// 是否启用分布式查询
+    #[serde(default = "default_distributed_enabled")]
+    pub enabled: bool,
+
+    /// 查询超时时间（毫秒）
+    #[serde(default = "default_query_timeout_ms")]
+    pub query_timeout_ms: u64,
+
+    /// Shuffle 缓冲区大小（行数）
+    #[serde(default = "default_shuffle_buffer_size")]
+    pub shuffle_buffer_size: usize,
+
+    /// 最大并发查询数
+    #[serde(default = "default_max_concurrent_queries")]
+    pub max_concurrent_queries: usize,
+
+    /// 节点间通信端口（RPC）
+    #[serde(default = "default_rpc_port")]
+    pub rpc_port: u16,
+
+    /// 连接超时时间（毫秒）
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+
+    /// 请求超时时间（毫秒）
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+}
+
+fn default_distributed_enabled() -> bool {
+    false
+}
+
+fn default_query_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_shuffle_buffer_size() -> usize {
+    10_000
+}
+
+fn default_max_concurrent_queries() -> usize {
+    100
+}
+
+fn default_rpc_port() -> u16 {
+    7947
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_request_timeout_ms() -> u64 {
+    30_000
+}
+
+impl Default for DistributedSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_distributed_enabled(),
+            query_timeout_ms: default_query_timeout_ms(),
+            shuffle_buffer_size: default_shuffle_buffer_size(),
+            max_concurrent_queries: default_max_concurrent_queries(),
+            rpc_port: default_rpc_port(),
+            connect_timeout_ms: default_connect_timeout_ms(),
+            request_timeout_ms: default_request_timeout_ms(),
         }
     }
 }
@@ -538,6 +618,19 @@ impl Config {
             suspect_timeout: Duration::from_secs(self.cluster.suspect_timeout_secs),
             vote_timeout: Duration::from_secs(self.cluster.vote_timeout_secs),
             min_cluster_size: self.cluster.min_cluster_size,
+        }
+    }
+
+    /// 转换为 DistributedConfig
+    pub fn to_distributed_config(&self) -> DistributedConfig {
+        DistributedConfig {
+            enabled: self.distributed.enabled,
+            query_timeout_ms: self.distributed.query_timeout_ms,
+            shuffle_buffer_size: self.distributed.shuffle_buffer_size,
+            max_concurrent_queries: self.distributed.max_concurrent_queries,
+            rpc_port: self.distributed.rpc_port,
+            connect_timeout_ms: self.distributed.connect_timeout_ms,
+            request_timeout_ms: self.distributed.request_timeout_ms,
         }
     }
 

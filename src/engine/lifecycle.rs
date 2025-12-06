@@ -33,6 +33,7 @@ impl Engine {
             persist_tx,
             partition_notify_tx: Arc::new(partition_notify_tx),
             persist_task_handle: persist_task_handle.clone(),
+            distributed_context: Arc::new(tokio::sync::RwLock::new(None)),
         });
 
         // 启动后台持久化任务（需要 Arc<Self>）

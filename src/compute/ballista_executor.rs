@@ -239,8 +239,8 @@ impl DataFusionExecutor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_extract_table_name() {
+    #[tokio::test]
+    async fn test_extract_table_name() {
         use crate::engine::EngineConfig;
         let engine = Engine::new(EngineConfig::default()).unwrap();
         let executor = DataFusionExecutor::new(engine);

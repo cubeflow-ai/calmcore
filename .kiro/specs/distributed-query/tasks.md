@@ -1,0 +1,211 @@
+# Implementation Plan
+
+## Prerequisites
+- 已完成 cluster-management spec 的实现
+- Rust toolchain with async support
+- proptest crate for property-based testing
+
+---
+
+- [x] 1. 创建分布式模块基础结构
+  - [x] 1.1 创建 src/compute/distributed/ 目录和 mod.rs
+    - 定义模块结构
+    - 添加到 src/compute/mod.rs
+    - _Requirements: 9.1_
+  - [x] 1.2 创建配置结构 config.rs
+    - DistributedConfig 结构体
+    - 从 calm.toml 加载配置
+    - _Requirements: 10.1, 10.2, 10.3, 10.4_
+
+- [x] 2. 实现 QueryCoordinator
+  - [x] 2.1 创建 query_coordinator.rs
+    - QueryCoordinator 结构体
+    - 持有 DataFusionExecutor 和 DistributedExecutor
+    - _Requirements: 2.1_
+  - [x] 2.2 实现模式判断逻辑
+    - is_standalone() 检查
+    - 单机模式直接调用 DataFusionExecutor
+    - _Requirements: 1.1, 1.2, 2.1_
+  - [x] 2.3 实现 Partition 分布查询
+    - 调用 PartitionManager 获取拓扑
+    - 分类本地/远程 Partition
+    - _Requirements: 2.2, 2.3, 2.4_
+  - [ ]* 2.4 Write property test for 单机路径不变
+    - **Property 1: 单机模式路径不变**
+    - **Validates: Requirements 1.1, 1.2**
+
+- [x] 3. Checkpoint - 确保单机模式不受影响
+  - 运行现有测试，确保全部通过
+  - 运行性能 benchmark，对比修改前后
+
+- [x] 4. 实现节点间通信
+  - [x] 4.1 创建 node_client.rs
+    - NodeClient 结构体
+    - HTTP 客户端初始化
+    - _Requirements: 3.1_
+  - [x] 4.2 实现查询请求发送
+    - execute_query() 方法
+    - 序列化 SQL 和参数
+    - _Requirements: 3.2_
+  - [x] 4.3 实现结果流式接收
+    - RemoteResultStream 实现
+    - Arrow IPC 反序列化
+    - _Requirements: 3.3_
+  - [x] 4.4 实现连接错误处理
+    - 连接失败返回错误
+    - 自动重连机制
+    - _Requirements: 3.4, 3.5_
+  - [x] 4.5 创建 NodeClientManager
+    - 连接池管理
+    - 按需创建连接
+    - _Requirements: 3.1_
+
+- [x] 5. 实现 Scatter-Gather 查询 (无 GROUP BY)
+  - [x] 5.1 创建 distributed_executor.rs
+    - DistributedExecutor 结构体
+    - 基本框架
+    - _Requirements: 4.1_
+  - [x] 5.2 实现 execute_scatter_gather()
+    - 并行发送查询到各节点
+    - 收集结果流
+    - _Requirements: 4.1, 4.2_
+  - [x] 5.3 实现结果合并
+    - 流式 UNION 多个结果
+    - _Requirements: 7.1_
+  - [x] 5.4 实现 LIMIT/WHERE 下推
+    - 将条件传递给远程节点
+    - _Requirements: 4.3, 4.4_
+  - [ ]* 5.5 Write property test for Scatter-Gather 正确性
+    - **Property 6: Scatter-Gather 结果正确性**
+    - **Validates: Requirements 4.1, 4.2, 7.1**
+
+- [x] 6. Checkpoint - 确保 Scatter-Gather 工作
+  - 测试无 GROUP BY 的分布式查询
+  - 验证结果正确性
+
+- [x] 7. 实现 Shuffle 机制
+  - [x] 7.1 创建 shuffle_stream.rs
+    - ShuffleStream 结构体
+    - 实现 Stream trait
+    - _Requirements: 6.1_
+  - [x] 7.2 实现 Hash 计算
+    - compute_hash() 方法
+    - 支持多列 GROUP BY
+    - _Requirements: 6.3_
+  - [x] 7.3 实现 Batch 分发
+    - distribute_batch() 方法
+    - 按 Hash 分发到本地/远程
+    - _Requirements: 6.3, 6.4, 6.5_
+  - [x] 7.4 实现 EOF 处理
+    - 发送 EOF 信号
+    - 等待所有数据到达
+    - _Requirements: 6.6_
+  - [ ]* 7.5 Write property test for Hash 一致性
+    - **Property 3: Shuffle Hash 一致性**
+    - **Validates: Requirements 5.2, 5.3, 5.4, 6.3**
+  - [ ]* 7.6 Write property test for Shuffle 完整性
+    - **Property 4: Shuffle 完整性**
+    - **Validates: Requirements 6.1, 6.2, 6.4, 6.5**
+
+- [x] 8. 实现 ShuffleExec
+  - [x] 8.1 创建 shuffle_exec.rs
+    - ShuffleExec 结构体
+    - 实现 ExecutionPlan trait
+    - _Requirements: 5.1, 5.2_
+  - [x] 8.2 实现 execute() 方法
+    - 创建 ShuffleStream
+    - 设置远程 channel
+    - _Requirements: 5.3, 5.4_
+  - [x] 8.3 实现远程数据接收
+    - ShuffleReceiverExec 实现
+    - 合并到本地流
+    - _Requirements: 6.4_
+
+- [x] 9. 实现 DistributedTableProvider
+  - [x] 9.1 创建 distributed_table.rs
+    - DistributedTableProvider 结构体
+    - 实现 TableProvider trait
+    - _Requirements: 9.1_
+  - [x] 9.2 实现 scan() 方法
+    - 判断是否需要 Shuffle
+    - 创建对应的执行计划
+    - _Requirements: 5.1, 5.2_
+  - [x] 9.3 实现本地 Partition 扫描
+    - 复用 SegmentScanner
+    - _Requirements: 9.1, 9.2_
+  - [x] 9.4 实现远程 Partition 扫描
+    - 创建 RemoteScanExec
+    - _Requirements: 4.1_
+
+- [x] 10. 实现 GROUP BY 查询完整流程
+  - [x] 10.1 实现 execute_with_shuffle() 方法
+    - 在 DistributedExecutor 中添加 execute_with_shuffle()
+    - 创建 Shuffle 执行计划
+    - 协调各节点执行
+    - 替换当前返回 Notsupport 错误的占位代码
+    - _Requirements: 5.1, 5.2, 5.5_
+  - [x] 10.2 实现结果合并
+    - 直接 UNION (因为 Shuffle 保证不重复)
+    - _Requirements: 7.2_
+  - [x] 10.3 实现 ORDER BY 处理
+    - 合并后排序
+    - _Requirements: 7.3_
+  - [x] 10.4 实现全局 LIMIT
+    - 合并后应用 LIMIT
+    - _Requirements: 7.4_
+  - [ ]* 10.5 Write property test for 聚合结果正确性
+    - **Property 5: 聚合结果正确性**
+    - **Validates: Requirements 5.5, 5.6, 7.2**
+
+- [x] 11. Checkpoint - 确保 Shuffle 工作
+  - 测试 GROUP BY 的分布式查询
+  - 验证 DISTINCT 正确性
+  - 确保所有单元测试通过
+
+- [x] 12. 实现 gRPC 通信层
+  - [x] 12.1 实现 NodeClient 的实际 gRPC 调用
+    - 当前 execute_query() 返回空结果（占位实现）
+    - 实现真正的 gRPC 客户端调用
+    - _Requirements: 3.2, 3.3_
+  - [x] 12.2 实现 Shuffle 数据的网络传输
+    - 实现 send_shuffle_chunk() 的实际网络调用
+    - _Requirements: 6.5_
+  - [x] 12.3 添加 gRPC 服务端点
+    - /query 端点接收查询请求
+    - /shuffle 端点接收 Shuffle 数据
+    - _Requirements: 3.2, 3.3_
+
+- [x] 13. 实现错误处理
+  - [x] 13.1 实现查询取消
+    - 任一节点失败时取消其他节点
+    - _Requirements: 8.1_
+  - [x] 13.2 实现超时处理
+    - 查询超时返回错误
+    - _Requirements: 8.3_
+  - [x] 13.3 实现节点不可达处理
+    - 返回包含节点信息的错误
+    - _Requirements: 8.2_
+  - [x] 13.4 实现 Shuffle 失败处理
+    - 返回 Shuffle 错误
+    - _Requirements: 8.4_
+
+- [x] 14. 集成到主程序
+  - [x] 14.1 修改 main.rs 初始化 QueryCoordinator
+    - 根据配置决定是否启用分布式
+    - 在集群模式下创建 QueryCoordinator.distributed()
+    - 在单机模式下创建 QueryCoordinator.standalone()
+    - _Requirements: 2.1_
+  - [x] 14.2 更新 MySQL 协议处理
+    - 将 QueryCoordinator 传递给 MysqlServer
+    - 使用 QueryCoordinator 执行查询
+    - _Requirements: 2.1_
+  - [x] 14.3 更新 GraphQL 和 Elasticsearch 协议处理
+    - 将 QueryCoordinator 传递给各协议服务器
+    - _Requirements: 2.1_
+
+- [x] 15. Final Checkpoint - 完整测试
+  - 运行所有单元测试
+  - 运行所有 property tests
+  - 运行集成测试
+  - 性能对比测试
+

@@ -33,6 +33,12 @@ pub enum CoreError {
 
     #[error("{0} existed.")]
     Existed(String),
+
+    #[error("network error: {0}")]
+    Network(String),
+
+    #[error("timeout: {0}")]
+    Timeout(String),
 }
 
 impl CoreError {
@@ -48,6 +54,8 @@ impl CoreError {
             CoreError::InvalidParam(_) => 7,
             CoreError::Existed(_) => 8,
             CoreError::EcodeError(_) => 9,
+            CoreError::Network(_) => 10,
+            CoreError::Timeout(_) => 11,
         }
     }
 

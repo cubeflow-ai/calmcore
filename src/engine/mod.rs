@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::catalog::Catalog;
+use crate::cluster::{ClusterManager, PartitionManager};
+use crate::compute::distributed::DistributedConfig;
 use crate::partition::Partition;
 
 // 子模块声明
@@ -27,6 +29,19 @@ pub use config::{EngineConfig, EngineStats, InsertStats};
 
 // 内部使用的类型
 use config::PersistRequest;
+
+/// 分布式上下文
+///
+/// 包含分布式查询所需的组件
+#[derive(Clone)]
+pub struct DistributedContext {
+    /// 集群管理器
+    pub cluster_manager: Arc<ClusterManager>,
+    /// 分区管理器
+    pub partition_manager: Arc<PartitionManager>,
+    /// 分布式配置
+    pub config: DistributedConfig,
+}
 
 /// 核心存储引擎
 ///
@@ -60,4 +75,45 @@ pub struct Engine {
     ///
     /// 用于在停止时等待后台持久化任务完成
     pub(crate) persist_task_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+
+    /// 分布式上下文（可选）
+    ///
+    /// 如果设置，Executor 将使用分布式执行器
+    /// 如果为 None，使用本地 DataFusion 执行器
+    pub(crate) distributed_context: Arc<RwLock<Option<DistributedContext>>>,
+}
+
+impl Engine {
+    /// 设置分布式上下文
+    ///
+    /// 在集群模式下调用此方法，使 Executor 使用分布式执行器
+    pub async fn set_distributed_context(
+        &self,
+        cluster_manager: Arc<ClusterManager>,
+        partition_manager: Arc<PartitionManager>,
+        config: DistributedConfig,
+    ) {
+        let context = DistributedContext {
+            cluster_manager,
+            partition_manager,
+            config,
+        };
+        let mut guard = self.distributed_context.write().await;
+        *guard = Some(context);
+        log::info!("[Engine] Distributed context set, queries will use distributed executor");
+    }
+
+    /// 获取分布式上下文
+    ///
+    /// 返回 None 表示单机模式
+    pub async fn get_distributed_context(&self) -> Option<DistributedContext> {
+        let guard = self.distributed_context.read().await;
+        guard.clone()
+    }
+
+    /// 检查是否为分布式模式
+    pub async fn is_distributed(&self) -> bool {
+        let guard = self.distributed_context.read().await;
+        guard.is_some()
+    }
 }

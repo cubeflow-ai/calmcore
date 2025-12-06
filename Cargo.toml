@@ -51,11 +51,17 @@ unicode-segmentation = "1.11.0"
 # GraphQL
 async-graphql = "7"
 async-graphql-poem = "7"
+
+# gRPC for distributed query
+poem-grpc = "0.4"
+prost = "0.13"
 regex = "1.10"
 chrono = "0.4"
 toml = "0.8"
 bincode = "2.0.1"
 tokio-stream = "0.1.17"
+base64 = "0.22"
+reqwest = { version = "0.12", features = ["json", "stream"] }
 
 [dev-dependencies]
 tempfile = "3.23.0"
