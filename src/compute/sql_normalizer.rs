@@ -201,6 +201,9 @@ impl SqlNormalizer {
                     }
                 }
             }
+            Expr::Nested(inner) => {
+                Self::extract_from_expr(inner, filters);
+            }
             _ => {}
         }
     }
@@ -320,6 +323,14 @@ impl SqlNormalizer {
                     pattern,
                     escape_char,
                     any,
+                }
+            }
+            Expr::Nested(inner) => {
+                let cleaned = Self::remove_partition_expr(*inner);
+                if Self::is_true_value(&cleaned) {
+                    Expr::Value(ValueWithSpan::from(Value::Boolean(true)))
+                } else {
+                    Expr::Nested(Box::new(cleaned))
                 }
             }
             _ => expr,

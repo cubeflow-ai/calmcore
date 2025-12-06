@@ -390,6 +390,415 @@
                 transform: rotate(360deg);
             }
         }
+
+        /* Modal Overlay and Container */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            animation: fadeIn 0.2s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+
+            to {
+                opacity: 1;
+            }
+        }
+
+        .modal {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            animation: slideIn 0.2s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateY(-20px);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
+        .modal-header {
+            padding: 16px 20px;
+            background: #f8fafc;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 {
+            margin: 0;
+            font-size: 18px;
+            color: #1e293b;
+        }
+
+        .modal-body {
+            padding: 20px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .modal-footer {
+            padding: 16px 20px;
+            background: #f8fafc;
+            border-top: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        /* Form Group, Input, Select, Button Styles */
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            color: #374151;
+            margin-bottom: 6px;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #6366f1;
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+
+        .form-group input::placeholder {
+            color: #9ca3af;
+        }
+
+        .form-group input[type="number"] {
+            appearance: textfield;
+            -moz-appearance: textfield;
+        }
+
+        .form-group input[type="number"]::-webkit-outer-spin-button,
+        .form-group input[type="number"]::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        /* Fields List for Table Creation */
+        .fields-list {
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 12px;
+            background: #f8fafc;
+        }
+
+        .field-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 8px;
+            padding: 8px;
+            background: white;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .field-row input,
+        .field-row select {
+            padding: 8px 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .field-row input:focus,
+        .field-row select:focus {
+            outline: none;
+            border-color: #6366f1;
+        }
+
+        /* Button Variants */
+        .btn-icon {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 4px 8px;
+            font-size: 16px;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+
+        .btn-icon:hover {
+            background: rgba(99, 102, 241, 0.1);
+        }
+
+        .btn-close {
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 18px;
+            color: #64748b;
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .btn-close:hover {
+            background: #fee2e2;
+            color: #ef4444;
+        }
+
+        .btn-delete {
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            opacity: 0;
+            transition: all 0.2s;
+            margin-left: 8px;
+        }
+
+        .table-item:hover .btn-delete {
+            opacity: 1;
+        }
+
+        .btn-delete:hover {
+            background: #fee2e2;
+        }
+
+        .btn-icon-small {
+            background: #fee2e2;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            color: #ef4444;
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .btn-icon-small:hover {
+            background: #fecaca;
+        }
+
+        .btn-add-field {
+            background: none;
+            border: 1px dashed #6366f1;
+            color: #6366f1;
+            cursor: pointer;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            width: 100%;
+            transition: all 0.2s;
+        }
+
+        .btn-add-field:hover {
+            background: rgba(99, 102, 241, 0.1);
+        }
+
+        /* Notification/Toast Styles */
+        .notification-container {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            z-index: 2000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .notification {
+            padding: 14px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 280px;
+            max-width: 400px;
+            animation: slideInRight 0.3s ease-out;
+        }
+
+        @keyframes slideInRight {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        .notification.success {
+            background: #dcfce7;
+            border: 1px solid #86efac;
+            color: #166534;
+        }
+
+        .notification.error {
+            background: #fee2e2;
+            border: 1px solid #fca5a5;
+            color: #991b1b;
+        }
+
+        .notification.info {
+            background: #dbeafe;
+            border: 1px solid #93c5fd;
+            color: #1e40af;
+        }
+
+        .notification-icon {
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+
+        .notification-message {
+            flex: 1;
+            font-size: 14px;
+        }
+
+        .notification-close {
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+            opacity: 0.6;
+            padding: 0;
+            transition: opacity 0.2s;
+        }
+
+        .notification-close:hover {
+            opacity: 1;
+        }
+
+        .notification.fade-out {
+            animation: fadeOut 0.3s ease-out forwards;
+        }
+
+        @keyframes fadeOut {
+            from {
+                transform: translateX(0);
+                opacity: 1;
+            }
+
+            to {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+        }
+
+        /* Language Selector Styles for Console */
+        .language-selector {
+            display: flex;
+            gap: 4px;
+            background: #334155;
+            padding: 4px;
+            border-radius: 6px;
+        }
+
+        .language-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.2s;
+            background: transparent;
+            color: #94a3b8;
+        }
+
+        .language-btn:hover {
+            color: #e2e8f0;
+        }
+
+        .language-btn.active {
+            background: #6366f1;
+            color: white;
+        }
+
+        /* Loading Button State */
+        .btn.loading {
+            position: relative;
+            color: transparent;
+        }
+
+        .btn.loading::after {
+            content: '';
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            top: 50%;
+            left: 50%;
+            margin-left: -8px;
+            margin-top: -8px;
+            border: 2px solid #ffffff;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+
+        /* Disabled Button State */
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        /* Partition Strategy Selector */
+        .partition-config {
+            margin-top: 12px;
+            padding: 12px;
+            background: #f1f5f9;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .partition-config .form-group {
+            margin-bottom: 12px;
+        }
+
+        .partition-config .form-group:last-child {
+            margin-bottom: 0;
+        }
     </style>
 </head>
 
@@ -406,7 +815,10 @@
 
         <!-- Table List -->
         <div class="table-list">
-            <div class="table-list-header">📋 Tables</div>
+            <div class="table-list-header">
+                📋 Tables
+                <button class="btn-icon" @click="showCreateTableModal = true" title="创建表">➕</button>
+            </div>
             <div v-if="tables.length === 0" style="padding: 20px; text-align: center; color: #94a3b8;">
                 <div v-if="loading">
                     <div class="loading" style="margin: 10px auto;"></div>
@@ -422,96 +834,293 @@
             </div>
             <div v-for="table in tables" :key="table.name" class="table-item"
                 :class="{ active: selectedTable === table.name }" @click="selectTable(table.name)">
-                <div class="table-name">{{ table.name }}</div>
+                <div class="table-name">
+                    {{ table.name }}
+                    <button class="btn-delete" @click.stop="confirmDeleteTable(table.name)" title="删除表">🗑️</button>
+                </div>
                 <div class="table-meta">{{ table.doc_count || 0 }} 条记录</div>
             </div>
         </div>
 
-        <!-- 左侧分隔条 -->
-        <div class="divider-vertical" @mousedown="startDrag('left', $event)"></div>
-
-        <!-- Data Show -->
-        <div class="data-show">
-            <div class="data-show-header">
-                <h2>{{ selectedTable || 'Data Preview' }}</h2>
-                <div class="result-meta" v-if="queryResult.rows">
-                    {{ queryResult.rows.length }} 行
+        <!-- 创建表弹窗 -->
+        <div class="modal-overlay" v-if="showCreateTableModal" @click.self="showCreateTableModal = false">
+            <div class="modal">
+                <div class="modal-header">
+                    <h3>➕ 创建新表</h3>
+                    <button class="btn-close" @click="showCreateTableModal = false">✕</button>
                 </div>
-            </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>表名 *</label>
+                        <input v-model="newTable.name" placeholder="例如: users" />
+                    </div>
+                    <div class="form-group">
+                        <label>描述</label>
+                        <input v-model="newTable.description" placeholder="表的用途说明" />
+                    </div>
+                    <div class="form-group">
+                        <label>主键字段</label>
+                        <input v-model="newTable.primaryKey" placeholder="例如: id" />
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" v-model="newTable.storeSource" /> 存储原始 JSON
+                        </label>
+                    </div>
 
-            <div v-if="queryResult.rows && queryResult.rows.length > 0">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th v-for="col in queryResult.columns" :key="col">{{ col }}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr v-for="(row, idx) in queryResult.rows" :key="idx">
-                            <td v-for="col in queryResult.columns" :key="col">
-                                {{ formatValue(row[col]) }}
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-            <div v-else class="empty-state">
-                <div class="empty-state-icon">📊</div>
-                <div>选择表格或输入查询开始探索数据</div>
-            </div>
-        </div>
+                    <!-- Partition Strategy Selector -->
+                    <div class="form-group">
+                        <label>分区策略</label>
+                        <select v-model="newTable.partitionStrategy.type">
+                            <option value="NONE">无分区 (None)</option>
+                            <option value="PKHASH">主键哈希 (PKHash)</option>
+                            <option value="HASH">字段哈希 (Hash)</option>
+                            <option value="RANGE">范围分区 (Range)</option>
+                            <option value="DATETIME_RANGE">时间范围 (DatetimeRange)</option>
+                            <option value="CUSTOM">自定义 (Custom)</option>
+                        </select>
+                    </div>
 
-        <!-- 右侧分隔条 -->
-        <div class="divider-vertical" @mousedown="startDrag('right', $event)"></div>
+                    <!-- PKHash Configuration -->
+                    <div class="partition-config" v-if="newTable.partitionStrategy.type === 'PKHASH'">
+                        <div class="form-group">
+                            <label>分区数量</label>
+                            <input v-model.number="newTable.partitionStrategy.pkHashPartitions" type="number" min="1"
+                                max="128" placeholder="4" />
+                        </div>
+                    </div>
 
-        <!-- AI Chat -->
-        <div class="ai-chat">
-            <div class="ai-chat-header">💬 AI Assistant</div>
-            <div class="chat-messages" ref="chatMessages">
-                <div v-for="msg in chatHistory" :key="msg.id" :class="['message', msg.role]">
-                    <div class="message-avatar">{{ msg.role === 'user' ? '👤' : '🤖' }}</div>
-                    <div class="message-content">{{ msg.content }}</div>
-                </div>
-                <div v-if="aiThinking" class="message assistant">
-                    <div class="message-avatar">🤖</div>
-                    <div class="message-content">
-                        <span class="loading"></span> 思考中...
+                    <!-- Hash Configuration -->
+                    <div class="partition-config" v-if="newTable.partitionStrategy.type === 'HASH'">
+                        <div class="form-group">
+                            <label>分区字段</label>
+                            <input v-model="newTable.partitionStrategy.hashField" placeholder="例如: user_id" />
+                        </div>
+                        <div class="form-group">
+                            <label>分区数量</label>
+                            <input v-model.number="newTable.partitionStrategy.hashPartitions" type="number" min="1"
+                                max="128" placeholder="4" />
+                        </div>
+                    </div>
+
+                    <!-- Range Configuration -->
+                    <div class="partition-config" v-if="newTable.partitionStrategy.type === 'RANGE'">
+                        <div class="form-group">
+                            <label>分区字段</label>
+                            <input v-model="newTable.partitionStrategy.rangeField" placeholder="例如: id" />
+                        </div>
+                        <div class="form-group">
+                            <label>起始值</label>
+                            <input v-model.number="newTable.partitionStrategy.rangeStart" type="number"
+                                placeholder="0" />
+                        </div>
+                        <div class="form-group">
+                            <label>步长</label>
+                            <input v-model.number="newTable.partitionStrategy.rangeStep" type="number" min="1"
+                                placeholder="1000000" />
+                        </div>
+                        <div class="form-group">
+                            <label>分区数量</label>
+                            <input v-model.number="newTable.partitionStrategy.rangePartitions" type="number" min="1"
+                                max="128" placeholder="10" />
+                        </div>
+                        <div class="form-group">
+                            <label>并行度</label>
+                            <input v-model.number="newTable.partitionStrategy.rangeParallelism" type="number" min="1"
+                                placeholder="1" />
+                        </div>
+                    </div>
+
+                    <!-- DatetimeRange Configuration -->
+                    <div class="partition-config" v-if="newTable.partitionStrategy.type === 'DATETIME_RANGE'">
+                        <div class="form-group">
+                            <label>时间字段</label>
+                            <input v-model="newTable.partitionStrategy.datetimeField" placeholder="例如: created_at" />
+                        </div>
+                        <div class="form-group">
+                            <label>时间粒度</label>
+                            <select v-model="newTable.partitionStrategy.datetimeGranularity">
+                                <option value="HOUR">小时 (Hour)</option>
+                                <option value="DAY">天 (Day)</option>
+                                <option value="WEEK">周 (Week)</option>
+                                <option value="MONTH">月 (Month)</option>
+                                <option value="YEAR">年 (Year)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>时区</label>
+                            <input v-model="newTable.partitionStrategy.datetimeTimezone" placeholder="UTC" />
+                        </div>
+                        <div class="form-group">
+                            <label>并行度</label>
+                            <input v-model.number="newTable.partitionStrategy.datetimeParallelism" type="number" min="1"
+                                placeholder="1" />
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>字段定义 *</label>
+                        <div class="fields-list">
+                            <div v-for="(field, idx) in newTable.fields" :key="idx" class="field-row">
+                                <input v-model="field.name" placeholder="字段名" style="flex: 2;" />
+                                <select v-model="field.type" style="flex: 1;">
+                                    <option value="KEYWORD">Keyword</option>
+                                    <option value="TEXT">Text</option>
+                                    <option value="I64">I64</option>
+                                    <option value="I32">I32</option>
+                                    <option value="U64">U64</option>
+                                    <option value="F64">F64</option>
+                                    <option value="F32">F32</option>
+                                    <option value="BOOLEAN">Boolean</option>
+                                    <option value="TIMESTAMP">Timestamp</option>
+                                </select>
+                                <label style="display: flex; align-items: center; gap: 4px; font-size: 12px;">
+                                    <input type="checkbox" v-model="field.indexed" /> 索引
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 4px; font-size: 12px;">
+                                    <input type="checkbox" v-model="field.nullable" /> 可空
+                                </label>
+                                <button class="btn-icon-small" @click="removeField(idx)"
+                                    v-if="newTable.fields.length > 1">✕</button>
+                            </div>
+                            <button class="btn-add-field" @click="addField">+ 添加字段</button>
+                        </div>
                     </div>
                 </div>
-            </div>
-            <div class="chat-input-area">
-                <div class="chat-input">
-                    <textarea v-model="userInput" placeholder="输入你的需求，例如：查询所有用户..." rows="2"
-                        @keydown.ctrl.enter="sendMessage"></textarea>
-                    <button class="btn btn-primary" @click="sendMessage" :disabled="!userInput.trim() || aiThinking">
-                        发送
+                <div class="modal-footer">
+                    <button class="btn" style="background: #e2e8f0;" @click="showCreateTableModal = false"
+                        :disabled="creatingTable">取消</button>
+                    <button class="btn btn-primary" @click="createTable"
+                        :disabled="!newTable.name || newTable.fields.length === 0 || creatingTable"
+                        :class="{ loading: creatingTable }">
+                        {{ creatingTable ? '创建中...' : '创建表' }}
                     </button>
                 </div>
             </div>
         </div>
 
-        <!-- 底部分隔条 -->
-        <div class="divider-horizontal" @mousedown="startDrag('bottom', $event)"></div>
-
-        <!-- Console -->
-        <div class="console">
-            <div class="console-header">
-                <span>🔧 GraphQL Console</span>
-                <span style="font-size: 12px; color: #94a3b8;">Ctrl+Enter 执行</span>
+        <!-- Notification Container -->
+        <div class="notification-container">
+            <div v-for="notification in notifications" :key="notification.id"
+                :class="['notification', notification.type]">
+                <span class="notification-icon">
+                    {{ notification.type === 'success' ? '✅' : notification.type === 'error' ? '❌' : 'ℹ️' }}
+                </span>
+                <span class="notification-message">{{ notification.message }}</span>
+                <button class="notification-close" @click="dismissNotification(notification.id)">✕</button>
             </div>
-            <div class="console-body">
-                <textarea v-model="consoleQuery" class="console-input" placeholder="输入 GraphQL 查询..."
-                    @keydown.ctrl.enter="executeQuery"></textarea>
-                <div class="console-actions">
-                    <button class="btn btn-primary" @click="executeQuery" :disabled="!consoleQuery.trim() || executing">
-                        {{ executing ? '执行中...' : '▶ 执行查询' }}
-                    </button>
-                    <button class="btn" style="background: #334155; color: white;" @click="clearConsole">
-                        清空
+        </div>
+
+        <!-- 删除确认弹窗 -->
+        <div class="modal-overlay" v-if="showDeleteConfirm" @click.self="showDeleteConfirm = false">
+            <div class="modal" style="max-width: 400px;">
+                <div class="modal-header">
+                    <h3>⚠️ 确认删除</h3>
+                    <button class="btn-close" @click="showDeleteConfirm = false">✕</button>
+                </div>
+                <div class="modal-body">
+                    <p style="color: #ef4444; margin-bottom: 15px;">
+                        确定要删除表 <strong>{{ tableToDelete }}</strong> 吗？
+                    </p>
+                    <p style="color: #64748b; font-size: 14px;">
+                        此操作不可逆，所有数据将被永久删除！
+                    </p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" style="background: #e2e8f0;" @click="showDeleteConfirm = false">取消</button>
+                    <button class="btn" style="background: #ef4444; color: white;" @click="deleteTable">
+                        确认删除
                     </button>
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- 左侧分隔条 -->
+    <div class="divider-vertical" @mousedown="startDrag('left', $event)"></div>
+
+    <!-- Data Show -->
+    <div class="data-show">
+        <div class="data-show-header">
+            <h2>{{ selectedTable || 'Data Preview' }}</h2>
+            <div class="result-meta" v-if="queryResult.rows">
+                {{ queryResult.rows.length }} 行
+            </div>
+        </div>
+
+        <div v-if="queryResult.rows && queryResult.rows.length > 0">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th v-for="col in queryResult.columns" :key="col">{{ col }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-for="(row, idx) in queryResult.rows" :key="idx">
+                        <td v-for="col in queryResult.columns" :key="col">
+                            {{ formatValue(row[col]) }}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div v-else class="empty-state">
+            <div class="empty-state-icon">📊</div>
+            <div>选择表格或输入查询开始探索数据</div>
+        </div>
+    </div>
+
+    <!-- 右侧分隔条 -->
+    <div class="divider-vertical" @mousedown="startDrag('right', $event)"></div>
+
+    <!-- AI Chat -->
+    <div class="ai-chat">
+        <div class="ai-chat-header">💬 AI Assistant</div>
+        <div class="chat-messages" ref="chatMessages">
+            <div v-for="msg in chatHistory" :key="msg.id" :class="['message', msg.role]">
+                <div class="message-avatar">{{ msg.role === 'user' ? '👤' : '🤖' }}</div>
+                <div class="message-content">{{ msg.content }}</div>
+            </div>
+            <div v-if="aiThinking" class="message assistant">
+                <div class="message-avatar">🤖</div>
+                <div class="message-content">
+                    <span class="loading"></span> 思考中...
+                </div>
+            </div>
+        </div>
+        <div class="chat-input-area">
+            <div class="chat-input">
+                <textarea v-model="userInput" placeholder="输入你的需求，例如：查询所有用户..." rows="2"
+                    @keydown.ctrl.enter="sendMessage"></textarea>
+                <button class="btn btn-primary" @click="sendMessage" :disabled="!userInput.trim() || aiThinking">
+                    发送
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 底部分隔条 -->
+    <div class="divider-horizontal" @mousedown="startDrag('bottom', $event)"></div>
+
+    <!-- Console -->
+    <div class="console">
+        <div class="console-header">
+            <span>🔧 GraphQL Console</span>
+            <span style="font-size: 12px; color: #94a3b8;">Ctrl+Enter 执行</span>
+        </div>
+        <div class="console-body">
+            <textarea v-model="consoleQuery" class="console-input" placeholder="输入 GraphQL 查询..."
+                @keydown.ctrl.enter="executeQuery"></textarea>
+            <div class="console-actions">
+                <button class="btn btn-primary" @click="executeQuery" :disabled="!consoleQuery.trim() || executing">
+                    {{ executing ? '执行中...' : '▶ 执行查询' }}
+                </button>
+                <button class="btn" style="background: #334155; color: white;" @click="clearConsole">
+                    清空
+                </button>
+            </div>
+        </div>
+    </div>
     </div>
 
     <script>
@@ -553,7 +1162,47 @@
                     startY: 0,
                     startLeftWidth: 250,
                     startRightWidth: 350,
-                    startBottomHeight: 200
+                    startBottomHeight: 200,
+
+                    // Create Table Modal
+                    showCreateTableModal: false,
+                    newTable: {
+                        name: '',
+                        description: '',
+                        primaryKey: '',
+                        storeSource: true,
+                        partitionStrategy: {
+                            type: 'NONE',
+                            // PKHash config
+                            pkHashPartitions: 4,
+                            // Hash config
+                            hashField: '',
+                            hashPartitions: 4,
+                            // Range config
+                            rangeField: '',
+                            rangeStart: 0,
+                            rangeStep: 1000000,
+                            rangePartitions: 10,
+                            rangeParallelism: 1,
+                            // DatetimeRange config
+                            datetimeField: '',
+                            datetimeGranularity: 'DAY',
+                            datetimeTimezone: 'UTC',
+                            datetimeParallelism: 1
+                        },
+                        fields: [
+                            { name: '', type: 'KEYWORD', indexed: true, nullable: true }
+                        ]
+                    },
+                    creatingTable: false,
+
+                    // Delete Table Confirmation
+                    showDeleteConfirm: false,
+                    tableToDelete: '',
+                    deletingTable: false,
+
+                    // Notifications
+                    notifications: []
                 }
             },
 
@@ -818,6 +1467,294 @@
                     if (value === null || value === undefined) return '-';
                     if (typeof value === 'object') return JSON.stringify(value);
                     return String(value);
+                },
+
+                // Add a new field to the table definition
+                addField() {
+                    this.newTable.fields.push({
+                        name: '',
+                        type: 'KEYWORD',
+                        indexed: true,
+                        nullable: true
+                    });
+                },
+
+                // Remove a field from the table definition
+                removeField(index) {
+                    if (this.newTable.fields.length > 1) {
+                        this.newTable.fields.splice(index, 1);
+                    }
+                },
+
+                // Reset the new table form to default values
+                resetNewTableForm() {
+                    this.newTable = {
+                        name: '',
+                        description: '',
+                        primaryKey: '',
+                        storeSource: true,
+                        partitionStrategy: {
+                            type: 'NONE',
+                            pkHashPartitions: 4,
+                            hashField: '',
+                            hashPartitions: 4,
+                            rangeField: '',
+                            rangeStart: 0,
+                            rangeStep: 1000000,
+                            rangePartitions: 10,
+                            rangeParallelism: 1,
+                            datetimeField: '',
+                            datetimeGranularity: 'DAY',
+                            datetimeTimezone: 'UTC',
+                            datetimeParallelism: 1
+                        },
+                        fields: [
+                            { name: '', type: 'KEYWORD', indexed: true, nullable: true }
+                        ]
+                    };
+                },
+
+                // Show delete confirmation dialog
+                confirmDeleteTable(tableName) {
+                    this.tableToDelete = tableName;
+                    this.showDeleteConfirm = true;
+                },
+
+                // Escape a string for use in GraphQL
+                escapeGraphQLString(str) {
+                    if (str === null || str === undefined) return '';
+                    return String(str)
+                        .replace(/\\/g, '\\\\')
+                        .replace(/"/g, '\\"')
+                        .replace(/\n/g, '\\n')
+                        .replace(/\r/g, '\\r')
+                        .replace(/\t/g, '\\t');
+                },
+
+                // Build GraphQL mutation string for creating a table
+                // Handles all partition strategy types (PKHash, Hash, Range, DatetimeRange, Custom, None)
+                buildCreateTableMutation(tableConfig) {
+                    const escapedName = this.escapeGraphQLString(tableConfig.name);
+                    const escapedDescription = tableConfig.description
+                        ? `description: "${this.escapeGraphQLString(tableConfig.description)}"`
+                        : '';
+                    const escapedPrimaryKey = tableConfig.primaryKey
+                        ? `primary_key: "${this.escapeGraphQLString(tableConfig.primaryKey)}"`
+                        : '';
+                    const storeSource = tableConfig.storeSource !== undefined
+                        ? `store_source: ${tableConfig.storeSource}`
+                        : '';
+
+                    // Build partition strategy
+                    let partitionStrategyStr = '';
+                    const ps = tableConfig.partitionStrategy;
+
+                    if (ps && ps.type !== 'NONE') {
+                        switch (ps.type) {
+                            case 'PKHASH':
+                                partitionStrategyStr = `partitionStrategy: {
+                                    pkHash: { numPartitions: ${ps.pkHashPartitions || 4} }
+                                }`;
+                                break;
+                            case 'HASH':
+                                partitionStrategyStr = `partitionStrategy: {
+                                    hash: {
+                                        field: "${this.escapeGraphQLString(ps.hashField)}"
+                                        numPartitions: ${ps.hashPartitions || 4}
+                                    }
+                                }`;
+                                break;
+                            case 'RANGE':
+                                partitionStrategyStr = `partitionStrategy: {
+                                    range: {
+                                        field: "${this.escapeGraphQLString(ps.rangeField)}"
+                                        start: ${ps.rangeStart || 0}
+                                        step: ${ps.rangeStep || 1000000}
+                                        numPartitions: ${ps.rangePartitions || 10}
+                                        parallelism: ${ps.rangeParallelism || 1}
+                                    }
+                                }`;
+                                break;
+                            case 'DATETIME_RANGE':
+                                partitionStrategyStr = `partitionStrategy: {
+                                    datetimeRange: {
+                                        field: "${this.escapeGraphQLString(ps.datetimeField)}"
+                                        granularity: ${ps.datetimeGranularity || 'DAY'}
+                                        timezone: "${this.escapeGraphQLString(ps.datetimeTimezone || 'UTC')}"
+                                        parallelism: ${ps.datetimeParallelism || 1}
+                                    }
+                                }`;
+                                break;
+                            case 'CUSTOM':
+                                partitionStrategyStr = `partitionStrategy: {
+                                    custom: { expression: "custom" }
+                                }`;
+                                break;
+                        }
+                    } else {
+                        // None partition strategy
+                        partitionStrategyStr = `partitionStrategy: {
+                            none: { enabled: true }
+                        }`;
+                    }
+
+                    // Build fields array
+                    const fieldsStr = tableConfig.fields
+                        .filter(f => f.name && f.name.trim())
+                        .map(field => {
+                            const parts = [
+                                `name: "${this.escapeGraphQLString(field.name)}"`,
+                                `field_type: ${field.type || 'KEYWORD'}`
+                            ];
+
+                            if (field.indexed !== undefined) {
+                                parts.push(`indexed: ${field.indexed}`);
+                            }
+                            if (field.nullable !== undefined) {
+                                parts.push(`nullable: ${field.nullable}`);
+                            }
+                            if (field.description) {
+                                parts.push(`description: "${this.escapeGraphQLString(field.description)}"`);
+                            }
+
+                            return `{ ${parts.join(', ')} }`;
+                        })
+                        .join('\n                        ');
+
+                    // Build the complete mutation
+                    const inputParts = [
+                        `name: "${escapedName}"`
+                    ];
+
+                    if (escapedDescription) inputParts.push(escapedDescription);
+                    if (escapedPrimaryKey) inputParts.push(escapedPrimaryKey);
+                    if (storeSource) inputParts.push(storeSource);
+                    if (partitionStrategyStr) inputParts.push(partitionStrategyStr);
+                    inputParts.push(`fields: [
+                        ${fieldsStr}
+                    ]`);
+
+                    const mutation = `mutation {
+                    createTable(input: {
+                        ${inputParts.join('\n                        ')}
+                    }) {
+                        name
+                        partition_count
+                        fields {
+                            name
+                            field_type
+                            indexed
+                        }
+                    }
+                }`;
+
+                    return mutation;
+                },
+
+                // Validate table form inputs
+                validateTableForm() {
+                    const errors = [];
+
+                    // Validate table name
+                    if (!this.newTable.name || !this.newTable.name.trim()) {
+                        errors.push('表名不能为空');
+                    } else if (!/^[a-z][a-z0-9_]*$/.test(this.newTable.name.trim())) {
+                        errors.push('表名只能包含小写字母、数字和下划线，且必须以字母开头');
+                    }
+
+                    // Validate fields
+                    const validFields = this.newTable.fields.filter(f => f.name && f.name.trim());
+                    if (validFields.length === 0) {
+                        errors.push('至少需要定义一个字段');
+                    }
+
+                    // Validate field names
+                    for (const field of validFields) {
+                        if (!/^[a-z][a-z0-9_]*$/.test(field.name.trim())) {
+                            errors.push(`字段名 "${field.name}" 只能包含小写字母、数字和下划线，且必须以字母开头`);
+                        }
+                    }
+
+                    // Validate partition strategy specific fields
+                    const ps = this.newTable.partitionStrategy;
+                    if (ps.type === 'HASH' && (!ps.hashField || !ps.hashField.trim())) {
+                        errors.push('Hash 分区策略需要指定分区字段');
+                    }
+                    if (ps.type === 'RANGE' && (!ps.rangeField || !ps.rangeField.trim())) {
+                        errors.push('Range 分区策略需要指定分区字段');
+                    }
+                    if (ps.type === 'DATETIME_RANGE' && (!ps.datetimeField || !ps.datetimeField.trim())) {
+                        errors.push('DatetimeRange 分区策略需要指定时间字段');
+                    }
+
+                    return errors;
+                },
+
+                // Show notification toast
+                showNotification(message, type = 'info') {
+                    const id = Date.now();
+                    this.notifications.push({ id, message, type });
+
+                    // Auto-dismiss after 5 seconds
+                    setTimeout(() => {
+                        this.dismissNotification(id);
+                    }, 5000);
+                },
+
+                // Dismiss a notification
+                dismissNotification(id) {
+                    const index = this.notifications.findIndex(n => n.id === id);
+                    if (index !== -1) {
+                        this.notifications.splice(index, 1);
+                    }
+                },
+
+                // Create table - validates form, sends mutation, handles response
+                async createTable() {
+                    // Validate form inputs
+                    const errors = this.validateTableForm();
+                    if (errors.length > 0) {
+                        this.showNotification(errors.join('\n'), 'error');
+                        return;
+                    }
+
+                    // Prevent duplicate submissions
+                    if (this.creatingTable) return;
+                    this.creatingTable = true;
+
+                    // Store table name before potential reset
+                    const tableName = this.newTable.name.trim();
+
+                    try {
+                        // Build the GraphQL mutation
+                        const mutation = this.buildCreateTableMutation(this.newTable);
+                        console.log('📤 Creating table with mutation:', mutation);
+
+                        // Execute the mutation
+                        const result = await this.executeGraphQL(mutation);
+                        console.log('📥 Create table result:', result);
+
+                        // Success: close modal, refresh table list, show notification
+                        this.showCreateTableModal = false;
+                        this.resetNewTableForm();
+                        await this.loadTables();
+                        this.showNotification(`表 "${tableName}" 创建成功！`, 'success');
+
+                    } catch (error) {
+                        // Error: display error message, keep modal open
+                        console.error('❌ Create table failed:', error);
+                        const errorMessage = error.message || '创建表失败，请重试';
+                        this.showNotification(errorMessage, 'error');
+                    } finally {
+                        this.creatingTable = false;
+                    }
+                },
+
+                // Placeholder for deleteTable - will be implemented in task 3.2
+                async deleteTable() {
+                    // TODO: Implement in task 3.2
+                    console.log('deleteTable called for:', this.tableToDelete);
+                    alert('删除表功能将在后续任务中实现');
                 }
             }
         }).mount('#app');
