@@ -94,8 +94,7 @@ def create_table_graphql(host="127.0.0.1", port=9567):
             name: "taxi_trips"
             primaryKey: "id"
             partitionStrategy: {
-                strategyType: PK_HASH
-                numPartitions: 4
+                pkHash: { numPartitions: 4 }
             }
             fields: [
                 { name: "id", fieldType: KEYWORD, indexed: true }

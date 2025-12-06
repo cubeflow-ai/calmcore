@@ -320,59 +320,118 @@
             cursor: not-allowed;
         }
 
-        /* Console */
+        /* Console - Modern IDE Style */
         .console {
             grid-column: 1 / -1;
             grid-row: 4;
-            background: #1e293b;
+            background: linear-gradient(180deg, #1a1f2e 0%, #151922 100%);
             color: #e2e8f0;
-            border-top: 1px solid #334155;
+            border-top: 2px solid #3b82f6;
             display: flex;
             flex-direction: column;
+            box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.3);
         }
 
         .console-header {
-            padding: 10px 20px;
-            background: #0f172a;
-            border-bottom: 1px solid #334155;
+            padding: 12px 20px;
+            background: linear-gradient(90deg, #1e293b 0%, #0f172a 100%);
+            border-bottom: 1px solid rgba(59, 130, 246, 0.3);
             display: flex;
             justify-content: space-between;
             align-items: center;
             font-size: 14px;
         }
 
+        .console-header>span:first-child {
+            font-weight: 600;
+            color: #60a5fa;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
         .console-body {
             flex: 1;
             display: flex;
-            flex-direction: column;
+            flex-direction: row;
             overflow: hidden;
-            padding: 15px 20px;
+            padding: 12px 16px;
+            gap: 12px;
+        }
+
+        .console-input-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            position: relative;
         }
 
         .console-input {
             width: 100%;
-            background: #0f172a;
-            border: 1px solid #334155;
-            border-radius: 6px;
-            color: #e2e8f0;
-            padding: 10px;
-            font-family: 'Courier New', monospace;
+            flex: 1;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            color: #c9d1d9;
+            padding: 14px 16px;
+            font-family: 'SF Mono', 'Fira Code', 'Monaco', 'Consolas', monospace;
             font-size: 13px;
+            line-height: 1.6;
             resize: none;
-            height: calc(100% - 60px);
-            min-height: 60px;
+            min-height: 80px;
+            transition: border-color 0.2s, box-shadow 0.2s;
         }
 
         .console-input:focus {
             outline: none;
-            border-color: #6366f1;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15), inset 0 0 20px rgba(59, 130, 246, 0.05);
+        }
+
+        .console-input::placeholder {
+            color: #6b7280;
+            font-style: italic;
         }
 
         .console-actions {
             display: flex;
-            gap: 10px;
-            margin-top: 10px;
+            flex-direction: column;
+            gap: 8px;
             flex-shrink: 0;
+            min-width: 120px;
+        }
+
+        .console-actions .btn {
+            width: 100%;
+            padding: 12px 16px;
+            font-size: 13px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .console-actions .btn-primary {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+        }
+
+        .console-actions .btn-primary:hover {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+            transform: translateY(-1px);
+        }
+
+        .console-actions .btn-secondary {
+            background: #374151;
+            color: #d1d5db;
+            border: 1px solid #4b5563;
+        }
+
+        .console-actions .btn-secondary:hover {
+            background: #4b5563;
+            border-color: #6b7280;
         }
 
         .loading {
@@ -729,31 +788,36 @@
         /* Language Selector Styles for Console */
         .language-selector {
             display: flex;
-            gap: 4px;
-            background: #334155;
-            padding: 4px;
-            border-radius: 6px;
+            gap: 2px;
+            background: #0d1117;
+            padding: 3px;
+            border-radius: 8px;
+            border: 1px solid #30363d;
         }
 
         .language-btn {
-            padding: 6px 12px;
+            padding: 8px 16px;
             border: none;
-            border-radius: 4px;
+            border-radius: 6px;
             cursor: pointer;
             font-size: 12px;
-            font-weight: 500;
+            font-weight: 600;
             transition: all 0.2s;
             background: transparent;
-            color: #94a3b8;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
         .language-btn:hover {
-            color: #e2e8f0;
+            color: #c9d1d9;
+            background: rgba(59, 130, 246, 0.1);
         }
 
         .language-btn.active {
-            background: #6366f1;
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
             color: white;
+            box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
         }
 
         /* Loading Button State */
@@ -1027,100 +1091,118 @@
                     </p>
                 </div>
                 <div class="modal-footer">
-                    <button class="btn" style="background: #e2e8f0;" @click="showDeleteConfirm = false">取消</button>
-                    <button class="btn" style="background: #ef4444; color: white;" @click="deleteTable">
-                        确认删除
+                    <button class="btn" style="background: #e2e8f0;" @click="showDeleteConfirm = false"
+                        :disabled="deletingTable">取消</button>
+                    <button class="btn" style="background: #ef4444; color: white;" @click="deleteTable"
+                        :disabled="deletingTable" :class="{ loading: deletingTable }">
+                        {{ deletingTable ? '删除中...' : '确认删除' }}
                     </button>
                 </div>
             </div>
         </div>
-    </div>
 
-    <!-- 左侧分隔条 -->
-    <div class="divider-vertical" @mousedown="startDrag('left', $event)"></div>
+        <!-- 左侧分隔条 -->
+        <div class="divider-vertical" @mousedown="startDrag('left', $event)"></div>
 
-    <!-- Data Show -->
-    <div class="data-show">
-        <div class="data-show-header">
-            <h2>{{ selectedTable || 'Data Preview' }}</h2>
-            <div class="result-meta" v-if="queryResult.rows">
-                {{ queryResult.rows.length }} 行
+        <!-- Data Show -->
+        <div class="data-show">
+            <div class="data-show-header">
+                <h2>{{ selectedTable || 'Data Preview' }}</h2>
+                <div class="result-meta" v-if="queryResult.rows">
+                    {{ queryResult.rows.length }} 行
+                </div>
+            </div>
+
+            <div v-if="queryResult.rows && queryResult.rows.length > 0">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th v-for="col in queryResult.columns" :key="col">{{ col }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="(row, idx) in queryResult.rows" :key="idx">
+                            <td v-for="col in queryResult.columns" :key="col">
+                                {{ formatValue(row[col]) }}
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div v-else class="empty-state">
+                <div class="empty-state-icon">📊</div>
+                <div>选择表格或输入查询开始探索数据</div>
             </div>
         </div>
 
-        <div v-if="queryResult.rows && queryResult.rows.length > 0">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th v-for="col in queryResult.columns" :key="col">{{ col }}</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr v-for="(row, idx) in queryResult.rows" :key="idx">
-                        <td v-for="col in queryResult.columns" :key="col">
-                            {{ formatValue(row[col]) }}
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-        <div v-else class="empty-state">
-            <div class="empty-state-icon">📊</div>
-            <div>选择表格或输入查询开始探索数据</div>
-        </div>
-    </div>
+        <!-- 右侧分隔条 -->
+        <div class="divider-vertical" @mousedown="startDrag('right', $event)"></div>
 
-    <!-- 右侧分隔条 -->
-    <div class="divider-vertical" @mousedown="startDrag('right', $event)"></div>
-
-    <!-- AI Chat -->
-    <div class="ai-chat">
-        <div class="ai-chat-header">💬 AI Assistant</div>
-        <div class="chat-messages" ref="chatMessages">
-            <div v-for="msg in chatHistory" :key="msg.id" :class="['message', msg.role]">
-                <div class="message-avatar">{{ msg.role === 'user' ? '👤' : '🤖' }}</div>
-                <div class="message-content">{{ msg.content }}</div>
+        <!-- AI Chat -->
+        <div class="ai-chat">
+            <div class="ai-chat-header">💬 AI Assistant</div>
+            <div class="chat-messages" ref="chatMessages">
+                <div v-for="msg in chatHistory" :key="msg.id" :class="['message', msg.role]">
+                    <div class="message-avatar">{{ msg.role === 'user' ? '👤' : '🤖' }}</div>
+                    <div class="message-content">{{ msg.content }}</div>
+                </div>
+                <div v-if="aiThinking" class="message assistant">
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-content">
+                        <span class="loading"></span> 思考中...
+                    </div>
+                </div>
             </div>
-            <div v-if="aiThinking" class="message assistant">
-                <div class="message-avatar">🤖</div>
-                <div class="message-content">
-                    <span class="loading"></span> 思考中...
+            <div class="chat-input-area">
+                <div class="chat-input">
+                    <textarea v-model="userInput" placeholder="输入你的需求，例如：查询所有用户..." rows="2"
+                        @keydown.ctrl.enter="sendMessage"></textarea>
+                    <button class="btn btn-primary" @click="sendMessage" :disabled="!userInput.trim() || aiThinking">
+                        发送
+                    </button>
                 </div>
             </div>
         </div>
-        <div class="chat-input-area">
-            <div class="chat-input">
-                <textarea v-model="userInput" placeholder="输入你的需求，例如：查询所有用户..." rows="2"
-                    @keydown.ctrl.enter="sendMessage"></textarea>
-                <button class="btn btn-primary" @click="sendMessage" :disabled="!userInput.trim() || aiThinking">
-                    发送
-                </button>
+
+        <!-- 底部分隔条 -->
+        <div class="divider-horizontal" @mousedown="startDrag('bottom', $event)"></div>
+
+        <!-- Console -->
+        <div class="console">
+            <div class="console-header">
+                <span>
+                    <span style="font-size: 16px;">⚡</span>
+                    {{ consoleLanguage === 'sql' ? 'SQL' : 'GraphQL' }} Console
+                </span>
+                <div class="language-selector">
+                    <button class="language-btn" :class="{ active: consoleLanguage === 'sql' }"
+                        @click="consoleLanguage = 'sql'">SQL</button>
+                    <button class="language-btn" :class="{ active: consoleLanguage === 'graphql' }"
+                        @click="consoleLanguage = 'graphql'">GraphQL</button>
+                </div>
+                <span
+                    style="font-size: 11px; color: #6b7280; background: #1f2937; padding: 4px 10px; border-radius: 4px;">
+                    ⌘ Ctrl+Enter 执行
+                </span>
+            </div>
+            <div class="console-body">
+                <div class="console-input-wrapper">
+                    <textarea v-model="consoleQuery" class="console-input"
+                        :placeholder="consoleLanguage === 'sql' ? '-- 输入 SQL 查询\nSELECT * FROM table_name LIMIT 10' : '# 输入 GraphQL 查询\nquery {\n  tables\n}'"
+                        @keydown.ctrl.enter="executeQuery"></textarea>
+                </div>
+                <div class="console-actions">
+                    <button class="btn btn-primary" @click="executeQuery" :disabled="!consoleQuery.trim() || executing">
+                        <span v-if="!executing">▶</span>
+                        <span v-else class="loading" style="width: 12px; height: 12px;"></span>
+                        {{ executing ? '执行中' : '执行' }}
+                    </button>
+                    <button class="btn btn-secondary" @click="clearConsole">
+                        🗑️ 清空
+                    </button>
+                </div>
             </div>
         </div>
-    </div>
-
-    <!-- 底部分隔条 -->
-    <div class="divider-horizontal" @mousedown="startDrag('bottom', $event)"></div>
-
-    <!-- Console -->
-    <div class="console">
-        <div class="console-header">
-            <span>🔧 GraphQL Console</span>
-            <span style="font-size: 12px; color: #94a3b8;">Ctrl+Enter 执行</span>
-        </div>
-        <div class="console-body">
-            <textarea v-model="consoleQuery" class="console-input" placeholder="输入 GraphQL 查询..."
-                @keydown.ctrl.enter="executeQuery"></textarea>
-            <div class="console-actions">
-                <button class="btn btn-primary" @click="executeQuery" :disabled="!consoleQuery.trim() || executing">
-                    {{ executing ? '执行中...' : '▶ 执行查询' }}
-                </button>
-                <button class="btn" style="background: #334155; color: white;" @click="clearConsole">
-                    清空
-                </button>
-            </div>
-        </div>
-    </div>
     </div>
 
     <script>
@@ -1154,6 +1236,7 @@
 
                     // Console
                     consoleQuery: '',
+                    consoleLanguage: 'graphql',  // 'sql' | 'graphql'
                     executing: false,
 
                     // 拖拽相关
@@ -1319,15 +1402,9 @@
                 // 选择表
                 selectTable(tableName) {
                     this.selectedTable = tableName;
-                    const query = `
-                        query {
-                            query(sql: "SELECT * FROM ${tableName} LIMIT 50") {
-                                columns
-                                rows
-                            }
-                        }
-                    `;
-                    this.consoleQuery = query;
+                    // Use SQL mode for table selection - simpler for users
+                    this.consoleLanguage = 'sql';
+                    this.consoleQuery = `SELECT * FROM ${tableName} LIMIT 50`;
                     this.executeQuery();
                 },
 
@@ -1363,22 +1440,37 @@
                 },
 
                 // 执行控制台查询
+                // Handles both SQL and GraphQL modes based on consoleLanguage
+                // Requirements: 3.2, 3.3, 3.4, 3.5
                 async executeQuery() {
                     if (!this.consoleQuery.trim() || this.executing) return;
 
                     this.executing = true;
                     try {
-                        const result = await this.executeGraphQL(this.consoleQuery);
+                        let queryToExecute;
 
-                        // 处理结果
+                        // Check selected language mode
+                        if (this.consoleLanguage === 'sql') {
+                            // SQL mode: wrap query using wrapSqlInGraphQL
+                            queryToExecute = this.wrapSqlInGraphQL(this.consoleQuery);
+                            console.log('📤 SQL mode - wrapped query:', queryToExecute);
+                        } else {
+                            // GraphQL mode: send query directly
+                            queryToExecute = this.consoleQuery;
+                            console.log('📤 GraphQL mode - direct query:', queryToExecute);
+                        }
+
+                        const result = await this.executeGraphQL(queryToExecute);
+
+                        // 处理结果 - display results in the data preview area
                         if (result.data.query) {
                             this.queryResult = result.data.query;
                         } else {
                             this.queryResult = { rows: [], columns: [] };
-                            alert('查询成功，但没有返回数据');
+                            this.showNotification('查询成功，但没有返回数据', 'info');
                         }
                     } catch (error) {
-                        alert('查询失败: ' + error.message);
+                        this.showNotification('查询失败: ' + error.message, 'error');
                     } finally {
                         this.executing = false;
                     }
@@ -1531,6 +1623,14 @@
                         .replace(/\t/g, '\\t');
                 },
 
+                // Wrap a SQL query in a GraphQL query structure
+                // Escapes the SQL string for GraphQL and wraps it in the query format
+                // Requirements: 3.2
+                wrapSqlInGraphQL(sql) {
+                    const escapedSql = this.escapeGraphQLString(sql);
+                    return `query { query(sql: "${escapedSql}") { columns rows } }`;
+                },
+
                 // Build GraphQL mutation string for creating a table
                 // Handles all partition strategy types (PKHash, Hash, Range, DatetimeRange, Custom, None)
                 buildCreateTableMutation(tableConfig) {
@@ -1538,11 +1638,12 @@
                     const escapedDescription = tableConfig.description
                         ? `description: "${this.escapeGraphQLString(tableConfig.description)}"`
                         : '';
+                    // Note: GraphQL uses camelCase (primaryKey) not snake_case (primary_key)
                     const escapedPrimaryKey = tableConfig.primaryKey
-                        ? `primary_key: "${this.escapeGraphQLString(tableConfig.primaryKey)}"`
+                        ? `primaryKey: "${this.escapeGraphQLString(tableConfig.primaryKey)}"`
                         : '';
                     const storeSource = tableConfig.storeSource !== undefined
-                        ? `store_source: ${tableConfig.storeSource}`
+                        ? `storeSource: ${tableConfig.storeSource}`
                         : '';
 
                     // Build partition strategy
@@ -1604,7 +1705,7 @@
                         .map(field => {
                             const parts = [
                                 `name: "${this.escapeGraphQLString(field.name)}"`,
-                                `field_type: ${field.type || 'KEYWORD'}`
+                                `fieldType: ${field.type || 'KEYWORD'}`
                             ];
 
                             if (field.indexed !== undefined) {
@@ -1639,10 +1740,10 @@
                         ${inputParts.join('\n                        ')}
                     }) {
                         name
-                        partition_count
+                        partitionCount
                         fields {
                             name
-                            field_type
+                            fieldType
                             indexed
                         }
                     }
@@ -1750,11 +1851,49 @@
                     }
                 },
 
-                // Placeholder for deleteTable - will be implemented in task 3.2
+                // Delete table - sends dropTable mutation to GraphQL endpoint
+                // Handles success: close dialog, refresh list, clear selection if needed
+                // Handles error: display error message
+                // Requirements: 2.2, 2.3, 2.4, 2.5, 4.3, 4.4
                 async deleteTable() {
-                    // TODO: Implement in task 3.2
-                    console.log('deleteTable called for:', this.tableToDelete);
-                    alert('删除表功能将在后续任务中实现');
+                    // Prevent duplicate submissions
+                    if (this.deletingTable) return;
+                    this.deletingTable = true;
+
+                    const tableName = this.tableToDelete;
+
+                    try {
+                        // Build the dropTable mutation
+                        const mutation = `mutation {
+                            dropTable(name: "${this.escapeGraphQLString(tableName)}")
+                        }`;
+                        console.log('📤 Deleting table with mutation:', mutation);
+
+                        // Execute the mutation
+                        const result = await this.executeGraphQL(mutation);
+                        console.log('📥 Delete table result:', result);
+
+                        // Success: close dialog, refresh list, show notification
+                        this.showDeleteConfirm = false;
+                        this.tableToDelete = '';
+
+                        // Clear selection if the deleted table was selected (Requirement 2.5)
+                        if (this.selectedTable === tableName) {
+                            this.selectedTable = null;
+                            this.queryResult = {};
+                        }
+
+                        await this.loadTables();
+                        this.showNotification(`表 "${tableName}" 已删除`, 'success');
+
+                    } catch (error) {
+                        // Error: display error message (Requirement 2.4)
+                        console.error('❌ Delete table failed:', error);
+                        const errorMessage = error.message || '删除表失败，请重试';
+                        this.showNotification(errorMessage, 'error');
+                    } finally {
+                        this.deletingTable = false;
+                    }
                 }
             }
         }).mount('#app');

@@ -29,11 +29,12 @@ export function buildCreateTableMutation(tableConfig) {
     const escapedDescription = tableConfig.description
         ? `description: "${escapeGraphQLString(tableConfig.description)}"`
         : '';
+    // Note: GraphQL uses camelCase (primaryKey) not snake_case (primary_key)
     const escapedPrimaryKey = tableConfig.primaryKey
-        ? `primary_key: "${escapeGraphQLString(tableConfig.primaryKey)}"`
+        ? `primaryKey: "${escapeGraphQLString(tableConfig.primaryKey)}"`
         : '';
     const storeSource = tableConfig.storeSource !== undefined
-        ? `store_source: ${tableConfig.storeSource}`
+        ? `storeSource: ${tableConfig.storeSource}`
         : '';
 
     // Build partition strategy
@@ -90,12 +91,13 @@ export function buildCreateTableMutation(tableConfig) {
     }
 
     // Build fields array
+    // Note: GraphQL uses camelCase (fieldType) not snake_case (field_type)
     const fieldsStr = tableConfig.fields
         .filter(f => f.name && f.name.trim())
         .map(field => {
             const parts = [
                 `name: "${escapeGraphQLString(field.name)}"`,
-                `field_type: ${field.type || 'KEYWORD'}`
+                `fieldType: ${field.type || 'KEYWORD'}`
             ];
 
             if (field.indexed !== undefined) {
@@ -130,14 +132,37 @@ export function buildCreateTableMutation(tableConfig) {
                         ${inputParts.join('\n                        ')}
                     }) {
                         name
-                        partition_count
+                        partitionCount
                         fields {
                             name
-                            field_type
+                            fieldType
                             indexed
                         }
                     }
                 }`;
 
     return mutation;
+}
+
+/**
+ * Build GraphQL mutation string for dropping (deleting) a table
+ * @param {string} tableName - The name of the table to drop
+ * @returns {string} - The GraphQL mutation string
+ */
+export function buildDropTableMutation(tableName) {
+    const escapedName = escapeGraphQLString(tableName);
+    return `mutation {
+                            dropTable(name: "${escapedName}")
+                        }`;
+}
+
+/**
+ * Wrap a SQL query in a GraphQL query structure
+ * Escapes the SQL string for GraphQL and wraps it in the query format
+ * @param {string} sql - The SQL query string to wrap
+ * @returns {string} - The GraphQL query string containing the SQL
+ */
+export function wrapSqlInGraphQL(sql) {
+    const escapedSql = escapeGraphQLString(sql);
+    return `query { query(sql: "${escapedSql}") { columns rows } }`;
 }

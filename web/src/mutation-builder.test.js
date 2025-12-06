@@ -6,7 +6,54 @@
 
 import { describe, it, expect } from 'vitest';
 import * as fc from 'fast-check';
-import { buildCreateTableMutation, escapeGraphQLString } from './mutation-builder.js';
+import { buildCreateTableMutation, buildDropTableMutation, escapeGraphQLString } from './mutation-builder.js';
+
+/**
+ * Helper function to check if braces and brackets are balanced in GraphQL,
+ * properly handling string literals (ignoring braces/brackets inside strings)
+ */
+function checkGraphQLBalance(str) {
+    let braceCount = 0;
+    let bracketCount = 0;
+    let inString = false;
+    let i = 0;
+
+    while (i < str.length) {
+        const char = str[i];
+
+        if (inString) {
+            // Handle escape sequences inside strings
+            if (char === '\\' && i + 1 < str.length) {
+                i += 2; // Skip escaped character
+                continue;
+            }
+            if (char === '"') {
+                inString = false;
+            }
+        } else {
+            if (char === '"') {
+                inString = true;
+            } else if (char === '{') {
+                braceCount++;
+            } else if (char === '}') {
+                braceCount--;
+                if (braceCount < 0) return { balanced: false, reason: 'unmatched }' };
+            } else if (char === '[') {
+                bracketCount++;
+            } else if (char === ']') {
+                bracketCount--;
+                if (bracketCount < 0) return { balanced: false, reason: 'unmatched ]' };
+            }
+        }
+        i++;
+    }
+
+    if (inString) return { balanced: false, reason: 'unclosed string' };
+    if (braceCount !== 0) return { balanced: false, reason: `unbalanced braces: ${braceCount}` };
+    if (bracketCount !== 0) return { balanced: false, reason: `unbalanced brackets: ${bracketCount}` };
+
+    return { balanced: true };
+}
 
 // Valid field types in CalmCore GraphQL schema
 const VALID_FIELD_TYPES = ['KEYWORD', 'TEXT', 'I64', 'I32', 'U64', 'F64', 'F32', 'BOOLEAN', 'TIMESTAMP'];
@@ -120,15 +167,10 @@ describe('buildCreateTableMutation', () => {
                 // Check that mutation contains fields array
                 expect(mutation).toContain('fields:');
 
-                // Check balanced braces
-                const openBraces = (mutation.match(/\{/g) || []).length;
-                const closeBraces = (mutation.match(/\}/g) || []).length;
-                expect(openBraces).toBe(closeBraces);
-
-                // Check balanced brackets
-                const openBrackets = (mutation.match(/\[/g) || []).length;
-                const closeBrackets = (mutation.match(/\]/g) || []).length;
-                expect(openBrackets).toBe(closeBrackets);
+                // Check balanced braces and brackets outside of string literals
+                // We need to parse carefully to avoid counting braces/brackets inside strings
+                const balanceCheck = checkGraphQLBalance(mutation);
+                expect(balanceCheck.balanced).toBe(true);
 
                 // Check that partition strategy is included
                 expect(mutation).toContain('partitionStrategy:');
@@ -161,7 +203,7 @@ describe('buildCreateTableMutation', () => {
                 const nonEmptyFields = tableConfig.fields.filter(f => f.name && f.name.trim());
                 for (const field of nonEmptyFields) {
                     expect(mutation).toContain(`name: "${escapeGraphQLString(field.name)}"`);
-                    expect(mutation).toContain(`field_type: ${field.type}`);
+                    expect(mutation).toContain(`fieldType: ${field.type}`);
                 }
 
                 return true;
@@ -187,11 +229,10 @@ describe('buildCreateTableMutation', () => {
                 (tableConfig) => {
                     const mutation = buildCreateTableMutation(tableConfig);
 
-                    // The mutation should not contain unescaped quotes within string values
-                    // (except for the GraphQL syntax quotes)
-                    // Check that the mutation is parseable by verifying balanced quotes
-                    const quoteCount = (mutation.match(/"/g) || []).length;
-                    expect(quoteCount % 2).toBe(0);
+                    // The mutation should be syntactically valid GraphQL
+                    // Use the balance checker which properly handles escaped characters
+                    const balanceCheck = checkGraphQLBalance(mutation);
+                    expect(balanceCheck.balanced).toBe(true);
 
                     return true;
                 }
@@ -215,8 +256,60 @@ describe('buildCreateTableMutation', () => {
 
                 // Primary key should only appear if provided
                 if (tableConfig.primaryKey) {
-                    expect(mutation).toContain('primary_key:');
+                    expect(mutation).toContain('primaryKey:');
                 }
+
+                return true;
+            }),
+            { numRuns: 100 }
+        );
+    });
+});
+
+describe('buildDropTableMutation', () => {
+    /**
+     * Property: For any valid table name, the generated mutation
+     * should be syntactically valid GraphQL for dropping a table.
+     */
+    it('should generate syntactically valid GraphQL mutation for any valid table name', () => {
+        fc.assert(
+            fc.property(validTableName, (tableName) => {
+                const mutation = buildDropTableMutation(tableName);
+
+                // Check that mutation is a non-empty string
+                expect(typeof mutation).toBe('string');
+                expect(mutation.length).toBeGreaterThan(0);
+
+                // Check that mutation starts with 'mutation {'
+                expect(mutation.trim()).toMatch(/^mutation\s*\{/);
+
+                // Check that mutation contains dropTable
+                expect(mutation).toContain('dropTable');
+
+                // Check that mutation contains the table name
+                expect(mutation).toContain(`name: "${escapeGraphQLString(tableName)}"`);
+
+                // Check balanced braces
+                const balanceCheck = checkGraphQLBalance(mutation);
+                expect(balanceCheck.balanced).toBe(true);
+
+                return true;
+            }),
+            { numRuns: 100 }
+        );
+    });
+
+    /**
+     * Property: Mutation should properly escape special characters in table names
+     */
+    it('should properly escape special characters in table names', () => {
+        fc.assert(
+            fc.property(fc.string({ maxLength: 50 }), (tableName) => {
+                const mutation = buildDropTableMutation(tableName);
+
+                // The mutation should be syntactically valid GraphQL
+                const balanceCheck = checkGraphQLBalance(mutation);
+                expect(balanceCheck.balanced).toBe(true);
 
                 return true;
             }),
