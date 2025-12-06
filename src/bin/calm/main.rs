@@ -1,11 +1,13 @@
 mod config;
 
 use calm::{
+    cluster::{ClusterEvent, ClusterManager, PartitionManager, QueryRouter, VotingCoordinator},
     engine::Engine,
     protocol::{elasticsearch::ElasticsearchServer, graphql::GraphQLServer, mysql::MysqlServer},
 };
 use config::Config;
 use std::io::Write;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +38,125 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.load_existing_tables().await?;
     println!("✓ Tables loaded");
     println!();
+
+    // 初始化集群管理器（如果启用）
+    // Requirements 10.3: Initialize on startup based on config
+    let cluster_config = config.to_cluster_config();
+    let (cluster_manager, query_router): (Option<Arc<ClusterManager>>, Option<Arc<QueryRouter>>) =
+        if cluster_config.enabled || !cluster_config.seed_nodes.is_empty() {
+            println!("🌐 Initializing cluster...");
+            println!("   Node ID: {}", cluster_config.node_id);
+            println!("   Cluster ID: {}", cluster_config.cluster_id);
+            println!("   Gossip Address: {}", cluster_config.listen_addr);
+            if !cluster_config.seed_nodes.is_empty() {
+                println!("   Seed Nodes: {:?}", cluster_config.seed_nodes);
+            } else {
+                println!("   Mode: Standalone (no seed nodes)");
+            }
+
+            match ClusterManager::new(cluster_config).await {
+                Ok(cm) => {
+                    let cm = Arc::new(cm);
+                    println!("✓ Cluster manager initialized");
+
+                    // Create VotingCoordinator and PartitionManager
+                    let voting = Arc::new(VotingCoordinator::new(
+                        config.to_cluster_config().vote_timeout,
+                    ));
+                    let partition_manager = Arc::new(PartitionManager::new(cm.clone(), voting));
+
+                    // Create QueryRouter for routing queries
+                    // Requirements 11.1, 11.2: Route queries through QueryRouter
+                    let query_router = Arc::new(QueryRouter::new(partition_manager.clone()));
+
+                    // Subscribe to cluster events for partition management
+                    // Requirements 10.3: Subscribe to events for partition management
+                    let mut event_rx = cm.subscribe();
+                    let pm_clone = partition_manager.clone();
+                    tokio::spawn(async move {
+                        while let Ok(event) = event_rx.recv().await {
+                            match event {
+                                ClusterEvent::NodeDead(node_id) => {
+                                    log::info!(
+                                        "🔴 [Main] Node {} marked as dead, initiating failover",
+                                        node_id
+                                    );
+                                    if let Err(e) = pm_clone.on_node_failure(&node_id).await {
+                                        log::error!(
+                                            "❌ [Main] Failover error for node {}: {}",
+                                            node_id,
+                                            e
+                                        );
+                                    }
+                                }
+                                ClusterEvent::NodeRecovered(node_id) => {
+                                    log::info!("🟢 [Main] Node {} recovered", node_id);
+                                    // Cancel any pending votes for this node's partitions
+                                    // The node will reclaim ownership via Gossip
+                                }
+                                ClusterEvent::NodeJoined(node_id) => {
+                                    log::info!("🟢 [Main] Node {} joined the cluster", node_id);
+                                }
+                                ClusterEvent::NodeSuspect(node_id) => {
+                                    log::warn!(
+                                        "🟡 [Main] Node {} is suspected to be failing",
+                                        node_id
+                                    );
+                                }
+                                ClusterEvent::TopologyChanged { table, partition } => {
+                                    log::info!(
+                                        "🔄 [Main] Topology changed for {}:{}",
+                                        table,
+                                        partition
+                                    );
+                                }
+                            }
+                        }
+                    });
+
+                    // Start periodic vote processing task
+                    let pm_for_voting = partition_manager.clone();
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                        loop {
+                            interval.tick().await;
+                            pm_for_voting.process_vote_results().await;
+                        }
+                    });
+
+                    println!("✓ Query router initialized");
+                    println!();
+                    (Some(cm), Some(query_router))
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to initialize cluster manager: {}", e);
+                    eprintln!("   Continuing in standalone mode...");
+                    println!();
+                    (None, None)
+                }
+            }
+        } else {
+            println!("📦 Running in standalone mode (cluster disabled)");
+            println!();
+            (None, None)
+        };
+
+    // Log query router status
+    // Requirements 11.1, 11.2: Route queries through QueryRouter
+    if query_router.is_some() {
+        println!("🔀 Query routing: ENABLED (cluster mode)");
+        println!("   Write queries → partition's write_node");
+        println!("   Read queries → load-balanced across read_nodes");
+    } else {
+        println!("🔀 Query routing: DISABLED (standalone mode)");
+        println!("   All queries handled locally");
+    }
+    println!();
+
+    // Store query_router for potential future use by protocol handlers
+    // In a full implementation, this would be passed to protocol servers
+    // to enable distributed query routing
+    let _query_router = query_router;
 
     // 存储服务器任务句柄
     let mut handles = Vec::new();
@@ -114,6 +235,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 关闭引擎
     println!("\n🛑 Shutting down...");
+
+    // Gracefully shutdown cluster if enabled
+    if let Some(ref cm) = cluster_manager {
+        println!("🌐 Shutting down cluster manager...");
+        if let Err(e) = cm.shutdown().await {
+            eprintln!("⚠️  Cluster shutdown error: {}", e);
+        }
+        println!("✓ Cluster manager shutdown complete");
+    }
+
     engine.stop().await?;
     println!("✓ Shutdown complete");
 

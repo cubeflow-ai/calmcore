@@ -219,7 +219,7 @@ mod tests {
 
         ctx.report();
 
-        let spans = ctx.spans.read();
+        let spans = ctx.spans.read().unwrap();
         assert_eq!(spans.len(), 2);
         assert!(spans[0].duration.as_millis() >= 10);
         assert!(spans[1].duration.as_millis() >= 5);

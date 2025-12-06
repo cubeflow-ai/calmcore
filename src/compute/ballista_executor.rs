@@ -128,7 +128,7 @@ impl DataFusionExecutor {
         //TODO:ANSJ
 
         // 创建 DataFusion SessionContext
-        let config = SessionConfig::new().with_target_partitions(32);
+        let config = SessionConfig::new().with_target_partitions(1);
         let ctx = SessionContext::new_with_config(config);
 
         // 提取表名
@@ -200,7 +200,7 @@ impl DataFusionExecutor {
     /// 从 SQL 中提取表名 (简化版本)
     fn extract_table_name(&self, sql: &str) -> CoreResult<String> {
         log::debug!("[extract_table_name] Input SQL: {}", sql);
-        
+
         let sql_upper = sql.to_uppercase();
         log::debug!("[extract_table_name] Uppercase SQL: {}", sql_upper);
 
@@ -218,16 +218,20 @@ impl DataFusionExecutor {
                 .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
 
             log::debug!("[extract_table_name] Extracted table name: {}", table_name);
-            
+
             if !table_name.is_empty() {
                 return Ok(table_name.to_string());
             }
         }
 
-        log::error!("[extract_table_name] Could not find FROM clause in SQL: {}", sql);
-        Err(CoreError::InvalidParam(
-            format!("Could not extract table name from SQL: {}", sql),
-        ))
+        log::error!(
+            "[extract_table_name] Could not find FROM clause in SQL: {}",
+            sql
+        );
+        Err(CoreError::InvalidParam(format!(
+            "Could not extract table name from SQL: {}",
+            sql
+        )))
     }
 }
 

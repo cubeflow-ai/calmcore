@@ -319,7 +319,6 @@ mod tests {
                 field: "id".to_string(),
                 num_partitions: 4,
             },
-            4,
         );
 
         catalog.create_table(meta).unwrap();
@@ -327,7 +326,6 @@ mod tests {
         // 验证表存在
         let table = catalog.get_table("test_table").unwrap();
         assert_eq!(table.table_name, "test_table");
-        assert_eq!(table.parallel_workers, 4);
 
         // 验证目录结构
         let table_dir = table.table_dir(&catalog.work_dir);
@@ -335,11 +333,12 @@ mod tests {
         assert!(table_dir.join("meta.json").exists());
 
         // 验证 partition 目录
-        let partitions = table.partition_strategy.generate_partitions(4);
-        for partition_name in partitions {
-            let partition_dir = table.partition_dir_by_name(&catalog.work_dir, &partition_name);
-            assert!(partition_dir.exists());
-            assert!(partition_dir.join("meta.json").exists());
+        if let Some(partitions) = table.partition_strategy.generate_partitions() {
+            for partition_name in partitions {
+                let partition_dir = table.partition_dir_by_name(&catalog.work_dir, &partition_name);
+                assert!(partition_dir.exists());
+                assert!(partition_dir.join("meta.json").exists());
+            }
         }
     }
 }

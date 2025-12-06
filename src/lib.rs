@@ -1,10 +1,10 @@
 pub mod catalog;
+pub mod cluster;
 pub mod compute;
 pub mod engine;
 #[macro_use]
 pub mod utils;
 // pub mod analyzer;  // Temporarily disabled due to missing dependencies
-// mod cluster;
 pub mod protocol;
 pub(crate) mod storage;
 

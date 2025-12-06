@@ -1,0 +1,243 @@
+# Implementation Plan
+
+## Prerequisites
+- Rust toolchain with async support
+- Chitchat crate added to Cargo.toml
+- proptest crate for property-based testing
+
+---
+
+- [x] 1. Set up project structure and dependencies
+  - [x] 1.1 Add required dependencies to Cargo.toml
+    - Add chitchat, uuid, tokio broadcast channel, serde_json
+    - _Requirements: 1.1, 1.2_
+  - [x] 1.2 Update src/cluster/mod.rs module structure
+    - Add voting module, query_router module
+    - Update ClusterConfig with new fields
+    - _Requirements: 10.1, 10.2_
+  - [ ]* 1.3 Write property test for configuration override
+    - **Property 15: Configuration Environment Override**
+    - **Validates: Requirements 10.2**
+
+- [x] 2. Implement core data structures
+  - [x] 2.1 Update NodeInfo struct
+    - Add partition_count, load, memory_usage_bytes fields
+    - Remove epoch field
+    - _Requirements: 2.1, 2.2_
+  - [x] 2.2 Define TableTopology and PartitionTopology structs
+    - TableTopology with partitions HashMap
+    - PartitionTopology with write_node and read_nodes
+    - _Requirements: 4.1, 5.1_
+  - [x] 2.3 Define VoteRound and VoteRecord structs
+    - VoteRound with epoch, proposed_owner, votes, started_at
+    - VoteRecord with voter, epoch, proposed_owner, voted_at
+    - _Requirements: 7.1, 7.3_
+  - [x] 2.4 Define PartitionKey struct
+    - table_name and partition_id fields
+    - Implement Hash, Eq for use as HashMap key
+    - _Requirements: 4.1_
+
+- [x] 3. Implement ClusterManager with Chitchat integration
+  - [x] 3.1 Create ClusterManager struct
+    - Initialize Chitchat with config
+    - Store node_id, nodes map, event channel
+    - _Requirements: 1.1, 1.2_
+  - [x] 3.2 Implement startup logic
+    - No seed nodes → standalone mode (skip Gossip)
+    - With seed nodes → must join cluster, fail on error
+    - _Requirements: 1.1, 1.2, 1.3, 1.4_
+  - [x] 3.3 Implement Gossip KV operations
+    - gossip_set, gossip_get for state propagation
+    - _Requirements: 4.3_
+  - [x] 3.4 Implement node metrics broadcasting
+    - update_my_metrics() to broadcast load, memory, partition_count
+    - _Requirements: 2.1, 2.4_
+  - [x] 3.5 Implement cluster event broadcasting
+    - NodeJoined, NodeSuspect, NodeDead, NodeRecovered, TopologyChanged
+    - Use tokio broadcast channel
+    - _Requirements: 3.4, 12.2_
+  - [ ]* 3.6 Write property test for node metrics consistency
+    - **Property 2: Node Metrics Consistency**
+    - **Validates: Requirements 2.2, 2.3**
+
+- [x] 4. Checkpoint - Ensure cluster formation works
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 5. Implement failure detection integration
+  - [x] 5.1 Subscribe to Chitchat membership changes
+    - Listen for node state transitions from Chitchat
+    - Map to our NodeState enum (Alive, Suspect, Dead)
+    - _Requirements: 3.1, 3.2, 3.3_
+  - [x] 5.2 Implement state transition handling
+    - Alive → Suspect → Dead flow
+    - Dead → Alive recovery
+    - _Requirements: 3.2, 3.3, 3.5_
+  - [x] 5.3 Emit cluster events on state changes
+    - Trigger NodeDead event to start failover
+    - Trigger NodeRecovered to cancel pending votes
+    - _Requirements: 3.4, 12.2_
+  - [ ]* 5.4 Write property test for state machine transitions
+    - **Property 1: Node State Machine Transitions**
+    - **Validates: Requirements 3.2, 3.3, 3.5**
+
+- [x] 6. Implement VotingCoordinator
+  - [x] 6.1 Create VotingCoordinator struct
+    - Store active_rounds HashMap
+    - Configure vote_timeout
+    - _Requirements: 7.1_
+  - [x] 6.2 Implement start_round method
+    - Create VoteRound with epoch=1 (or increment existing)
+    - Store in active_rounds
+    - _Requirements: 7.1_
+  - [x] 6.3 Implement cast_vote method
+    - Create VoteRecord with epoch
+    - Propagate via Gossip KV
+    - _Requirements: 7.3_
+  - [x] 6.4 Implement receive_vote method
+    - Parse incoming votes from Gossip
+    - Add to VoteRound.votes
+    - _Requirements: 7.3_
+  - [x] 6.5 Implement check_quorum method
+    - Filter votes by current epoch
+    - Check if count >= quorum threshold
+    - _Requirements: 7.4, 7.5_
+  - [x] 6.6 Implement timeout handling
+    - check_timeouts() to find expired rounds
+    - handle_timeout() to increment epoch and restart
+    - _Requirements: 7.7_
+  - [x] 6.7 Implement split vote handling
+    - Detect when votes are split with no quorum
+    - Increment epoch and restart
+    - _Requirements: 7.8_
+  - [x] 6.8 Implement vote cleanup
+    - clear_round() after ownership confirmed
+    - Clear old epoch votes when new round starts
+    - _Requirements: 7.9_
+  - [ ]* 6.9 Write property test for same-epoch vote counting
+    - **Property 11: Same-Epoch Vote Counting**
+    - **Validates: Requirements 7.4**
+  - [ ]* 6.10 Write property test for quorum confirmation
+    - **Property 12: Quorum-Based Ownership Confirmation**
+    - **Validates: Requirements 5.4, 7.5**
+  - [ ]* 6.11 Write property test for epoch increment on failure
+    - **Property 13: Epoch Increment on Failure**
+    - **Validates: Requirements 7.7, 7.8**
+
+- [x] 7. Checkpoint - Ensure voting mechanism works
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 8. Implement PartitionManager
+  - [x] 8.1 Create PartitionManager struct
+    - Store topologies HashMap (in memory)
+    - Reference to ClusterManager and VotingCoordinator
+    - _Requirements: 4.1_
+  - [x] 8.2 Implement initialize_table method
+    - Create TableTopology
+    - Round-robin assign write_node to partitions
+    - Auto-add write_node to read_nodes
+    - _Requirements: 4.1, 5.1, 6.1_
+  - [x] 8.3 Implement topology query methods
+    - get_topology(), get_write_node(), get_read_nodes()
+    - Fast lookup from memory
+    - _Requirements: 4.2_
+  - [x] 8.4 Implement read_node management
+    - add_read_node(), remove_read_node()
+    - _Requirements: 6.2, 6.3_
+  - [x] 8.5 Implement on_node_failure method
+    - Get orphaned partitions (where failed node was write_node)
+    - Remove failed node from all read_nodes
+    - Calculate proposed owners using hash
+    - Start voting rounds
+    - _Requirements: 7.1, 7.2_
+  - [x] 8.6 Implement process_vote_results method
+    - Check quorum for active rounds
+    - Update topology if won vote
+    - Broadcast topology change via Gossip
+    - _Requirements: 7.5, 7.6_
+  - [x] 8.7 Implement topology sync from Gossip
+    - Receive topology updates from other nodes
+    - Update local cache
+    - _Requirements: 4.4_
+  - [ ]* 8.8 Write property test for round-robin distribution
+    - **Property 4: Round-Robin Distribution**
+    - **Validates: Requirements 5.1**
+  - [ ]* 8.9 Write property test for deterministic vote calculation
+    - **Property 9: Deterministic Vote Calculation**
+    - **Validates: Requirements 7.2**
+  - [ ]* 8.10 Write property test for read node list consistency
+    - **Property 6: Read Node List Consistency**
+    - **Validates: Requirements 6.1, 6.2, 6.3**
+
+- [x] 9. Implement QueryRouter
+  - [x] 9.1 Create QueryRouter struct
+    - Reference to PartitionManager
+    - _Requirements: 11.1_
+  - [x] 9.2 Implement route_write method
+    - Return partition's write_node
+    - Return error if unavailable
+    - _Requirements: 11.1, 11.3_
+  - [x] 9.3 Implement route_read method
+    - Select from read_nodes with load balancing
+    - Return error if all unavailable
+    - _Requirements: 11.2, 11.3_
+  - [ ]* 9.4 Write property test for write query routing
+    - **Property 8: Write Query Routing**
+    - **Validates: Requirements 11.1**
+  - [ ]* 9.5 Write property test for read query routing
+    - **Property 7: Read Query Routing**
+    - **Validates: Requirements 6.4**
+
+- [x] 10. Checkpoint - Ensure partition management and routing work
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 11. Implement graceful shutdown
+  - [x] 11.1 Implement shutdown method in ClusterManager
+    - Broadcast leaving notification via Gossip
+    - _Requirements: 8.1_
+  - [x] 11.2 Handle leaving notification in PartitionManager
+    - Initiate voting for leaving node's partitions
+    - _Requirements: 8.2, 8.3_
+  - [x] 11.3 Wait for partition transfer before exit
+    - Block until all partitions reassigned or timeout
+    - _Requirements: 8.4_
+
+- [x] 12. Implement edge case handling
+  - [x] 12.1 Handle node recovery during voting
+    - Cancel pending votes for recovered node's partitions
+    - Let recovered node reclaim ownership
+    - _Requirements: 3.5_
+  - [x] 12.2 Handle minimum cluster size check
+    - Skip failover if alive nodes < min_cluster_size
+    - Log warning
+    - _Requirements: 1.4_
+  - [x] 12.3 Handle on-demand partition creation
+    - Assign to lowest-load node
+    - _Requirements: 5.2_
+  - [ ]* 12.4 Write property test for lowest-load assignment
+    - **Property 5: Lowest-Load Assignment**
+    - **Validates: Requirements 5.2**
+
+- [x] 13. Implement monitoring and observability
+  - [x] 13.1 Add metrics exposure
+    - Node count, alive count
+    - Partition count per node
+    - _Requirements: 12.1_
+  - [x] 13.2 Add structured logging
+    - State transitions with node ID, old/new state
+    - Failover operations with partition count
+    - _Requirements: 12.2, 12.3_
+  - [x] 13.3 Implement cluster state API
+    - Return membership and topology
+    - _Requirements: 12.4_
+
+- [x] 14. Final integration
+  - [x] 14.1 Wire ClusterManager into main application
+    - Initialize on startup based on config
+    - Subscribe to events for partition management
+    - _Requirements: 10.3_
+  - [x] 14.2 Update existing code to use QueryRouter
+    - Route queries through QueryRouter
+    - _Requirements: 11.1, 11.2_
+
+- [x] 15. Final Checkpoint - Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.

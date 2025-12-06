@@ -1,6 +1,8 @@
+use calm::cluster::ClusterConfig;
 use calm::engine::EngineConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// 服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +38,10 @@ pub struct Config {
     /// 引擎配置
     #[serde(default)]
     pub engine: EngineSettings,
+
+    /// 集群配置
+    #[serde(default)]
+    pub cluster: ClusterSettings,
 }
 
 /// 日志配置
@@ -162,6 +168,7 @@ impl Default for Config {
             password: default_password(),
             log: LogSettings::default(),
             engine: EngineSettings::default(),
+            cluster: ClusterSettings::default(),
         }
     }
 }
@@ -186,6 +193,103 @@ impl Default for EngineSettings {
             persist_check_interval_secs: default_persist_interval(),
             max_concurrent_persists: default_max_concurrent_persists(),
             check_after_flush: default_check_after_flush(),
+        }
+    }
+}
+
+/// 集群配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterSettings {
+    /// 是否启用集群模式
+    #[serde(default = "default_cluster_enabled")]
+    pub enabled: bool,
+
+    /// 本节点 ID（唯一标识）
+    #[serde(default = "default_node_id")]
+    pub node_id: String,
+
+    /// 集群 ID（同一集群的节点必须相同）
+    #[serde(default = "default_cluster_id")]
+    pub cluster_id: String,
+
+    /// Gossip 监听地址 (UDP)
+    #[serde(default = "default_gossip_addr")]
+    pub listen_addr: String,
+
+    /// 种子节点列表（用于初始加入集群）
+    #[serde(default)]
+    pub seed_nodes: Vec<String>,
+
+    /// Gossip 间隔（毫秒）
+    #[serde(default = "default_gossip_interval_ms")]
+    pub gossip_interval_ms: u64,
+
+    /// 故障检测超时（秒）
+    #[serde(default = "default_failure_timeout_secs")]
+    pub failure_timeout_secs: u64,
+
+    /// 可疑状态超时（秒）
+    #[serde(default = "default_suspect_timeout_secs")]
+    pub suspect_timeout_secs: u64,
+
+    /// 投票超时（秒）
+    #[serde(default = "default_vote_timeout_secs")]
+    pub vote_timeout_secs: u64,
+
+    /// 最小集群大小
+    #[serde(default = "default_min_cluster_size")]
+    pub min_cluster_size: usize,
+}
+
+fn default_cluster_enabled() -> bool {
+    false
+}
+
+fn default_node_id() -> String {
+    format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8])
+}
+
+fn default_cluster_id() -> String {
+    "calm-cluster".to_string()
+}
+
+fn default_gossip_addr() -> String {
+    "0.0.0.0:7946".to_string()
+}
+
+fn default_gossip_interval_ms() -> u64 {
+    500
+}
+
+fn default_failure_timeout_secs() -> u64 {
+    10
+}
+
+fn default_suspect_timeout_secs() -> u64 {
+    10
+}
+
+fn default_vote_timeout_secs() -> u64 {
+    10
+}
+
+fn default_min_cluster_size() -> usize {
+    3
+}
+
+impl Default for ClusterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_cluster_enabled(),
+            node_id: default_node_id(),
+            cluster_id: default_cluster_id(),
+            listen_addr: default_gossip_addr(),
+            seed_nodes: vec![],
+            gossip_interval_ms: default_gossip_interval_ms(),
+            failure_timeout_secs: default_failure_timeout_secs(),
+            suspect_timeout_secs: default_suspect_timeout_secs(),
+            vote_timeout_secs: default_vote_timeout_secs(),
+            min_cluster_size: default_min_cluster_size(),
         }
     }
 }
@@ -292,6 +396,47 @@ impl Config {
                     config.mysql_port = None;
                     i += 1;
                 }
+                // Cluster arguments
+                "--cluster-enabled" => {
+                    config.cluster.enabled = true;
+                    i += 1;
+                }
+                "--node-id" => {
+                    if i + 1 < args.len() {
+                        config.cluster.node_id = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        return Err("Missing value for --node-id".into());
+                    }
+                }
+                "--cluster-id" => {
+                    if i + 1 < args.len() {
+                        config.cluster.cluster_id = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        return Err("Missing value for --cluster-id".into());
+                    }
+                }
+                "--gossip-addr" => {
+                    if i + 1 < args.len() {
+                        config.cluster.listen_addr = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        return Err("Missing value for --gossip-addr".into());
+                    }
+                }
+                "--seed-nodes" => {
+                    if i + 1 < args.len() {
+                        config.cluster.seed_nodes = args[i + 1]
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        i += 2;
+                    } else {
+                        return Err("Missing value for --seed-nodes".into());
+                    }
+                }
                 "--help" => {
                     Self::print_help();
                     std::process::exit(0);
@@ -333,6 +478,27 @@ impl Config {
             config.log.file = Some(PathBuf::from(file));
         }
 
+        // Cluster environment variables
+        if let Ok(val) = std::env::var("CALM_CLUSTER_ENABLED") {
+            config.cluster.enabled = val.parse().unwrap_or(false);
+        }
+        if let Ok(val) = std::env::var("CALM_NODE_ID") {
+            config.cluster.node_id = val;
+        }
+        if let Ok(val) = std::env::var("CALM_CLUSTER_ID") {
+            config.cluster.cluster_id = val;
+        }
+        if let Ok(val) = std::env::var("CALM_GOSSIP_ADDR") {
+            config.cluster.listen_addr = val;
+        }
+        if let Ok(val) = std::env::var("CALM_SEED_NODES") {
+            config.cluster.seed_nodes = val
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+
         Ok(config)
     }
 
@@ -356,6 +522,22 @@ impl Config {
             persist_check_interval_secs: self.engine.persist_check_interval_secs,
             max_concurrent_persists: self.engine.max_concurrent_persists,
             check_after_flush: self.engine.check_after_flush,
+        }
+    }
+
+    /// 转换为 ClusterConfig
+    pub fn to_cluster_config(&self) -> ClusterConfig {
+        ClusterConfig {
+            enabled: self.cluster.enabled || !self.cluster.seed_nodes.is_empty(),
+            node_id: self.cluster.node_id.clone(),
+            cluster_id: self.cluster.cluster_id.clone(),
+            listen_addr: self.cluster.listen_addr.clone(),
+            seed_nodes: self.cluster.seed_nodes.clone(),
+            gossip_interval: Duration::from_millis(self.cluster.gossip_interval_ms),
+            failure_timeout: Duration::from_secs(self.cluster.failure_timeout_secs),
+            suspect_timeout: Duration::from_secs(self.cluster.suspect_timeout_secs),
+            vote_timeout: Duration::from_secs(self.cluster.vote_timeout_secs),
+            min_cluster_size: self.cluster.min_cluster_size,
         }
     }
 
@@ -388,6 +570,13 @@ impl Config {
         println!("    --no-mysql                     禁用 MySQL 服务");
         println!("    --help                         显示帮助信息");
         println!();
+        println!("CLUSTER OPTIONS:");
+        println!("    --cluster-enabled              启用集群模式");
+        println!("    --node-id <ID>                 节点 ID [default: auto-generated]");
+        println!("    --cluster-id <ID>              集群 ID [default: calm-cluster]");
+        println!("    --gossip-addr <ADDR>           Gossip 监听地址 [default: 0.0.0.0:7946]");
+        println!("    --seed-nodes <NODES>           种子节点列表 (逗号分隔)");
+        println!();
         println!("ENVIRONMENT VARIABLES:");
         println!("    CALM_HOST                      监听地址");
         println!("    CALM_GRAPHQL_PORT              GraphQL 服务端口");
@@ -398,6 +587,11 @@ impl Config {
         println!("    CALM_DATA_DIR                  数据目录");
         println!("    CALM_LOG_LEVEL                 日志级别");
         println!("    CALM_LOG_FILE                  日志文件路径");
+        println!("    CALM_CLUSTER_ENABLED           启用集群模式");
+        println!("    CALM_NODE_ID                   节点 ID");
+        println!("    CALM_CLUSTER_ID                集群 ID");
+        println!("    CALM_GOSSIP_ADDR               Gossip 监听地址");
+        println!("    CALM_SEED_NODES                种子节点列表 (逗号分隔)");
         println!();
         println!("EXAMPLES:");
         println!("    # 使用默认配置启动所有服务");
@@ -411,5 +605,8 @@ impl Config {
         println!();
         println!("    # 使用配置文件");
         println!("    calm --config config.toml");
+        println!();
+        println!("    # 启动集群模式");
+        println!("    calm --cluster-enabled --seed-nodes 192.168.1.10:7946,192.168.1.11:7946");
     }
 }
