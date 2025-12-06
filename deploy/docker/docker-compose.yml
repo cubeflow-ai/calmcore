@@ -1,0 +1,243 @@
+# CalmDB Cluster Docker Compose
+# 8-node cluster configuration
+
+version: '3.8'
+
+x-calm-common: &calm-common
+  image: calmdb:latest
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  restart: unless-stopped
+  networks:
+    - calm-network
+
+services:
+  # Seed node 1 (bootstrap node)
+  calm-node-1:
+    <<: *calm-common
+    container_name: calm-node-1
+    hostname: calm-node-1
+    environment:
+      CALM_HOST: "0.0.0.0"
+      CALM_NODE_ID: "node-1"
+      CALM_CLUSTER_ID: "calm-cluster"
+      CALM_CLUSTER_ENABLED: "true"
+      CALM_GOSSIP_ADDR: "0.0.0.0:7946"
+      CALM_SEED_NODES: "calm-node-2:7946,calm-node-3:7946"
+      CALM_DATA_DIR: "/data"
+      CALM_LOG_LEVEL: "info"
+      CALM_LOG_FILE: "/logs/calm.log"
+    ports:
+      - "9567:9567"   # GraphQL
+      - "9200:9200"   # Elasticsearch
+      - "3307:3307"   # MySQL
+    volumes:
+      - calm-data-1:/data
+      - calm-logs-1:/logs
+
+  # Seed node 2
+  calm-node-2:
+    <<: *calm-common
+    container_name: calm-node-2
+    hostname: calm-node-2
+    environment:
+      CALM_HOST: "0.0.0.0"
+      CALM_NODE_ID: "node-2"
+      CALM_CLUSTER_ID: "calm-cluster"
+      CALM_CLUSTER_ENABLED: "true"
+      CALM_GOSSIP_ADDR: "0.0.0.0:7946"
+      CALM_SEED_NODES: "calm-node-1:7946,calm-node-3:7946"
+      CALM_DATA_DIR: "/data"
+      CALM_LOG_LEVEL: "info"
+      CALM_LOG_FILE: "/logs/calm.log"
+    ports:
+      - "9568:9567"
+      - "9201:9200"
+      - "3308:3307"
+    volumes:
+      - calm-data-2:/data
+      - calm-logs-2:/logs
+
+  # Seed node 3
+  calm-node-3:
+    <<: *calm-common
+    container_name: calm-node-3
+    hostname: calm-node-3
+    environment:
+      CALM_HOST: "0.0.0.0"
+      CALM_NODE_ID: "node-3"
+      CALM_CLUSTER_ID: "calm-cluster"
+      CALM_CLUSTER_ENABLED: "true"
+      CALM_GOSSIP_ADDR: "0.0.0.0:7946"
+      CALM_SEED_NODES: "calm-node-1:7946,calm-node-2:7946"
+      CALM_DATA_DIR: "/data"
+      CALM_LOG_LEVEL: "info"
+      CALM_LOG_FILE: "/logs/calm.log"
+    ports:
+      - "9569:9567"
+      - "9202:9200"
+      - "3309:3307"
+    volumes:
+      - calm-data-3:/data
+      - calm-logs-3:/logs
+
+  # Worker node 4
+  calm-node-4:
+    <<: *calm-common
+    container_name: calm-node-4
+    hostname: calm-node-4
+    environment:
+      CALM_HOST: "0.0.0.0"
+      CALM_NODE_ID: "node-4"
+      CALM_CLUSTER_ID: "calm-cluster"
+      CALM_CLUSTER_ENABLED: "true"
+      CALM_GOSSIP_ADDR: "0.0.0.0:7946"
+      CALM_SEED_NODES: "calm-node-1:7946,calm-node-2:7946,calm-node-3:7946"
+      CALM_DATA_DIR: "/data"
+      CALM_LOG_LEVEL: "info"
+      CALM_LOG_FILE: "/logs/calm.log"
+    ports:
+      - "9570:9567"
+      - "9203:9200"
+      - "3310:3307"
+    volumes:
+      - calm-data-4:/data
+      - calm-logs-4:/logs
+    depends_on:
+      - calm-node-1
+      - calm-node-2
+      - calm-node-3
+
+  # Worker node 5
+  calm-node-5:
+    <<: *calm-common
+    container_name: calm-node-5
+    hostname: calm-node-5
+    environment:
+      CALM_HOST: "0.0.0.0"
+      CALM_NODE_ID: "node-5"
+      CALM_CLUSTER_ID: "calm-cluster"
+      CALM_CLUSTER_ENABLED: "true"
+      CALM_GOSSIP_ADDR: "0.0.0.0:7946"
+      CALM_SEED_NODES: "calm-node-1:7946,calm-node-2:7946,calm-node-3:7946"
+      CALM_DATA_DIR: "/data"
+      CALM_LOG_LEVEL: "info"
+      CALM_LOG_FILE: "/logs/calm.log"
+    ports:
+      - "9571:9567"
+      - "9204:9200"
+      - "3311:3307"
+    volumes:
+      - calm-data-5:/data
+      - calm-logs-5:/logs
+    depends_on:
+      - calm-node-1
+      - calm-node-2
+      - calm-node-3
+
+  # Worker node 6
+  calm-node-6:
+    <<: *calm-common
+    container_name: calm-node-6
+    hostname: calm-node-6
+    environment:
+      CALM_HOST: "0.0.0.0"
+      CALM_NODE_ID: "node-6"
+      CALM_CLUSTER_ID: "calm-cluster"
+      CALM_CLUSTER_ENABLED: "true"
+      CALM_GOSSIP_ADDR: "0.0.0.0:7946"
+      CALM_SEED_NODES: "calm-node-1:7946,calm-node-2:7946,calm-node-3:7946"
+      CALM_DATA_DIR: "/data"
+      CALM_LOG_LEVEL: "info"
+      CALM_LOG_FILE: "/logs/calm.log"
+    ports:
+      - "9572:9567"
+      - "9205:9200"
+      - "3312:3307"
+    volumes:
+      - calm-data-6:/data
+      - calm-logs-6:/logs
+    depends_on:
+      - calm-node-1
+      - calm-node-2
+      - calm-node-3
+
+  # Worker node 7
+  calm-node-7:
+    <<: *calm-common
+    container_name: calm-node-7
+    hostname: calm-node-7
+    environment:
+      CALM_HOST: "0.0.0.0"
+      CALM_NODE_ID: "node-7"
+      CALM_CLUSTER_ID: "calm-cluster"
+      CALM_CLUSTER_ENABLED: "true"
+      CALM_GOSSIP_ADDR: "0.0.0.0:7946"
+      CALM_SEED_NODES: "calm-node-1:7946,calm-node-2:7946,calm-node-3:7946"
+      CALM_DATA_DIR: "/data"
+      CALM_LOG_LEVEL: "info"
+      CALM_LOG_FILE: "/logs/calm.log"
+    ports:
+      - "9573:9567"
+      - "9206:9200"
+      - "3313:3307"
+    volumes:
+      - calm-data-7:/data
+      - calm-logs-7:/logs
+    depends_on:
+      - calm-node-1
+      - calm-node-2
+      - calm-node-3
+
+  # Worker node 8
+  calm-node-8:
+    <<: *calm-common
+    container_name: calm-node-8
+    hostname: calm-node-8
+    environment:
+      CALM_HOST: "0.0.0.0"
+      CALM_NODE_ID: "node-8"
+      CALM_CLUSTER_ID: "calm-cluster"
+      CALM_CLUSTER_ENABLED: "true"
+      CALM_GOSSIP_ADDR: "0.0.0.0:7946"
+      CALM_SEED_NODES: "calm-node-1:7946,calm-node-2:7946,calm-node-3:7946"
+      CALM_DATA_DIR: "/data"
+      CALM_LOG_LEVEL: "info"
+      CALM_LOG_FILE: "/logs/calm.log"
+    ports:
+      - "9574:9567"
+      - "9207:9200"
+      - "3314:3307"
+    volumes:
+      - calm-data-8:/data
+      - calm-logs-8:/logs
+    depends_on:
+      - calm-node-1
+      - calm-node-2
+      - calm-node-3
+
+networks:
+  calm-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  calm-data-1:
+  calm-data-2:
+  calm-data-3:
+  calm-data-4:
+  calm-data-5:
+  calm-data-6:
+  calm-data-7:
+  calm-data-8:
+  calm-logs-1:
+  calm-logs-2:
+  calm-logs-3:
+  calm-logs-4:
+  calm-logs-5:
+  calm-logs-6:
+  calm-logs-7:
+  calm-logs-8:

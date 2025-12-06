@@ -1,0 +1,33 @@
+# Build artifacts
+target/
+*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Test data
+data/
+logs/
+test_suite/
+
+# Config files (will be provided via env vars)
+calm.toml
+*.toml.example
+
+# Other
+.kiro/
+.joycode/
+*.log
+*.tmp
