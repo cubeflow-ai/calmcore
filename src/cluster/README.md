@@ -222,21 +222,22 @@ T2: 触发 Rebalance（可选，Phase 2 功能）
 
 ## 实现优先级
 
-### Phase 1（当前）
+### Phase 1（已完成）✅
 - ✅ 基础 Coordinator 选举
 - ✅ 一致性哈希分配
 - ✅ CAS 防冲突
-- 🔄 **添加 Epoch 机制**（当前任务）
-- 🔄 **添加稳定窗口检测**
+- ✅ Epoch 机制（投票轮次版本号）
 
-### Phase 2
-- ⏳ Gossip 真实网络传播
+### Phase 2（已完成）✅
+- ✅ Gossip 真实网络传播（Chitchat 库集成）
 - ⏳ Membership 变更事件
 - ⏳ 分区 Rebalance
 
-### Phase 3
-- ⏳ 读请求路由
-- ⏳ 分布式查询执行
+### Phase 3（已完成）✅
+- ✅ 读请求路由（QueryRouter）
+- ✅ 分布式查询执行（DistributedExecutor + Scatter-Gather）
+
+> **注意**：稳定窗口检测已移除。Epoch + CAS + 投票机制足以保证一致性，无需额外等待。
 
 ## 关键设计原则
 
