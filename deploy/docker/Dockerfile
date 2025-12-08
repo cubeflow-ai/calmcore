@@ -1,5 +1,6 @@
 # CalmDB Docker Image
 # Multi-stage build for smaller image size
+# syntax=docker/dockerfile:1.4
 
 # Stage 1: Build
 FROM rust:1.91.1-bookworm AS builder
@@ -22,8 +23,14 @@ COPY libs ./libs
 COPY examples ./examples
 COPY tests ./tests
 
-# Build release binary
-RUN cargo build --release --bin calm
+# Build release binary with cargo cache
+# Note: This uses Docker managed cache, not your local ~/.cargo
+# For faster builds on repeated runs
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --bin calm && \
+    cp /app/target/release/calm /tmp/calm
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -42,7 +49,7 @@ RUN useradd -m -u 1000 calm
 RUN mkdir -p /data /logs /config && chown -R calm:calm /data /logs /config
 
 # Copy binary from builder
-COPY --from=builder /app/target/release/calm /usr/local/bin/calm
+COPY --from=builder /tmp/calm /usr/local/bin/calm
 
 # Set permissions
 RUN chmod +x /usr/local/bin/calm
