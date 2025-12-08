@@ -1,0 +1,21 @@
+[2025-12-08 14:12:57 INFO ] [Engine] Persist background task started
+[2025-12-08 14:12:57 INFO ] 🔍 [Engine] Loading existing tables...
+[2025-12-08 14:12:57 INFO ] [Engine] Periodic persist check (fallback)
+[2025-12-08 14:12:57 INFO ] 🔍 [Engine] Found 0 tables
+[2025-12-08 14:12:57 INFO ] 🌐 Initializing cluster (node_id: node-e55bfc01, cluster_id: calmcore-cluster)
+[2025-12-08 14:12:57 INFO ] 🚀 [Cluster] Starting node node-e55bfc01
+[2025-12-08 14:12:57 INFO ] 📡 [Cluster] Listen address: 0.0.0.0:7946
+[2025-12-08 14:12:57 INFO ] 🌐 [Cluster] Running in CLUSTER mode with 2 seed nodes
+[2025-12-08 14:12:57 INFO ] 🔧 [Cluster] Initializing Chitchat with config:
+[2025-12-08 14:12:57 INFO ]    - Cluster ID: calmcore-cluster
+[2025-12-08 14:12:57 INFO ]    - Listen: 0.0.0.0:7946
+[2025-12-08 14:12:57 INFO ]    - Seeds: ["127.0.0.1:7946", "127.0.0.1:7947"]
+[2025-12-08 14:12:57 WARN ] [Cluster] Cannot determine real IP, assuming seed node
+[2025-12-08 14:12:57 INFO ] 🌱 [Cluster] Starting as SEED node (will not wait for other seeds)
+[2025-12-08 14:12:57 INFO ] 🔗 [Cluster] Will accept connections from other nodes...
+[2025-12-08 14:12:57 INFO ] ✅ [Cluster] ClusterManager started successfully
+[2025-12-08 14:12:57 INFO ] ✅ [Partition] Started event listener
+[2025-12-08 14:12:57 INFO ] ✅ [Partition] Started background sync task
+[2025-12-08 14:12:57 INFO ] ✓ Cluster initialized successfully
+[2025-12-08 14:12:57 INFO ] 🌐 Distributed query enabled (timeout: 30000ms, rpc_port: 7947)
+[2025-12-08 14:12:57 INFO ] [Engine] Distributed context set, queries will use distributed executor

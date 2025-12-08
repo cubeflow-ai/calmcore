@@ -224,7 +224,7 @@ impl DistributedTableProvider {
         &self,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
-        limit: Option<usize>,
+        _limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         log::info!(
             "[DistributedTableProvider] Creating Shuffle plan: group_by={:?}, {} local, {} remote partitions",

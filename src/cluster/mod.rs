@@ -87,10 +87,6 @@ impl ClusterConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(val) = std::env::var("CALM_CLUSTER_ENABLED") {
-            config.enabled = val.parse().unwrap_or(false);
-        }
-
         if let Ok(val) = std::env::var("CALM_NODE_ID") {
             config.node_id = val;
         }
@@ -201,11 +197,11 @@ impl ClusterConfig {
                 if let Some(val) = cluster.get("min_cluster_size").and_then(|v| v.as_integer()) {
                     config.min_cluster_size = val as usize;
                 }
-
-                // Enable cluster mode if seed_nodes are configured
-                config.enabled = !config.seed_nodes.is_empty();
             }
         }
+
+        // Enable cluster mode if seed_nodes are configured
+        config.enabled = !config.seed_nodes.is_empty();
 
         Ok(config)
     }

@@ -1,0 +1,48 @@
+# CalmCore Cluster Configuration - Node 1 (Seed Node)
+
+# 服务器基本配置
+host = "0.0.0.0"
+graphql_port = 9567
+es_port = 9200
+mysql_port = 3307
+user = "root"
+password = "calm"
+
+# 日志配置
+[log]
+level = "info"
+target = "console"
+file = "./logs/node1/calm.log"
+rotation = true
+max_size_mb = 100
+max_files = 10
+
+# 引擎配置
+[engine]
+data_dir = "./data/node1"
+persist_check_interval_secs = 60
+max_concurrent_persists = 4
+check_after_flush = true
+
+# 集群配置
+[cluster]
+node_id = "node-1"
+cluster_id = "calmcore-cluster"
+listen_addr = "0.0.0.0:7946"
+seed_nodes = [
+    "127.0.0.1:7946", # 自己作为种子节点
+]
+gossip_interval_ms = 500
+failure_timeout_secs = 10
+suspect_timeout_secs = 10
+vote_timeout_secs = 10
+min_cluster_size = 2
+
+# 分布式查询配置
+[distributed]
+query_timeout_ms = 30000
+shuffle_buffer_size = 10000
+max_concurrent_queries = 100
+rpc_port = 7950
+connect_timeout_ms = 5000
+request_timeout_ms = 30000

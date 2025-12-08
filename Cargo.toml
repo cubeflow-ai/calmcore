@@ -18,7 +18,6 @@ rayon = "1.11"
 sha1 = "0.10"
 # parquet = "54.3.1"
 datafusion = "50.3.0"
-ballista = "50.0.0"
 async-trait = "0.1"
 bytes = "1.9"
 serde_json = "1.0.114"
@@ -54,12 +53,9 @@ async-graphql-poem = "7"
 
 # gRPC for distributed query
 poem-grpc = "0.4"
-prost = "0.13"
 regex = "1.10"
 chrono = "0.4"
 toml = "0.8"
-bincode = "2.0.1"
-tokio-stream = "0.1.17"
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 

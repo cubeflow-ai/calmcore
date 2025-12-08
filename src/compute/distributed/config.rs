@@ -9,9 +9,6 @@ use crate::utils::error::CoreResult;
 /// 分布式查询配置
 #[derive(Debug, Clone)]
 pub struct DistributedConfig {
-    /// 是否启用分布式查询
-    pub enabled: bool,
-
     /// 查询超时时间（毫秒）
     pub query_timeout_ms: u64,
 
@@ -34,7 +31,6 @@ pub struct DistributedConfig {
 impl Default for DistributedConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             query_timeout_ms: 30_000,
             shuffle_buffer_size: 10_000,
             max_concurrent_queries: 100,
@@ -52,10 +48,6 @@ impl DistributedConfig {
 
         if let Ok(value) = toml_content.parse::<toml::Table>() {
             if let Some(distributed) = value.get("distributed").and_then(|v| v.as_table()) {
-                if let Some(val) = distributed.get("enabled").and_then(|v| v.as_bool()) {
-                    config.enabled = val;
-                }
-
                 if let Some(val) = distributed
                     .get("query_timeout_ms")
                     .and_then(|v| v.as_integer())
@@ -164,9 +156,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
+    fn default_config() {
         let config = DistributedConfig::default();
-        assert!(!config.enabled);
         assert_eq!(config.query_timeout_ms, 30_000);
         assert_eq!(config.shuffle_buffer_size, 10_000);
         assert_eq!(config.max_concurrent_queries, 100);
@@ -184,7 +175,6 @@ max_concurrent_queries = 200
 rpc_port = 8080
 "#;
         let config = DistributedConfig::from_toml(toml).unwrap();
-        assert!(config.enabled);
         assert_eq!(config.query_timeout_ms, 60_000);
         assert_eq!(config.shuffle_buffer_size, 20_000);
         assert_eq!(config.max_concurrent_queries, 200);
@@ -193,9 +183,10 @@ rpc_port = 8080
 
     #[test]
     fn test_validate() {
-        let mut config = DistributedConfig::default();
+        let config = DistributedConfig::default();
         assert!(config.validate().is_ok());
 
+        let mut config = DistributedConfig::default();
         config.query_timeout_ms = 0;
         assert!(config.validate().is_err());
     }

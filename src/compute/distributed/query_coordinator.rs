@@ -247,7 +247,6 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = DistributedConfig::default();
-        assert!(!config.enabled);
         assert_eq!(config.query_timeout_ms, 30_000);
     }
 }
