@@ -9,11 +9,6 @@
 //! - **Failure Detection**: SWIM-like failure detection built into Chitchat
 //! - **State Propagation**: Key-value state propagation across all nodes
 //! - **Event Broadcasting**: Cluster events via tokio broadcast channels
-//!
-//! ## Modes of Operation
-//!
-//! - **Standalone Mode**: No seed nodes configured, operates without Gossip
-//! - **Cluster Mode**: With seed nodes, must join cluster or fail on startup
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -39,11 +34,11 @@ const KEY_PARTITION_COUNT: &str = "partition_count";
 /// The central component managing cluster membership and node information.
 /// Uses Chitchat for Gossip-based communication and failure detection.
 pub struct ClusterManager {
-    /// Chitchat handle for Gossip communication (None in standalone mode)
-    chitchat_handle: Option<ChitchatHandle>,
+    /// Chitchat handle for Gossip communication
+    chitchat_handle: ChitchatHandle,
 
     /// Chitchat instance (cloneable Arc for background tasks)
-    chitchat: Option<Arc<tokio::sync::Mutex<chitchat::Chitchat>>>,
+    chitchat: Arc<tokio::sync::Mutex<chitchat::Chitchat>>,
 
     /// Local node ID (UUID, immutable for node lifetime)
     node_id: NodeId,
@@ -54,17 +49,11 @@ pub struct ClusterManager {
     /// All known nodes with their metrics
     nodes: Arc<RwLock<HashMap<NodeId, NodeInfo>>>,
 
-    /// Key-value store for Gossip state (used in standalone mode or as cache)
-    kv_store: Arc<RwLock<HashMap<String, String>>>,
-
     /// Event broadcaster for cluster events
     event_tx: broadcast::Sender<ClusterEvent>,
 
     /// Failure callbacks (legacy support)
     failure_callbacks: Arc<RwLock<Vec<Box<dyn Fn(NodeId) + Send + Sync>>>>,
-
-    /// Whether running in standalone mode
-    standalone: bool,
 
     /// Gossip listen address
     listen_addr: String,
@@ -73,12 +62,7 @@ pub struct ClusterManager {
 impl ClusterManager {
     /// Create and start cluster manager
     ///
-    /// # Behavior
-    /// - No seed nodes → standalone mode (skip Gossip)
-    /// - With seed nodes → must join cluster, fail on error
-    ///
     /// # Requirements
-    /// - Requirements 1.1: Standalone mode without Gossip when no seed nodes
     /// - Requirements 1.2: Join cluster via seed nodes when configured
     pub async fn new(config: ClusterConfig) -> CoreResult<Self> {
         // Validate configuration
@@ -86,10 +70,13 @@ impl ClusterManager {
 
         let node_id = config.node_id.clone();
         let listen_addr = config.listen_addr.clone();
-        let standalone = config.is_standalone();
 
         log::info!("🚀 [Cluster] Starting node {}", node_id);
         log::info!("📡 [Cluster] Listen address: {}", listen_addr);
+        log::info!(
+            "🌐 [Cluster] Running in CLUSTER mode with {} seed nodes",
+            config.seed_nodes.len()
+        );
 
         // Create event channel
         let (event_tx, _) = broadcast::channel(1024);
@@ -101,53 +88,24 @@ impl ClusterManager {
             NodeInfo::new(node_id.clone(), listen_addr.clone()),
         );
 
-        let manager = if standalone {
-            // Standalone mode - no Gossip communication
-            log::info!("🔒 [Cluster] Running in STANDALONE mode (no seed nodes)");
+        // Initialize Chitchat
+        let chitchat_handle = Self::init_chitchat(&config).await?;
+        let chitchat = chitchat_handle.chitchat().clone();
 
-            Self {
-                chitchat_handle: None,
-                chitchat: None,
-                node_id: node_id.clone(),
-                config,
-                nodes: Arc::new(RwLock::new(nodes)),
-                kv_store: Arc::new(RwLock::new(HashMap::new())),
-                event_tx,
-                failure_callbacks: Arc::new(RwLock::new(Vec::new())),
-                standalone: true,
-                listen_addr,
-            }
-        } else {
-            // Cluster mode - initialize Chitchat
-            log::info!(
-                "🌐 [Cluster] Running in CLUSTER mode with {} seed nodes",
-                config.seed_nodes.len()
-            );
-
-            let chitchat_handle = Self::init_chitchat(&config).await?;
-            let chitchat = chitchat_handle.chitchat().clone();
-
-            Self {
-                chitchat_handle: Some(chitchat_handle),
-                chitchat: Some(chitchat),
-                node_id: node_id.clone(),
-                config,
-                nodes: Arc::new(RwLock::new(nodes)),
-                kv_store: Arc::new(RwLock::new(HashMap::new())),
-                event_tx,
-                failure_callbacks: Arc::new(RwLock::new(Vec::new())),
-                standalone: false,
-                listen_addr,
-            }
+        let manager = Self {
+            chitchat_handle,
+            chitchat,
+            node_id: node_id.clone(),
+            config,
+            nodes: Arc::new(RwLock::new(nodes)),
+            event_tx,
+            failure_callbacks: Arc::new(RwLock::new(Vec::new())),
+            listen_addr,
         };
 
         // Start background tasks
         manager.start_heartbeat_task();
-        manager.start_failure_detection_task();
-
-        if !standalone {
-            manager.start_membership_sync_task();
-        }
+        manager.start_membership_sync_task();
 
         log::info!("✅ [Cluster] ClusterManager started successfully");
 
@@ -203,24 +161,48 @@ impl ClusterManager {
             .await
             .map_err(|e| CoreError::Internal(format!("Failed to start Chitchat: {}", e)))?;
 
-        // If we have seed nodes, try to join the cluster
+        // If we have seed nodes, decide whether to wait or start immediately
         if !config.seed_nodes.is_empty() {
-            log::info!("🔗 [Cluster] Attempting to join cluster via seed nodes...");
+            let is_seed = config.is_seed_node();
 
-            // Give some time for initial gossip exchange
-            tokio::time::sleep(Duration::from_millis(500)).await;
-
-            // Check if we've discovered any peers
-            let chitchat = chitchat_handle.chitchat();
-            let guard = chitchat.lock().await;
-            let live_nodes = guard.live_nodes().count();
-
-            if live_nodes == 0 {
-                log::warn!(
-                    "⚠️  [Cluster] No peers discovered yet, but continuing (they may join later)"
-                );
+            if is_seed {
+                // Seed nodes start immediately without waiting
+                log::info!("🌱 [Cluster] Starting as SEED node (will not wait for other seeds)");
+                log::info!("🔗 [Cluster] Will accept connections from other nodes...");
             } else {
-                log::info!("✅ [Cluster] Discovered {} live nodes", live_nodes);
+                // Regular nodes must wait for seed nodes
+                log::info!("🔗 [Cluster] Starting as WORKER node, connecting to seed nodes...");
+
+                let chitchat = chitchat_handle.chitchat();
+                let mut attempts = 0;
+
+                loop {
+                    attempts += 1;
+
+                    // Check if we've discovered any peers
+                    let guard = chitchat.lock().await;
+                    let live_nodes = guard.live_nodes().count();
+                    drop(guard);
+
+                    if live_nodes > 0 {
+                        log::info!(
+                            "✅ [Cluster] Successfully joined cluster! Discovered {} live nodes",
+                            live_nodes
+                        );
+                        break;
+                    } else {
+                        if attempts == 1 {
+                            log::warn!(
+                                "⏳ [Cluster] Waiting for seed nodes to become available..."
+                            );
+                        }
+                        log::info!(
+                            "🔄 [Cluster] Attempting to connect to seed nodes... (attempt #{})",
+                            attempts
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
             }
         }
 
@@ -275,11 +257,6 @@ impl ClusterManager {
         self.config.quorum_threshold(node_count)
     }
 
-    /// Check if running in standalone mode
-    pub fn is_standalone(&self) -> bool {
-        self.standalone
-    }
-
     /// Get cluster configuration
     pub fn config(&self) -> &ClusterConfig {
         &self.config
@@ -294,40 +271,27 @@ impl ClusterManager {
     /// # Requirements
     /// - Requirements 4.3: Propagate topology changes via Gossip
     pub async fn gossip_set(&self, key: &str, value: &str) {
-        if let Some(ref chitchat) = self.chitchat {
-            let mut guard = chitchat.lock().await;
-            guard.self_node_state().set(key, value);
-            log::debug!("📝 [Gossip] Set key: {} = {}", key, value);
-        } else {
-            // Standalone mode - use local KV store
-            let mut kv = self.kv_store.write().await;
-            kv.insert(key.to_string(), value.to_string());
-            log::debug!("📝 [Standalone] Set key: {} = {}", key, value);
-        }
+        let mut guard = self.chitchat.lock().await;
+        guard.self_node_state().set(key, value);
+        log::debug!("📝 [Gossip] Set key: {} = {}", key, value);
     }
 
     /// Get key-value from Gossip state
     pub async fn gossip_get(&self, key: &str) -> Option<String> {
-        if let Some(ref chitchat) = self.chitchat {
-            let mut guard = chitchat.lock().await;
+        let mut guard = self.chitchat.lock().await;
 
-            // First check our own state
-            if let Some(value) = guard.self_node_state().get(key) {
+        // First check our own state
+        if let Some(value) = guard.self_node_state().get(key) {
+            return Some(value.to_string());
+        }
+
+        // Then check other nodes' states
+        for (_chitchat_id, node_state) in guard.node_states() {
+            if let Some(value) = node_state.get(key) {
                 return Some(value.to_string());
             }
-
-            // Then check other nodes' states
-            for (_chitchat_id, node_state) in guard.node_states() {
-                if let Some(value) = node_state.get(key) {
-                    return Some(value.to_string());
-                }
-            }
-            None
-        } else {
-            // Standalone mode - use local KV store
-            let kv = self.kv_store.read().await;
-            kv.get(key).cloned()
         }
+        None
     }
 
     /// Set key-value (legacy API)
@@ -343,41 +307,28 @@ impl ClusterManager {
 
     /// Get all keys from Gossip state
     pub async fn get_all_keys(&self) -> HashMap<String, String> {
-        if let Some(ref chitchat) = self.chitchat {
-            let mut guard = chitchat.lock().await;
+        let mut result = HashMap::new();
+        let mut guard = self.chitchat.lock().await;
 
-            let mut result = HashMap::new();
-
-            // Collect from all node states
-            for (_chitchat_id, node_state) in guard.node_states() {
-                for (key, value) in node_state.key_values() {
-                    result.insert(key.to_string(), value.to_string());
-                }
-            }
-
-            // Also include our own state
-            for (key, value) in guard.self_node_state().key_values() {
+        // Collect from all node states
+        for (_chitchat_id, node_state) in guard.node_states() {
+            for (key, value) in node_state.key_values() {
                 result.insert(key.to_string(), value.to_string());
             }
-
-            result
-        } else {
-            let kv = self.kv_store.read().await;
-            kv.clone()
         }
-    }
 
+        // Also include our own state
+        for (key, value) in guard.self_node_state().key_values() {
+            result.insert(key.to_string(), value.to_string());
+        }
+
+        result
+    }
     /// Delete key from Gossip state
     pub async fn delete_key(&self, key: &str) -> CoreResult<()> {
-        if let Some(ref chitchat) = self.chitchat {
-            let mut guard = chitchat.lock().await;
-            guard.self_node_state().delete(key);
-            log::debug!("🗑️  [Gossip] Deleted key: {}", key);
-        } else {
-            let mut kv = self.kv_store.write().await;
-            kv.remove(key);
-            log::debug!("🗑️  [Standalone] Deleted key: {}", key);
-        }
+        let mut guard = self.chitchat.lock().await;
+        guard.self_node_state().delete(key);
+        log::debug!("🗑️  [Gossip] Deleted key: {}", key);
         Ok(())
     }
 
@@ -551,26 +502,19 @@ impl ClusterManager {
         });
     }
 
-    /// Start failure detection task for standalone mode
+    /// Start failure detection task (legacy for testing)
     ///
-    /// In cluster mode, failure detection is handled by start_membership_sync_task
-    /// which integrates with Chitchat's built-in SWIM-like failure detection.
-    ///
-    /// In standalone mode, this task handles local failure detection based on
-    /// heartbeat timeouts for manually registered nodes.
+    /// Note: In production cluster mode, failure detection is primarily handled
+    /// by start_membership_sync_task which integrates with Chitchat's built-in
+    /// SWIM-like failure detection. This method is kept for testing scenarios.
     ///
     /// # Requirements
     /// - Requirements 3.1: Send heartbeat messages every gossip_interval
     /// - Requirements 3.2: Mark peer as Suspect after failure_timeout
     /// - Requirements 3.3: Mark Suspect as Dead after suspect_timeout
     /// - Requirements 3.5: Dead → Alive recovery when heartbeat received
+    #[allow(dead_code)]
     fn start_failure_detection_task(&self) {
-        // In cluster mode, failure detection is handled by membership sync task
-        // which integrates with Chitchat's failure detector
-        if !self.standalone {
-            return;
-        }
-
         let nodes = self.nodes.clone();
         let failure_callbacks = self.failure_callbacks.clone();
         let event_tx = self.event_tx.clone();
@@ -684,10 +628,7 @@ impl ClusterManager {
     /// - Requirements 3.4: Trigger NodeDead event to start failover
     /// - Requirements 3.5: Handle Dead → Alive recovery
     fn start_membership_sync_task(&self) {
-        let chitchat = match &self.chitchat {
-            Some(c) => c.clone(),
-            None => return,
-        };
+        let chitchat = self.chitchat.clone();
 
         let nodes = self.nodes.clone();
         let event_tx = self.event_tx.clone();
@@ -1176,7 +1117,6 @@ impl ClusterManager {
         ClusterStatus {
             node_id: self.node_id.clone(),
             cluster_id: self.config.cluster_id.clone(),
-            standalone: self.standalone,
             total_nodes,
             alive_nodes,
             suspect_nodes,
@@ -1345,7 +1285,6 @@ pub struct ClusterState {
 pub struct ClusterStatus {
     pub node_id: String,
     pub cluster_id: String,
-    pub standalone: bool,
     pub total_nodes: usize,
     pub alive_nodes: usize,
     pub suspect_nodes: usize,
@@ -1394,18 +1333,17 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_standalone_mode() {
+    async fn test_cluster_mode() {
         let config = ClusterConfig {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17946".to_string(),
-            seed_nodes: vec![], // No seed nodes = standalone
+            seed_nodes: vec!["127.0.0.1:17946".to_string()], // Self as seed
             ..Default::default()
         };
 
         let manager = ClusterManager::new(config).await.unwrap();
 
-        assert!(manager.is_standalone());
         assert_eq!(manager.node_id(), "test-node");
 
         // Should have 1 node (self)
@@ -1415,12 +1353,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gossip_kv_standalone() {
+    async fn test_gossip_kv_cluster() {
         let config = ClusterConfig {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17947".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17947".to_string()],
             ..Default::default()
         };
 
@@ -1443,7 +1381,7 @@ mod tests {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17948".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17948".to_string()],
             ..Default::default()
         };
 
@@ -1466,7 +1404,7 @@ mod tests {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17949".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17949".to_string()],
             ..Default::default()
         };
 
@@ -1500,7 +1438,7 @@ mod tests {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17951".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17951".to_string()],
             ..Default::default()
         };
 
@@ -1547,7 +1485,7 @@ mod tests {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17953".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17953".to_string()],
             ..Default::default()
         };
 
@@ -1594,7 +1532,7 @@ mod tests {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17955".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17955".to_string()],
             ..Default::default()
         };
 
@@ -1647,7 +1585,7 @@ mod tests {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17957".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17957".to_string()],
             ..Default::default()
         };
 
@@ -1697,7 +1635,7 @@ mod tests {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17959".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17959".to_string()],
             ..Default::default()
         };
 
@@ -1753,7 +1691,7 @@ mod tests {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17962".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17962".to_string()],
             ..Default::default()
         };
 
@@ -1770,7 +1708,7 @@ mod tests {
             node_id: "test-node".to_string(),
             cluster_id: "test-cluster".to_string(),
             listen_addr: "127.0.0.1:17963".to_string(),
-            seed_nodes: vec![],
+            seed_nodes: vec!["127.0.0.1:17963".to_string()],
             ..Default::default()
         };
 

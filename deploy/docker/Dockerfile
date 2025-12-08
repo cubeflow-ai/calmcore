@@ -13,8 +13,14 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy Cargo files first for better caching
+COPY Cargo.toml Cargo.lock ./
+
 # Copy source code
-COPY . .
+COPY src ./src
+COPY libs ./libs
+COPY examples ./examples
+COPY tests ./tests
 
 # Build release binary
 RUN cargo build --release --bin calm

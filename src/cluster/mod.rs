@@ -319,9 +319,72 @@ impl ClusterConfig {
             .collect()
     }
 
-    /// Check if running in standalone mode (no seed nodes)
-    pub fn is_standalone(&self) -> bool {
-        self.seed_nodes.is_empty()
+    /// Get our advertise address (real IP + port)
+    ///
+    /// If listen_addr is 0.0.0.0, tries to determine real IP by connecting to seed nodes.
+    /// Returns "hostname:port" format.
+    pub fn get_advertise_addr(&self) -> Option<String> {
+        let listen_addr = self.parse_listen_addr().ok()?;
+        let port = listen_addr.port();
+
+        // If not binding to 0.0.0.0, use listen address as-is
+        let ip_str = listen_addr.ip().to_string();
+        if !ip_str.starts_with("0.0.0.0") && !ip_str.starts_with("::") {
+            return Some(format!("{}:{}", ip_str, port));
+        }
+
+        // Try to get real IP by connecting to a seed node
+        for seed in &self.seed_nodes {
+            if let Some(real_ip) = crate::utils::net::get_real_ip(seed, Duration::from_secs(1)) {
+                return Some(format!("{}:{}", real_ip, port));
+            }
+        }
+
+        None
+    }
+
+    /// Check if this node is a seed node
+    ///
+    /// Logic:
+    /// - If seed_nodes is empty → We ARE a seed node (bootstrap/standalone)
+    /// - If seed_nodes is configured → Check if our IP is in the list
+    ///   - NOT in list → We ARE a seed node
+    ///   - In list → We are a worker node
+    pub fn is_seed_node(&self) -> bool {
+        // If no seed nodes configured, default to being a seed node
+        if self.seed_nodes.is_empty() {
+            return true;
+        }
+
+        // Get our advertise address (real IP + port)
+        let my_addr = match self.get_advertise_addr() {
+            Some(addr) => addr,
+            None => {
+                // Fallback: if we can't determine real IP, assume we're a seed node
+                log::warn!("[Cluster] Cannot determine real IP, assuming seed node");
+                return true;
+            }
+        };
+
+        // Extract IP from our address
+        let my_ip = if let Some(colon_pos) = my_addr.rfind(':') {
+            &my_addr[..colon_pos]
+        } else {
+            &my_addr
+        };
+
+        // Check if our IP appears in any seed node address
+        let found_self = self.seed_nodes.iter().any(|seed| {
+            if let Some(colon_pos) = seed.rfind(':') {
+                let seed_ip = &seed[..colon_pos];
+                seed_ip == my_ip
+            } else {
+                seed == my_ip
+            }
+        });
+
+        // If we're NOT in the seed list, we're a seed node
+        !found_self
     }
 
     /// Calculate quorum threshold for given node count
@@ -334,10 +397,15 @@ impl ClusterConfig {
         // Validate listen address
         self.parse_listen_addr()?;
 
-        // Validate seed nodes if present
-        if !self.seed_nodes.is_empty() {
-            self.parse_seed_nodes()?;
+        // Cluster mode requires seed nodes
+        if self.seed_nodes.is_empty() {
+            return Err(crate::utils::error::CoreError::Internal(
+                "seed_nodes cannot be empty in cluster mode. For single-node deployment, do not initialize ClusterManager.".to_string(),
+            ));
         }
+
+        // Validate seed nodes
+        self.parse_seed_nodes()?;
 
         // Validate min_cluster_size
         if self.min_cluster_size < 1 {

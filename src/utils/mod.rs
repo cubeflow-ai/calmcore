@@ -1,6 +1,7 @@
 pub(crate) mod arrow_utils;
 pub mod datetime_utils;
 pub mod error;
+pub mod net;
 pub mod timestamp;
 pub mod tracing;
 
