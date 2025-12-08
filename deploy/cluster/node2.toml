@@ -11,7 +11,7 @@ password = "calm"
 # 日志配置
 [log]
 level = "info"
-target = "file"
+target = "console"
 file = "./logs/node2/calm.log"
 rotation = true
 max_size_mb = 100
@@ -39,7 +39,7 @@ vote_timeout_secs = 10
 min_cluster_size = 2
 
 # 分布式查询配置
-[distributed]
+[cluster.distributed]
 query_timeout_ms = 30000
 shuffle_buffer_size = 10000
 max_concurrent_queries = 100

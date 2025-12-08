@@ -44,15 +44,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 设置分布式上下文到 Engine
     if let (Some(cm), Some(pm)) = (&cluster_manager, &partition_manager) {
-        let distributed_config = config.to_distributed_config();
-        log::info!(
-            "🌐 Distributed query enabled (timeout: {}ms, rpc_port: {})",
-            distributed_config.query_timeout_ms,
-            distributed_config.rpc_port
-        );
-        engine
-            .set_distributed_context(cm.clone(), pm.clone(), distributed_config)
-            .await;
+        if let Some(distributed_config) = config.to_distributed_config() {
+            log::info!(
+                "🌐 Distributed query enabled (timeout: {}ms, rpc_port: {})",
+                distributed_config.query_timeout_ms,
+                distributed_config.rpc_port
+            );
+            engine
+                .set_distributed_context(cm.clone(), pm.clone(), distributed_config)
+                .await;
+        }
     }
 
     // 存储服务器任务句柄
@@ -155,11 +156,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn init_cluster(
     config: &Config,
 ) -> (Option<Arc<ClusterManager>>, Option<Arc<PartitionManager>>) {
-    let cluster_config = config.to_cluster_config();
+    let Some(cluster_config) = config.to_cluster_config() else {
+        log::info!("📦 Running in standalone mode (cluster not configured)");
+        return (None, None);
+    };
 
-    // 检查是否需要启用集群模式
-    if !cluster_config.enabled && cluster_config.seed_nodes.is_empty() {
-        log::info!("📦 Running in standalone mode (cluster disabled)");
+    // 检查是否配置了 seed_nodes
+    if cluster_config.seed_nodes.is_empty() {
+        log::warn!("⚠️  Cluster configured but seed_nodes is empty, running in standalone mode");
         return (None, None);
     }
 

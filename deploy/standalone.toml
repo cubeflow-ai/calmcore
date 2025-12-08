@@ -1,0 +1,29 @@
+# CalmCore Standalone Configuration
+# 单机模式配置示例 - 不需要集群配置
+
+# 服务器基本配置
+host = "0.0.0.0"
+graphql_port = 9567
+es_port = 9200
+mysql_port = 3307
+user = "root"
+password = "calm"
+
+# 日志配置
+[log]
+level = "info"
+target = "file"
+file = "./logs/calm.log"
+rotation = true
+max_size_mb = 100
+max_files = 10
+
+# 引擎配置
+[engine]
+data_dir = "./data"
+persist_check_interval_secs = 60
+max_concurrent_persists = 4
+check_after_flush = true
+
+# 注意：没有 [cluster] section，自动使用单机模式
+# 不会启用集群和分布式查询功能

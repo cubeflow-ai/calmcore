@@ -40,13 +40,9 @@ pub struct Config {
     #[serde(default)]
     pub engine: EngineSettings,
 
-    /// 集群配置
+    /// 集群配置（None 表示单机模式，包含分布式查询配置）
     #[serde(default)]
-    pub cluster: ClusterSettings,
-
-    /// 分布式查询配置
-    #[serde(default)]
-    pub distributed: DistributedSettings,
+    pub cluster: Option<ClusterSettings>,
 }
 
 /// 日志配置
@@ -173,8 +169,7 @@ impl Default for Config {
             password: default_password(),
             log: LogSettings::default(),
             engine: EngineSettings::default(),
-            cluster: ClusterSettings::default(),
-            distributed: DistributedSettings::default(),
+            cluster: None,
         }
     }
 }
@@ -241,6 +236,10 @@ pub struct ClusterSettings {
     /// 最小集群大小
     #[serde(default = "default_min_cluster_size")]
     pub min_cluster_size: usize,
+
+    /// 分布式查询配置
+    #[serde(default)]
+    pub distributed: DistributedSettings,
 }
 
 fn default_node_id() -> String {
@@ -287,6 +286,7 @@ impl Default for ClusterSettings {
             suspect_timeout_secs: default_suspect_timeout_secs(),
             vote_timeout_secs: default_vote_timeout_secs(),
             min_cluster_size: default_min_cluster_size(),
+            distributed: DistributedSettings::default(),
         }
     }
 }
@@ -461,7 +461,10 @@ impl Config {
                 // Cluster arguments
                 "--node-id" => {
                     if i + 1 < args.len() {
-                        config.cluster.node_id = args[i + 1].clone();
+                        config
+                            .cluster
+                            .get_or_insert_with(ClusterSettings::default)
+                            .node_id = args[i + 1].clone();
                         i += 2;
                     } else {
                         return Err("Missing value for --node-id".into());
@@ -469,7 +472,10 @@ impl Config {
                 }
                 "--cluster-id" => {
                     if i + 1 < args.len() {
-                        config.cluster.cluster_id = args[i + 1].clone();
+                        config
+                            .cluster
+                            .get_or_insert_with(ClusterSettings::default)
+                            .cluster_id = args[i + 1].clone();
                         i += 2;
                     } else {
                         return Err("Missing value for --cluster-id".into());
@@ -477,7 +483,10 @@ impl Config {
                 }
                 "--gossip-addr" => {
                     if i + 1 < args.len() {
-                        config.cluster.listen_addr = args[i + 1].clone();
+                        config
+                            .cluster
+                            .get_or_insert_with(ClusterSettings::default)
+                            .listen_addr = args[i + 1].clone();
                         i += 2;
                     } else {
                         return Err("Missing value for --gossip-addr".into());
@@ -485,7 +494,10 @@ impl Config {
                 }
                 "--seed-nodes" => {
                     if i + 1 < args.len() {
-                        config.cluster.seed_nodes = args[i + 1]
+                        config
+                            .cluster
+                            .get_or_insert_with(ClusterSettings::default)
+                            .seed_nodes = args[i + 1]
                             .split(',')
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
@@ -538,16 +550,28 @@ impl Config {
 
         // Cluster environment variables
         if let Ok(val) = std::env::var("CALM_NODE_ID") {
-            config.cluster.node_id = val;
+            config
+                .cluster
+                .get_or_insert_with(ClusterSettings::default)
+                .node_id = val;
         }
         if let Ok(val) = std::env::var("CALM_CLUSTER_ID") {
-            config.cluster.cluster_id = val;
+            config
+                .cluster
+                .get_or_insert_with(ClusterSettings::default)
+                .cluster_id = val;
         }
         if let Ok(val) = std::env::var("CALM_GOSSIP_ADDR") {
-            config.cluster.listen_addr = val;
+            config
+                .cluster
+                .get_or_insert_with(ClusterSettings::default)
+                .listen_addr = val;
         }
         if let Ok(val) = std::env::var("CALM_SEED_NODES") {
-            config.cluster.seed_nodes = val
+            config
+                .cluster
+                .get_or_insert_with(ClusterSettings::default)
+                .seed_nodes = val
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -580,32 +604,35 @@ impl Config {
         }
     }
 
-    /// 转换为 ClusterConfig
-    pub fn to_cluster_config(&self) -> ClusterConfig {
-        ClusterConfig {
-            enabled: !self.cluster.seed_nodes.is_empty(),
-            node_id: self.cluster.node_id.clone(),
-            cluster_id: self.cluster.cluster_id.clone(),
-            listen_addr: self.cluster.listen_addr.clone(),
-            seed_nodes: self.cluster.seed_nodes.clone(),
-            gossip_interval: Duration::from_millis(self.cluster.gossip_interval_ms),
-            failure_timeout: Duration::from_secs(self.cluster.failure_timeout_secs),
-            suspect_timeout: Duration::from_secs(self.cluster.suspect_timeout_secs),
-            vote_timeout: Duration::from_secs(self.cluster.vote_timeout_secs),
-            min_cluster_size: self.cluster.min_cluster_size,
-        }
+    /// 转换为 ClusterConfig（仅当配置了集群时返回 Some）
+    pub fn to_cluster_config(&self) -> Option<ClusterConfig> {
+        self.cluster.as_ref().map(|cluster| ClusterConfig {
+            enabled: !cluster.seed_nodes.is_empty(),
+            node_id: cluster.node_id.clone(),
+            cluster_id: cluster.cluster_id.clone(),
+            listen_addr: cluster.listen_addr.clone(),
+            seed_nodes: cluster.seed_nodes.clone(),
+            gossip_interval: Duration::from_millis(cluster.gossip_interval_ms),
+            failure_timeout: Duration::from_secs(cluster.failure_timeout_secs),
+            suspect_timeout: Duration::from_secs(cluster.suspect_timeout_secs),
+            vote_timeout: Duration::from_secs(cluster.vote_timeout_secs),
+            min_cluster_size: cluster.min_cluster_size,
+        })
     }
 
-    /// 转换为 DistributedConfig
-    pub fn to_distributed_config(&self) -> DistributedConfig {
-        DistributedConfig {
-            query_timeout_ms: self.distributed.query_timeout_ms,
-            shuffle_buffer_size: self.distributed.shuffle_buffer_size,
-            max_concurrent_queries: self.distributed.max_concurrent_queries,
-            rpc_port: self.distributed.rpc_port,
-            connect_timeout_ms: self.distributed.connect_timeout_ms,
-            request_timeout_ms: self.distributed.request_timeout_ms,
-        }
+    /// 转换为 DistributedConfig（仅当配置了集群时返回 Some）
+    pub fn to_distributed_config(&self) -> Option<DistributedConfig> {
+        self.cluster.as_ref().map(|cluster| {
+            let distributed = &cluster.distributed;
+            DistributedConfig {
+                query_timeout_ms: distributed.query_timeout_ms,
+                shuffle_buffer_size: distributed.shuffle_buffer_size,
+                max_concurrent_queries: distributed.max_concurrent_queries,
+                rpc_port: distributed.rpc_port,
+                connect_timeout_ms: distributed.connect_timeout_ms,
+                request_timeout_ms: distributed.request_timeout_ms,
+            }
+        })
     }
 
     /// 打印帮助信息
