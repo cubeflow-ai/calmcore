@@ -95,13 +95,13 @@ impl NodeManager {
         let total_nodes = node_start_times.len();
 
         // 更新自己的集群版本（看到的节点数量）
-        let my_version = chitchat_guard.self_node_state().get(CLUSTER_VERSION_KEY);
+        let my_version = chitchat_guard.self_node_state().get(CLUSTER_NODE_COUNT);
         if my_version.as_deref() != Some(&total_nodes.to_string()) {
             drop(chitchat_guard);
             let mut chitchat_mut = self.chitchat.lock().await;
             chitchat_mut
                 .self_node_state()
-                .set(CLUSTER_VERSION_KEY, &total_nodes.to_string());
+                .set(CLUSTER_NODE_COUNT, &total_nodes.to_string());
 
             log::debug!("📊 Updated cluster version: {}", total_nodes);
             drop(chitchat_mut);
@@ -213,7 +213,7 @@ impl NodeManager {
         let mut max_version = my_version;
 
         for (_node_id, node_state) in chitchat.node_states() {
-            if let Some(version_str) = node_state.get(CLUSTER_VERSION_KEY) {
+            if let Some(version_str) = node_state.get(CLUSTER_NODE_COUNT) {
                 if let Ok(version) = version_str.parse::<usize>() {
                     max_version = max_version.max(version);
                 }
@@ -244,7 +244,7 @@ impl NodeManager {
         let mut max_version = 0;
 
         for (_node_id, node_state) in chitchat.node_states() {
-            if let Some(version_str) = node_state.get(CLUSTER_VERSION_KEY) {
+            if let Some(version_str) = node_state.get(CLUSTER_NODE_COUNT) {
                 if let Ok(version) = version_str.parse::<usize>() {
                     max_version = max_version.max(version);
                 }

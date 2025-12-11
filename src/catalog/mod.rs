@@ -137,6 +137,25 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn read_table_meta_from_disk(&self, table_name: &str) -> CoreResult<TableMeta> {
+        let table_meta_path = dir::table_dir(&self.work_dir, table_name).join("meta.json");
+
+        if !table_meta_path.exists() {
+            return Err(CoreError::NotExisted(format!(
+                "Table '{}' meta not found",
+                table_name
+            )));
+        }
+
+        let content = fs::read_to_string(&table_meta_path)
+            .map_err(|e| CoreError::IOError(format!("Failed to read table meta: {}", e)))?;
+
+        let meta: TableMeta = serde_json::from_str(&content)
+            .map_err(|e| CoreError::IOError(format!("Failed to parse table meta: {}", e)))?;
+
+        Ok(meta)
+    }
+
     /// =========================================== partiton operations ===========================================
 
     /// 创建 partition 目录和元数据
@@ -214,25 +233,6 @@ impl Catalog {
             .map_err(|e| CoreError::IOError(format!("Failed to write partition meta: {}", e)))?;
 
         Ok(())
-    }
-
-    pub fn read_table_meta_from_disk(&self, table_name: &str) -> CoreResult<TableMeta> {
-        let table_meta_path = dir::table_dir(&self.work_dir, table_name).join("meta.json");
-
-        if !table_meta_path.exists() {
-            return Err(CoreError::NotExisted(format!(
-                "Table '{}' meta not found",
-                table_name
-            )));
-        }
-
-        let content = fs::read_to_string(&table_meta_path)
-            .map_err(|e| CoreError::IOError(format!("Failed to read table meta: {}", e)))?;
-
-        let meta: TableMeta = serde_json::from_str(&content)
-            .map_err(|e| CoreError::IOError(format!("Failed to parse table meta: {}", e)))?;
-
-        Ok(meta)
     }
 
     // ========== 私有方法 ==========

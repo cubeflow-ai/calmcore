@@ -1,8 +1,9 @@
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub type CoreResult<T> = Result<T, CoreError>;
 
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error, Clone, Serialize, Deserialize)]
 pub enum CoreError {
     #[error("ok")]
     Ok(u64),

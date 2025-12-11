@@ -46,6 +46,9 @@ poem-openapi = "5"
 
 unicode-segmentation = "1.11.0"
 
+# RPC - tarpc for internal cluster communication
+tarpc = { version = "0.34", features = ["tokio1", "serde-transport", "tcp"] }
+tokio-serde = { version = "0.9", features = ["bincode"] }
 
 # GraphQL
 async-graphql = "7"

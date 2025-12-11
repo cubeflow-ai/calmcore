@@ -6,6 +6,7 @@ pub mod engine;
 pub mod utils;
 // pub mod analyzer;  // Temporarily disabled due to missing dependencies
 pub mod protocol;
+pub(crate) mod service;
 pub(crate) mod storage;
 
 // Re-export modules for backward compatibility

@@ -194,11 +194,6 @@ impl ClusterManager {
         Ok(chitchat_handle)
     }
 
-    /// Get node ID (legacy alias)
-    pub fn node_id(&self) -> &str {
-        &self.node_id
-    }
-
     /// Calculate quorum threshold
     pub fn quorum_threshold(&self, node_count: usize) -> usize {
         self.config.quorum_threshold(node_count)
@@ -207,6 +202,11 @@ impl ClusterManager {
     /// Get cluster configuration
     pub fn config(&self) -> &ClusterConfig {
         &self.config
+    }
+
+    /// Get local node ID
+    pub fn node_id(&self) -> &str {
+        &self.node_id
     }
 
     // ========================================================================
