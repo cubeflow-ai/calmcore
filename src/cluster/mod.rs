@@ -8,22 +8,16 @@
 //! - 投票协调（Voting-based failover）
 //! - 查询路由（Query routing）
 
+pub(crate) mod client;
+pub(crate) mod event;
 pub mod gossip;
-pub mod node;
-pub mod partition_manager;
+pub(crate) mod node_manager;
+pub(crate) mod partition_manager;
 pub mod query_router;
-pub mod voting;
 
-pub use gossip::{
-    ClusterManager, ClusterMembership, ClusterMetrics, ClusterState, ClusterStatus, MemberInfo,
-    NodeMetrics,
-};
-pub use node::{NodeId, NodeInfo, NodeState};
-pub use partition_manager::{
-    PartitionManager, PartitionTopology, TableTopology, TableTopologySummary, TopologySummary,
-};
+pub use gossip::ClusterManager;
+pub use partition_manager::PartitionManager;
 pub use query_router::QueryRouter;
-pub use voting::{PartitionKey, VoteRecord, VoteRound, VotingCoordinator};
 
 use crate::utils::error::CoreResult;
 use std::net::SocketAddr;
@@ -32,9 +26,6 @@ use std::time::Duration;
 /// 集群配置
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
-    /// 是否启用集群模式
-    pub enabled: bool,
-
     /// 本节点 ID（唯一标识，generated on first start）
     pub node_id: String,
 
@@ -68,7 +59,6 @@ pub struct ClusterConfig {
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             node_id: format!("node-{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
             cluster_id: "calm-cluster".to_string(),
             listen_addr: "0.0.0.0:7946".to_string(),
@@ -83,213 +73,6 @@ impl Default for ClusterConfig {
 }
 
 impl ClusterConfig {
-    /// 从环境变量加载配置（环境变量覆盖文件配置）
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
-
-        if let Ok(val) = std::env::var("CALM_NODE_ID") {
-            config.node_id = val;
-        }
-
-        if let Ok(val) = std::env::var("CALM_CLUSTER_ID") {
-            config.cluster_id = val;
-        }
-
-        if let Ok(val) = std::env::var("CALM_GOSSIP_ADDR") {
-            config.listen_addr = val;
-        }
-
-        if let Ok(val) = std::env::var("CALM_SEED_NODES") {
-            config.seed_nodes = val
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-
-        if let Ok(val) = std::env::var("CALM_GOSSIP_INTERVAL_MS") {
-            if let Ok(ms) = val.parse::<u64>() {
-                config.gossip_interval = Duration::from_millis(ms);
-            }
-        }
-
-        if let Ok(val) = std::env::var("CALM_FAILURE_TIMEOUT_SECS") {
-            if let Ok(secs) = val.parse::<u64>() {
-                config.failure_timeout = Duration::from_secs(secs);
-            }
-        }
-
-        if let Ok(val) = std::env::var("CALM_SUSPECT_TIMEOUT_SECS") {
-            if let Ok(secs) = val.parse::<u64>() {
-                config.suspect_timeout = Duration::from_secs(secs);
-            }
-        }
-
-        if let Ok(val) = std::env::var("CALM_VOTE_TIMEOUT_SECS") {
-            if let Ok(secs) = val.parse::<u64>() {
-                config.vote_timeout = Duration::from_secs(secs);
-            }
-        }
-
-        if let Ok(val) = std::env::var("CALM_MIN_CLUSTER_SIZE") {
-            if let Ok(size) = val.parse::<usize>() {
-                config.min_cluster_size = size;
-            }
-        }
-
-        config
-    }
-
-    /// 从 TOML 配置文件加载配置
-    pub fn from_toml(toml_content: &str) -> CoreResult<Self> {
-        let mut config = Self::default();
-
-        if let Ok(value) = toml_content.parse::<toml::Table>() {
-            if let Some(cluster) = value.get("cluster").and_then(|v| v.as_table()) {
-                if let Some(val) = cluster.get("cluster_id").and_then(|v| v.as_str()) {
-                    config.cluster_id = val.to_string();
-                }
-
-                if let Some(val) = cluster.get("node_id").and_then(|v| v.as_str()) {
-                    config.node_id = val.to_string();
-                }
-
-                if let Some(val) = cluster.get("listen_addr").and_then(|v| v.as_str()) {
-                    config.listen_addr = val.to_string();
-                }
-
-                if let Some(seeds) = cluster.get("seed_nodes").and_then(|v| v.as_array()) {
-                    config.seed_nodes = seeds
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .collect();
-                }
-
-                if let Some(val) = cluster
-                    .get("gossip_interval_ms")
-                    .and_then(|v| v.as_integer())
-                {
-                    config.gossip_interval = Duration::from_millis(val as u64);
-                }
-
-                if let Some(val) = cluster
-                    .get("failure_timeout_secs")
-                    .and_then(|v| v.as_integer())
-                {
-                    config.failure_timeout = Duration::from_secs(val as u64);
-                }
-
-                if let Some(val) = cluster
-                    .get("suspect_timeout_secs")
-                    .and_then(|v| v.as_integer())
-                {
-                    config.suspect_timeout = Duration::from_secs(val as u64);
-                }
-
-                if let Some(val) = cluster
-                    .get("vote_timeout_secs")
-                    .and_then(|v| v.as_integer())
-                {
-                    config.vote_timeout = Duration::from_secs(val as u64);
-                }
-
-                if let Some(val) = cluster.get("min_cluster_size").and_then(|v| v.as_integer()) {
-                    config.min_cluster_size = val as usize;
-                }
-            }
-        }
-
-        // Enable cluster mode if seed_nodes are configured
-        config.enabled = !config.seed_nodes.is_empty();
-
-        Ok(config)
-    }
-
-    /// Load configuration from file with environment variable override
-    /// Environment variables take precedence over file configuration
-    pub fn load(config_path: Option<&str>) -> CoreResult<Self> {
-        let mut config = if let Some(path) = config_path {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                Self::from_toml(&content)?
-            } else {
-                Self::default()
-            }
-        } else {
-            // Try default path
-            if let Ok(content) = std::fs::read_to_string("calm.toml") {
-                Self::from_toml(&content)?
-            } else {
-                Self::default()
-            }
-        };
-
-        // Apply environment variable overrides
-        config.apply_env_overrides();
-
-        Ok(config)
-    }
-
-    /// Apply environment variable overrides to existing config
-    fn apply_env_overrides(&mut self) {
-        if let Ok(val) = std::env::var("CALM_CLUSTER_ENABLED") {
-            self.enabled = val.parse().unwrap_or(self.enabled);
-        }
-
-        if let Ok(val) = std::env::var("CALM_NODE_ID") {
-            self.node_id = val;
-        }
-
-        if let Ok(val) = std::env::var("CALM_CLUSTER_ID") {
-            self.cluster_id = val;
-        }
-
-        if let Ok(val) = std::env::var("CALM_GOSSIP_ADDR") {
-            self.listen_addr = val;
-        }
-
-        if let Ok(val) = std::env::var("CALM_SEED_NODES") {
-            let seeds: Vec<String> = val
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !seeds.is_empty() {
-                self.seed_nodes = seeds;
-            }
-        }
-
-        if let Ok(val) = std::env::var("CALM_GOSSIP_INTERVAL_MS") {
-            if let Ok(ms) = val.parse::<u64>() {
-                self.gossip_interval = Duration::from_millis(ms);
-            }
-        }
-
-        if let Ok(val) = std::env::var("CALM_FAILURE_TIMEOUT_SECS") {
-            if let Ok(secs) = val.parse::<u64>() {
-                self.failure_timeout = Duration::from_secs(secs);
-            }
-        }
-
-        if let Ok(val) = std::env::var("CALM_SUSPECT_TIMEOUT_SECS") {
-            if let Ok(secs) = val.parse::<u64>() {
-                self.suspect_timeout = Duration::from_secs(secs);
-            }
-        }
-
-        if let Ok(val) = std::env::var("CALM_VOTE_TIMEOUT_SECS") {
-            if let Ok(secs) = val.parse::<u64>() {
-                self.vote_timeout = Duration::from_secs(secs);
-            }
-        }
-
-        if let Ok(val) = std::env::var("CALM_MIN_CLUSTER_SIZE") {
-            if let Ok(size) = val.parse::<usize>() {
-                self.min_cluster_size = size;
-            }
-        }
-    }
-
     /// Parse listen address to SocketAddr
     pub fn parse_listen_addr(&self) -> CoreResult<SocketAddr> {
         self.listen_addr.parse().map_err(|e| {
@@ -412,24 +195,4 @@ impl ClusterConfig {
 
         Ok(())
     }
-}
-
-/// 从配置文件加载集群配置
-pub fn load_cluster_config(config_path: &str) -> CoreResult<ClusterConfig> {
-    ClusterConfig::load(Some(config_path))
-}
-
-/// Cluster event types for subscribers
-#[derive(Debug, Clone)]
-pub enum ClusterEvent {
-    /// A new node joined the cluster
-    NodeJoined(NodeId),
-    /// A node is suspected to be failing
-    NodeSuspect(NodeId),
-    /// A node has been confirmed dead
-    NodeDead(NodeId),
-    /// A previously dead node has recovered
-    NodeRecovered(NodeId),
-    /// Partition topology has changed
-    TopologyChanged { table: String, partition: String },
 }

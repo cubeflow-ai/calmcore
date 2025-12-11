@@ -387,10 +387,12 @@ impl InformationSchemaExecutor {
         // 遍历所有表并获取列信息
         for table_name in &tables {
             // 获取表的 schema
-            let table_schema = match self.engine.get_table_schema(table_name).await {
-                Ok(schema) => schema,
+            let table = match self.engine.get_table_meta(table_name).await {
+                Ok(table) => table,
                 Err(_) => continue, // 跳过无法获取 schema 的表
             };
+
+            let table_schema = &table.schema;
 
             // 遍历所有字段
             for (ordinal, field) in table_schema.fields.iter().enumerate() {

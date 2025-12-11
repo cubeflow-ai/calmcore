@@ -1,7 +1,7 @@
 mod config;
 
 use calm::{
-    cluster::{ClusterManager, PartitionManager, VotingCoordinator},
+    cluster::{ClusterManager, PartitionManager},
     engine::Engine,
     protocol::{elasticsearch::ElasticsearchServer, graphql::GraphQLServer, mysql::MysqlServer},
 };
@@ -29,32 +29,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🌐 Host: {}", config.host);
     println!();
 
+    // 初始化集群
+    let cluster_manager = Arc::new(ClusterManager::new(config.to_cluster_config()).await?);
+
     // 创建 Engine
     let engine_config = config.to_engine_config();
-    let engine = Engine::new(engine_config)?;
+    let engine = Engine::new(engine_config, cluster_manager.clone())?;
 
     // 加载已存在的表
     println!("📚 Loading existing tables...");
     engine.load_existing_tables().await?;
     println!("✓ Tables loaded");
     println!();
-
-    // 初始化集群管理器（如果启用）
-    let (cluster_manager, partition_manager) = init_cluster(&config).await;
-
-    // 设置分布式上下文到 Engine
-    if let (Some(cm), Some(pm)) = (&cluster_manager, &partition_manager) {
-        if let Some(distributed_config) = config.to_distributed_config() {
-            log::info!(
-                "🌐 Distributed query enabled (timeout: {}ms, rpc_port: {})",
-                distributed_config.query_timeout_ms,
-                distributed_config.rpc_port
-            );
-            engine
-                .set_distributed_context(cm.clone(), pm.clone(), distributed_config)
-                .await;
-        }
-    }
 
     // 存储服务器任务句柄
     let mut handles = Vec::new();
@@ -135,67 +121,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🛑 Shutting down...");
 
     // Gracefully shutdown cluster if enabled
-    if let Some(ref cm) = cluster_manager {
-        println!("🌐 Shutting down cluster manager...");
-        if let Err(e) = cm.shutdown().await {
-            eprintln!("⚠️  Cluster shutdown error: {}", e);
-        }
-        println!("✓ Cluster manager shutdown complete");
+    println!("🌐 Shutting down cluster manager...");
+    if let Err(e) = cluster_manager.shutdown().await {
+        eprintln!("⚠️  Cluster shutdown error: {}", e);
     }
+    println!("✓ Cluster manager shutdown complete");
 
     engine.stop().await?;
     println!("✓ Shutdown complete");
 
     Ok(())
-}
-
-/// 初始化集群管理器
-///
-/// 如果集群配置启用，则初始化 ClusterManager 和 PartitionManager，
-/// 并启动事件监听和后台同步任务。
-async fn init_cluster(
-    config: &Config,
-) -> (Option<Arc<ClusterManager>>, Option<Arc<PartitionManager>>) {
-    let Some(cluster_config) = config.to_cluster_config() else {
-        log::info!("📦 Running in standalone mode (cluster not configured)");
-        return (None, None);
-    };
-
-    // 检查是否配置了 seed_nodes
-    if cluster_config.seed_nodes.is_empty() {
-        log::warn!("⚠️  Cluster configured but seed_nodes is empty, running in standalone mode");
-        return (None, None);
-    }
-
-    log::info!(
-        "🌐 Initializing cluster (node_id: {}, cluster_id: {})",
-        cluster_config.node_id,
-        cluster_config.cluster_id
-    );
-
-    match ClusterManager::new(cluster_config.clone()).await {
-        Ok(cm) => {
-            let cm = Arc::new(cm);
-
-            // 创建 VotingCoordinator 和 PartitionManager
-            let voting = Arc::new(VotingCoordinator::new(cluster_config.vote_timeout));
-            let partition_manager = Arc::new(PartitionManager::new(cm.clone(), voting));
-
-            // 启动事件监听器（处理节点故障、恢复等事件）
-            partition_manager.start_event_listener();
-
-            // 启动后台同步任务（处理投票结果、同步拓扑）
-            partition_manager.start_background_sync();
-
-            log::info!("✓ Cluster initialized successfully");
-            (Some(cm), Some(partition_manager))
-        }
-        Err(e) => {
-            log::error!("❌ Failed to initialize cluster: {}", e);
-            log::warn!("   Continuing in standalone mode...");
-            (None, None)
-        }
-    }
 }
 
 /// 初始化日志系统

@@ -1,3 +1,5 @@
+pub(crate) mod internal;
+
 use std::sync::Arc;
 
 use async_graphql::{Context, EmptySubscription, Object, Result, Schema, SimpleObject};
@@ -1906,112 +1908,113 @@ impl MutationRoot {
     /// }
     /// ```
     async fn insert_data(&self, ctx: &Context<'_>, input: InsertDataInput) -> Result<InsertResult> {
-        let engine = ctx.data::<Arc<Engine>>()?;
+        todo!()
+        // let engine = ctx.data::<Arc<Engine>>()?;
 
-        // 获取表的元数据
-        let meta = engine
-            .get_table_meta(&input.table)
-            .map_err(|e| async_graphql::Error::new(format!("Table not found: {}", e)))?;
+        // // 获取表的元数据
+        // let meta = engine
+        //     .get_table_meta(&input.table)
+        //     .map_err(|e| async_graphql::Error::new(format!("Table not found: {}", e)))?;
 
-        // 情况 1: 用户指定了 partition,直接插入到该分区（Custom 分区策略）
-        if let Some(partition_name) = &input.partition {
-            // 尝试获取分区,如果不存在则创建
-            let partition = match engine.get_partition(&input.table, partition_name).await {
-                Some(p) => p,
-                None => {
-                    // 分区不存在,自动创建新分区
-                    log::info!(
-                        "Partition '{}' not found for table '{}', creating new partition",
-                        partition_name,
-                        input.table
-                    );
+        // // 情况 1: 用户指定了 partition,直接插入到该分区（Custom 分区策略）
+        // if let Some(partition_name) = &input.partition {
+        //     // 尝试获取分区,如果不存在则创建
+        //     let partition = match engine.get_partition(&input.table, partition_name).await {
+        //         Some(p) => p,
+        //         None => {
+        //             // 分区不存在,自动创建新分区
+        //             log::info!(
+        //                 "Partition '{}' not found for table '{}', creating new partition",
+        //                 partition_name,
+        //                 input.table
+        //             );
 
-                    // 使用 load_partition 创建新分区
-                    engine
-                        .load_partition(&input.table, partition_name.clone(), meta.schema.clone())
-                        .await
-                        .map_err(|e| {
-                            async_graphql::Error::new(format!(
-                                "Failed to create partition '{}': {}",
-                                partition_name, e
-                            ))
-                        })?
-                }
-            };
+        //             // 使用 load_partition 创建新分区
+        //             engine
+        //                 .load_partition(&input.table, partition_name.clone(), meta.schema.clone())
+        //                 .await
+        //                 .map_err(|e| {
+        //                     async_graphql::Error::new(format!(
+        //                         "Failed to create partition '{}': {}",
+        //                         partition_name, e
+        //                     ))
+        //                 })?
+        //         }
+        //     };
 
-            // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
-            let normalized_data: Vec<serde_json::Value> = input
-                .data
-                .iter()
-                .map(|value| {
-                    if let serde_json::Value::Object(map) = value {
-                        let mut new_map = serde_json::Map::new();
-                        for (key, val) in map {
-                            new_map.insert(key.to_lowercase(), val.clone());
-                        }
-                        serde_json::Value::Object(new_map)
-                    } else {
-                        value.clone()
-                    }
-                })
-                .collect();
+        //     // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
+        //     let normalized_data: Vec<serde_json::Value> = input
+        //         .data
+        //         .iter()
+        //         .map(|value| {
+        //             if let serde_json::Value::Object(map) = value {
+        //                 let mut new_map = serde_json::Map::new();
+        //                 for (key, val) in map {
+        //                     new_map.insert(key.to_lowercase(), val.clone());
+        //                 }
+        //                 serde_json::Value::Object(new_map)
+        //             } else {
+        //                 value.clone()
+        //             }
+        //         })
+        //         .collect();
 
-            // 批量插入所有数据到指定分区
-            partition
-                .upsert_json(&normalized_data)
-                .map_err(|e| async_graphql::Error::new(format!("Insert failed: {}", e)))?;
+        //     // 批量插入所有数据到指定分区
+        //     partition
+        //         .upsert_json(&normalized_data)
+        //         .map_err(|e| async_graphql::Error::new(format!("Insert failed: {}", e)))?;
 
-            let total_inserted = normalized_data.len();
+        //     let total_inserted = normalized_data.len();
 
-            return Ok(InsertResult {
-                success: true,
-                rows_inserted: total_inserted,
-                message: format!(
-                    "Successfully inserted {} rows to partition '{}'",
-                    total_inserted, partition_name
-                ),
-            });
-        }
+        //     return Ok(InsertResult {
+        //         success: true,
+        //         rows_inserted: total_inserted,
+        //         message: format!(
+        //             "Successfully inserted {} rows to partition '{}'",
+        //             total_inserted, partition_name
+        //         ),
+        //     });
+        // }
 
-        // 情况 2: 未指定 partition,使用统一路由接口
-        // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
-        let normalized_data: Vec<serde_json::Value> = input
-            .data
-            .iter()
-            .map(|value| {
-                if let serde_json::Value::Object(map) = value {
-                    let mut new_map = serde_json::Map::new();
-                    for (key, val) in map {
-                        new_map.insert(key.to_lowercase(), val.clone());
-                    }
-                    serde_json::Value::Object(new_map)
-                } else {
-                    value.clone()
-                }
-            })
-            .collect();
+        // // 情况 2: 未指定 partition,使用统一路由接口
+        // // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
+        // let normalized_data: Vec<serde_json::Value> = input
+        //     .data
+        //     .iter()
+        //     .map(|value| {
+        //         if let serde_json::Value::Object(map) = value {
+        //             let mut new_map = serde_json::Map::new();
+        //             for (key, val) in map {
+        //                 new_map.insert(key.to_lowercase(), val.clone());
+        //             }
+        //             serde_json::Value::Object(new_map)
+        //         } else {
+        //             value.clone()
+        //         }
+        //     })
+        //     .collect();
 
-        // 将标准化后的 JSON 数据转换为 RecordBatch
-        let batch = crate::utils::arrow_utils::json_to_record_batch(
-            &normalized_data,
-            meta.schema.to_arrow_schema(),
-        )
-        .map_err(|e| async_graphql::Error::new(format!("Failed to convert data: {}", e)))?;
+        // // 将标准化后的 JSON 数据转换为 RecordBatch
+        // let batch = crate::utils::arrow_utils::json_to_record_batch(
+        //     &normalized_data,
+        //     meta.schema.to_arrow_schema(),
+        // )
+        // .map_err(|e| async_graphql::Error::new(format!("Failed to convert data: {}", e)))?;
 
-        // 使用 Engine::insert_batch 统一路由和插入
-        let stats = engine
-            .insert_batch(&input.table, batch, None)
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("Insert failed: {}", e)))?;
+        // // 使用 Engine::insert_batch 统一路由和插入
+        // let stats = engine
+        //     .insert_batch(&input.table, batch, None)
+        //     .await
+        //     .map_err(|e| async_graphql::Error::new(format!("Insert failed: {}", e)))?;
 
-        Ok(InsertResult {
-            success: true,
-            rows_inserted: stats.rows_inserted,
-            message: format!(
-                "Successfully inserted {} rows to {} partitions",
-                stats.rows_inserted, stats.partitions_affected
-            ),
-        })
+        // Ok(InsertResult {
+        //     success: true,
+        //     rows_inserted: stats.rows_inserted,
+        //     message: format!(
+        //         "Successfully inserted {} rows to {} partitions",
+        //         stats.rows_inserted, stats.partitions_affected
+        //     ),
+        // })
     }
 
     /// 加载外部文件到 segment

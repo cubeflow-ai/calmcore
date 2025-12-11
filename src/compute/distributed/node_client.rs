@@ -575,27 +575,28 @@ impl NodeClientManager {
 
     /// 获取节点地址
     async fn get_node_addr(&self, node_id: &str) -> CoreResult<String> {
-        // 从集群管理器获取节点信息
-        let membership = self.cluster_manager.get_membership().await;
+        todo!()
+        // // 从集群管理器获取节点信息
+        // let membership = self.cluster_manager.get_membership().await;
 
-        for member in &membership.members {
-            if member.node_id == node_id {
-                // 构建 gRPC 地址（使用 RPC 端口）
-                // member.gossip_addr 格式为 "host:gossip_port"
-                // 我们需要替换为 RPC 端口
-                let parts: Vec<&str> = member.gossip_addr.split(':').collect();
-                if !parts.is_empty() {
-                    let host = parts[0];
-                    let addr = format!("{}:{}", host, self.config.rpc_port);
-                    return Ok(addr);
-                }
-            }
-        }
+        // for member in &membership.members {
+        //     if member.node_id == node_id {
+        //         // 构建 gRPC 地址（使用 RPC 端口）
+        //         // member.gossip_addr 格式为 "host:gossip_port"
+        //         // 我们需要替换为 RPC 端口
+        //         let parts: Vec<&str> = member.gossip_addr.split(':').collect();
+        //         if !parts.is_empty() {
+        //             let host = parts[0];
+        //             let addr = format!("{}:{}", host, self.config.rpc_port);
+        //             return Ok(addr);
+        //         }
+        //     }
+        // }
 
-        Err(CoreError::NotExisted(format!(
-            "Node {} not found in cluster",
-            node_id
-        )))
+        // Err(CoreError::NotExisted(format!(
+        //     "Node {} not found in cluster",
+        //     node_id
+        // )))
     }
 
     /// 获取所有可用节点的客户端

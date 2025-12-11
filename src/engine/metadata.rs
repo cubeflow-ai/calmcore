@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::catalog::{PartitionStrategy, TableMeta};
+use datafusion::arrow::compute::kernels::partition;
+
+use crate::catalog::{dir, PartitionStrategy, TableMeta};
 use crate::partition::Partition;
 use crate::schema::Schema;
 use crate::utils::error::{CoreError, CoreResult};
@@ -11,7 +13,7 @@ use super::Engine;
 
 impl Engine {
     /// 获取表的元数据
-    pub fn get_table_meta(&self, table_name: &str) -> CoreResult<Arc<TableMeta>> {
+    pub async fn get_table_meta(&self, table_name: &str) -> CoreResult<Arc<TableMeta>> {
         self.catalog.get_table(table_name)
     }
 
@@ -20,205 +22,45 @@ impl Engine {
         self.catalog.list_tables()
     }
 
-    /// 获取表的 Schema（用于 INFORMATION_SCHEMA 查询）
-    pub async fn get_table_schema(
+    /// ==============================================================local methods ==================================================
+
+    pub async fn local_load_partition(
         &self,
         table_name: &str,
-    ) -> CoreResult<Arc<crate::schema::Schema>> {
+        partition_name: &str,
+    ) -> CoreResult<Arc<Partition>> {
+        // 从文件系统读取表的元数据
         let table_meta = self.catalog.get_table(table_name)?;
-        Ok(Arc::new(table_meta.schema.clone()))
-    }
+        let schema = table_meta.schema.clone();
 
-    /// 创建新表
-    ///
-    /// # 参数
-    /// - `table_name`: 表名
-    /// - `schema`: 表的 Schema
-    /// - `partition_strategy`: 分区策略
-    /// - `num_partitions`: 分区数量
-    pub async fn create_table(
-        &self,
-        table_name: &str,
-        schema: Schema,
-        partition_strategy: PartitionStrategy,
-        num_partitions: usize,
-    ) -> CoreResult<()> {
-        // 创建 TableMeta
-        let meta = TableMeta::new(table_name.to_string(), schema.clone(), partition_strategy);
+        let partition_dir = dir::partition_dir(&self.config.data_dir, table_name, partition_name);
 
-        // 在 Catalog 中创建表（会创建目录结构和元数据）
-        self.catalog.create_table(meta)?;
+        // 从磁盘加载分区
+        let partition = Arc::new(Partition::load(
+            partition_name.to_string(),
+            table_name.to_string(),
+            partition_dir,
+            schema,
+            (*self.partition_notify_tx).clone(),
+        )?);
 
-        // 加载所有 partition 到内存
-        log::debug!(
-            "🔍 [DEBUG create_table] Creating {} partitions for table '{}'",
-            num_partitions,
-            table_name
+        // 添加到内存中
+        self.partitions.write().await.insert(
+            (table_name.to_string(), partition.name().to_string()),
+            partition.clone(),
         );
-
-        let table_meta = self.catalog.get_table(table_name)?;
-
-        // 生成所有 partition 名称（None 策略返回 None）
-        let partition_names = match table_meta.partition_strategy.generate_partitions() {
-            Some(names) => names,
-            None => {
-                // None 策略：单分区
-                vec!["partition_000000000000000000".to_string()]
-            }
-        };
-
-        for partition_name in partition_names {
-            let partition_dir = self
-                .config
-                .data_dir
-                .join("tables")
-                .join(table_name)
-                .join("partitions")
-                .join(
-                    crate::catalog::PartitionStrategy::generate_partition_dir_name(&partition_name),
-                );
-
-            log::debug!(
-                "🔍 [DEBUG create_table] Creating partition {} at {:?}",
-                partition_name,
-                partition_dir
-            );
-
-            let partition = Partition::new(
-                partition_name.clone(),
-                table_name.to_string(),
-                partition_dir,
-                schema.clone(),
-                (*self.partition_notify_tx).clone(),
-            );
-
-            let partition = Arc::new(partition);
-            log::debug!(
-                "🔍 [DEBUG create_table] About to add partition {} to map",
-                partition_name
-            );
-            self.add_partition_with_table(table_name, partition).await;
-            log::debug!(
-                "🔍 [DEBUG create_table] Finished adding partition {}",
-                partition_name
-            );
-        }
-
-        log::debug!(
-            "✅ Table '{}' created with {} partitions",
-            table_name,
-            num_partitions
-        );
-        Ok(())
-    }
-
-    /// 删除表
-    pub async fn drop_table(&self, table_name: &str) -> CoreResult<()> {
-        // 直接扫描磁盘上的 partitions 子目录，不依赖分区策略
-        let partitions_dir = self
-            .config
-            .data_dir
-            .join("tables")
-            .join(table_name)
-            .join("partitions");
-
-        let mut partition_names = Vec::new();
-        if partitions_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&partitions_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                            // 提取 partition-{name} 格式的目录
-                            if let Some(partition_name) =
-                                crate::catalog::PartitionStrategy::extract_partition_from_dir_name(
-                                    dir_name,
-                                )
-                            {
-                                partition_names.push(partition_name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 移除所有相关的 partition
-        for partition_name in partition_names {
-            self.remove_partition(table_name, &partition_name).await;
-        }
-
-        // 从 catalog 中删除
-        self.catalog.drop_table(table_name)?;
-        Ok(())
-    }
-
-    /// 添加已存在的 Partition (带表名)
-    pub async fn add_partition_with_table(&self, table_name: &str, partition: Arc<Partition>) {
-        let partition_name = partition.name().to_string();
-        let key = (table_name.to_string(), partition_name.clone());
-        let mut partitions = self.partitions.write().await;
-        partitions.insert(key.clone(), partition);
-
-        log::debug!(
-            "🔍 [DEBUG] Added partition: table={}, partition_name={}",
-            table_name,
-            partition_name
-        );
-        log::debug!("🔍 [DEBUG] Total partitions in map: {}", partitions.len());
-        log::debug!("🔍 [DEBUG] Key inserted: {:?}", key);
 
         log::info!(
             "Added partition {} for table {}",
             partition_name,
             table_name
         );
-    }
 
-    /// 添加已存在的 Partition (兼容旧接口,已废弃)
-    #[deprecated(note = "使用 add_partition_with_table 代替")]
-    pub async fn add_partition(&self, partition: Arc<Partition>) {
-        let partition_name = partition.name().to_string();
-        let mut partitions = self.partitions.write().await;
-        // 使用 partition_name 作为 table_name (向后兼容)
-        let key = (
-            format!("__legacy_{}", partition_name),
-            partition_name.clone(),
-        );
-        partitions.insert(key, partition);
-
-        log::info!("Added partition {} (legacy mode)", partition_name);
-    }
-
-    /// 加载 Partition（从磁盘恢复）
-    pub async fn load_partition(
-        &self,
-        table_name: &str,
-        id: String,
-        schema: Schema,
-    ) -> CoreResult<Arc<Partition>> {
-        let partition_dir = self
-            .config
-            .data_dir
-            .join("tables")
-            .join(table_name)
-            .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(&id));
-        let partition = Partition::load(
-            id,
-            table_name.to_string(),
-            partition_dir,
-            schema,
-            (*self.partition_notify_tx).clone(),
-        )?;
-
-        let partition = Arc::new(partition);
-        self.add_partition_with_table(table_name, partition.clone())
-            .await;
         Ok(partition)
     }
 
     /// 移除 Partition
-    pub async fn remove_partition(&self, table_name: &str, partition_name: &str) {
+    pub async fn local_drop_partition(&self, table_name: &str, partition_name: &str) {
         let key = (table_name.to_string(), partition_name.to_string());
         let mut partitions = self.partitions.write().await;
         partitions.remove(&key);

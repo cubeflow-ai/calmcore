@@ -29,7 +29,7 @@ use super::error_handler::{
     TimeoutExecutor,
 };
 use super::node_client::{NodeClientManager, QueryRequest};
-use crate::cluster::{ClusterManager, PartitionManager, TableTopology};
+use crate::cluster::{ClusterManager, PartitionManager};
 use crate::compute::{SqlNormalizer, UnionTableProvider};
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
@@ -104,64 +104,65 @@ impl DistributedExecutor {
     /// - 无 GROUP BY：Scatter-Gather 模式
     /// - 有 GROUP BY：Shuffle 模式
     pub async fn execute_sql(&self, sql: &str) -> CoreResult<SendableRecordBatchStream> {
-        log::info!("[DistributedExecutor] Executing SQL: {}", sql);
+        todo!()
+        // log::info!("[DistributedExecutor] Executing SQL: {}", sql);
 
-        // 1. 标准化 SQL
-        let normalized = SqlNormalizer::normalize(sql)?;
+        // // 1. 标准化 SQL
+        // let normalized = SqlNormalizer::normalize(sql)?;
 
-        // 2. 提取表名
-        let table_name = self.extract_table_name(&normalized.rewritten_sql)?;
+        // // 2. 提取表名
+        // let table_name = self.extract_table_name(&normalized.rewritten_sql)?;
 
-        // 3. 获取 Partition 分布
-        let topology = self
-            .partition_manager
-            .get_table_topology(&table_name)
-            .await
-            .ok_or_else(|| {
-                CoreError::NotExisted(format!(
-                    "Table '{}' not found in cluster topology",
-                    table_name
-                ))
-            })?;
+        // // 3. 获取 Partition 分布
+        // let topology = self
+        //     .partition_manager
+        //     .get_table_topology(&table_name)
+        //     .await
+        //     .ok_or_else(|| {
+        //         CoreError::NotExisted(format!(
+        //             "Table '{}' not found in cluster topology",
+        //             table_name
+        //         ))
+        //     })?;
 
-        // 4. 分类本地和远程 Partition
-        let my_node_id = self.cluster_manager.node_id();
-        let (local_partitions, remote_partitions) = self.classify_partitions(&topology, my_node_id);
+        // // 4. 分类本地和远程 Partition
+        // let my_node_id = self.cluster_manager.node_id();
+        // let (local_partitions, remote_partitions) = self.classify_partitions(&topology, my_node_id);
 
-        log::info!(
-            "[DistributedExecutor] Table '{}': {} local, {} remote partitions",
-            table_name,
-            local_partitions.len(),
-            remote_partitions.len()
-        );
+        // log::info!(
+        //     "[DistributedExecutor] Table '{}': {} local, {} remote partitions",
+        //     table_name,
+        //     local_partitions.len(),
+        //     remote_partitions.len()
+        // );
 
-        // 5. 判断是否需要 Shuffle（检查 GROUP BY）
-        let has_group_by = self.has_group_by(&normalized.rewritten_sql);
+        // // 5. 判断是否需要 Shuffle（检查 GROUP BY）
+        // let has_group_by = self.has_group_by(&normalized.rewritten_sql);
 
-        // 6. 选择执行策略
-        if has_group_by {
-            // 提取 GROUP BY 列
-            let group_by_cols = self.extract_group_by_columns(&normalized.rewritten_sql)?;
+        // // 6. 选择执行策略
+        // if has_group_by {
+        //     // 提取 GROUP BY 列
+        //     let group_by_cols = self.extract_group_by_columns(&normalized.rewritten_sql)?;
 
-            // Shuffle 模式
-            self.execute_with_shuffle(
-                &normalized.rewritten_sql,
-                &table_name,
-                &local_partitions,
-                &remote_partitions,
-                &group_by_cols,
-            )
-            .await
-        } else {
-            // Scatter-Gather 模式
-            self.execute_scatter_gather(
-                &normalized.rewritten_sql,
-                &table_name,
-                &local_partitions,
-                &remote_partitions,
-            )
-            .await
-        }
+        //     // Shuffle 模式
+        //     self.execute_with_shuffle(
+        //         &normalized.rewritten_sql,
+        //         &table_name,
+        //         &local_partitions,
+        //         &remote_partitions,
+        //         &group_by_cols,
+        //     )
+        //     .await
+        // } else {
+        //     // Scatter-Gather 模式
+        //     self.execute_scatter_gather(
+        //         &normalized.rewritten_sql,
+        //         &table_name,
+        //         &local_partitions,
+        //         &remote_partitions,
+        //     )
+        //     .await
+        // }
     }
 
     /// 执行 Scatter-Gather 查询（无 GROUP BY）
@@ -512,27 +513,27 @@ impl DistributedExecutor {
     }
 
     /// 分类 Partition 为本地和远程
-    fn classify_partitions(
-        &self,
-        topology: &TableTopology,
-        my_node_id: &str,
-    ) -> (Vec<String>, Vec<RemotePartitionInfo>) {
-        let mut local = Vec::new();
-        let mut remote = Vec::new();
+    // fn classify_partitions(
+    //     &self,
+    //     topology: &TableTopology,
+    //     my_node_id: &str,
+    // ) -> (Vec<String>, Vec<RemotePartitionInfo>) {
+    //     let mut local = Vec::new();
+    //     let mut remote = Vec::new();
 
-        for (partition_name, partition_info) in &topology.partitions {
-            if partition_info.write_node == my_node_id {
-                local.push(partition_name.clone());
-            } else {
-                remote.push(RemotePartitionInfo {
-                    partition_name: partition_name.clone(),
-                    node_id: partition_info.write_node.clone(),
-                });
-            }
-        }
+    //     for (partition_name, partition_info) in &topology.partitions {
+    //         if partition_info.write_node == my_node_id {
+    //             local.push(partition_name.clone());
+    //         } else {
+    //             remote.push(RemotePartitionInfo {
+    //                 partition_name: partition_name.clone(),
+    //                 node_id: partition_info.write_node.clone(),
+    //             });
+    //         }
+    //     }
 
-        (local, remote)
-    }
+    //     (local, remote)
+    // }
 
     /// 从 SQL 中提取表名
     fn extract_table_name(&self, sql: &str) -> CoreResult<String> {

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use datafusion::physical_plan::SendableRecordBatchStream;
 
 use super::config::DistributedConfig;
-use crate::cluster::{ClusterManager, PartitionManager};
+use crate::cluster::ClusterManager;
 use crate::engine::Engine;
 use crate::utils::error::CoreResult;
 
@@ -34,9 +34,6 @@ pub struct QueryCoordinator {
     /// 集群管理器（可选，单机模式为 None）
     cluster_manager: Option<Arc<ClusterManager>>,
 
-    /// 分区管理器（可选，单机模式为 None）
-    partition_manager: Option<Arc<PartitionManager>>,
-
     /// 分布式配置
     config: DistributedConfig,
 }
@@ -45,29 +42,11 @@ impl QueryCoordinator {
     /// 创建单机模式的 QueryCoordinator
     ///
     /// 单机模式下，所有查询直接走 DataFusionExecutor
-    pub fn standalone(engine: Arc<Engine>) -> Self {
+    pub fn new(engine: Arc<Engine>, cluster_manager: Option<Arc<ClusterManager>>) -> Self {
         Self {
             engine,
-            cluster_manager: None,
-            partition_manager: None,
+            cluster_manager,
             config: DistributedConfig::default(),
-        }
-    }
-
-    /// 创建分布式模式的 QueryCoordinator
-    ///
-    /// 分布式模式下，根据 Partition 分布决定执行策略
-    pub fn distributed(
-        engine: Arc<Engine>,
-        cluster_manager: Arc<ClusterManager>,
-        partition_manager: Arc<PartitionManager>,
-        config: DistributedConfig,
-    ) -> Self {
-        Self {
-            engine,
-            cluster_manager: Some(cluster_manager),
-            partition_manager: Some(partition_manager),
-            config,
         }
     }
 
@@ -108,54 +87,55 @@ impl QueryCoordinator {
     /// - 所有 Partition 在本地：使用本地执行
     /// - 存在远程 Partition：使用分布式执行
     async fn execute_distributed(&self, sql: &str) -> CoreResult<SendableRecordBatchStream> {
-        let cluster_manager = self.cluster_manager.as_ref().unwrap();
-        let partition_manager = self.partition_manager.as_ref().unwrap();
+        todo!()
+        // let cluster_manager = self.cluster_manager.as_ref().unwrap();
+        // let partition_manager = self.partition_manager.as_ref().unwrap();
 
-        // 获取本节点 ID
-        let my_node_id = cluster_manager.node_id();
+        // // 获取本节点 ID
+        // let my_node_id = cluster_manager.node_id();
 
-        // 提取表名
-        let table_name = self.extract_table_name(sql)?;
+        // // 提取表名
+        // let table_name = self.extract_table_name(sql)?;
 
-        // 获取表的 Partition 拓扑
-        let topology = match partition_manager.get_table_topology(&table_name).await {
-            Some(t) => t,
-            None => {
-                // 表不存在于集群拓扑中，使用本地执行
-                log::debug!(
-                    "[QueryCoordinator] Table '{}' not in cluster topology, using standalone",
-                    table_name
-                );
-                return self.execute_standalone(sql).await;
-            }
-        };
+        // // 获取表的 Partition 拓扑
+        // let topology = match partition_manager.get_table_topology(&table_name).await {
+        //     Some(t) => t,
+        //     None => {
+        //         // 表不存在于集群拓扑中，使用本地执行
+        //         log::debug!(
+        //             "[QueryCoordinator] Table '{}' not in cluster topology, using standalone",
+        //             table_name
+        //         );
+        //         return self.execute_standalone(sql).await;
+        //     }
+        // };
 
-        // 分类本地和远程 Partition
-        let (local_partitions, remote_partitions) =
-            self.classify_partitions(&topology, &my_node_id);
+        // // 分类本地和远程 Partition
+        // let (local_partitions, remote_partitions) =
+        //     self.classify_partitions(&topology, &my_node_id);
 
-        log::info!(
-            "[QueryCoordinator] Table '{}': {} local partitions, {} remote partitions",
-            table_name,
-            local_partitions.len(),
-            remote_partitions.len()
-        );
+        // log::info!(
+        //     "[QueryCoordinator] Table '{}': {} local partitions, {} remote partitions",
+        //     table_name,
+        //     local_partitions.len(),
+        //     remote_partitions.len()
+        // );
 
-        // 如果所有 Partition 都在本地，使用本地执行
-        if remote_partitions.is_empty() {
-            log::debug!("[QueryCoordinator] All partitions local, using standalone execution");
-            return self.execute_standalone(sql).await;
-        }
+        // // 如果所有 Partition 都在本地，使用本地执行
+        // if remote_partitions.is_empty() {
+        //     log::debug!("[QueryCoordinator] All partitions local, using standalone execution");
+        //     return self.execute_standalone(sql).await;
+        // }
 
-        // 使用 DistributedExecutor 执行分布式查询
-        let distributed_executor = super::DistributedExecutor::new(
-            self.engine.clone(),
-            cluster_manager.clone(),
-            partition_manager.clone(),
-            self.config.clone(),
-        );
+        // // 使用 DistributedExecutor 执行分布式查询
+        // let distributed_executor = super::DistributedExecutor::new(
+        //     self.engine.clone(),
+        //     cluster_manager.clone(),
+        //     partition_manager.clone(),
+        //     self.config.clone(),
+        // );
 
-        distributed_executor.execute_sql(sql).await
+        // distributed_executor.execute_sql(sql).await
     }
 
     /// 从 SQL 中提取表名
@@ -182,24 +162,24 @@ impl QueryCoordinator {
     }
 
     /// 分类 Partition 为本地和远程
-    fn classify_partitions(
-        &self,
-        topology: &crate::cluster::TableTopology,
-        my_node_id: &str,
-    ) -> (Vec<String>, Vec<(String, String)>) {
-        let mut local = Vec::new();
-        let mut remote = Vec::new();
+    // fn classify_partitions(
+    //     &self,
+    //     topology: &crate::cluster::TableTopology,
+    //     my_node_id: &str,
+    // ) -> (Vec<String>, Vec<(String, String)>) {
+    //     let mut local = Vec::new();
+    //     let mut remote = Vec::new();
 
-        for (partition_name, partition_info) in &topology.partitions {
-            if partition_info.write_node == my_node_id {
-                local.push(partition_name.clone());
-            } else {
-                remote.push((partition_name.clone(), partition_info.write_node.clone()));
-            }
-        }
+    //     for (partition_name, partition_info) in &topology.partitions {
+    //         if partition_info.write_node == my_node_id {
+    //             local.push(partition_name.clone());
+    //         } else {
+    //             remote.push((partition_name.clone(), partition_info.write_node.clone()));
+    //         }
+    //     }
 
-        (local, remote)
-    }
+    //     (local, remote)
+    // }
 
     /// 获取配置
     pub fn config(&self) -> &DistributedConfig {

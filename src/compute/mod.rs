@@ -58,27 +58,28 @@ impl Executor {
     /// - 有分布式上下文：使用 DistributedExecutor
     /// - 无分布式上下文：使用 DataFusionExecutor（单机模式）
     pub fn new(engine: Arc<Engine>) -> Self {
+        todo!()
         // 注意：这里使用 try_read 避免异步，因为 new() 不是 async
-        // 分布式上下文在启动时设置，之后不会改变
-        let distributed_context = {
-            // 使用 blocking 方式获取锁，因为这是初始化阶段
-            futures::executor::block_on(async { engine.get_distributed_context().await })
-        };
+        // // 分布式上下文在启动时设置，之后不会改变
+        // let distributed_context = {
+        //     // 使用 blocking 方式获取锁，因为这是初始化阶段
+        //     futures::executor::block_on(async { engine.get_distributed_context().await })
+        // };
 
-        let backend = if let Some(ctx) = distributed_context {
-            log::debug!("[Executor] Using distributed backend");
-            ExecutorBackend::Distributed(DistributedExecutor::new(
-                engine,
-                ctx.cluster_manager,
-                ctx.partition_manager,
-                ctx.config,
-            ))
-        } else {
-            log::debug!("[Executor] Using local backend");
-            ExecutorBackend::Local(DataFusionExecutor::new(engine))
-        };
+        // let backend = if let Some(ctx) = distributed_context {
+        //     log::debug!("[Executor] Using distributed backend");
+        //     ExecutorBackend::Distributed(DistributedExecutor::new(
+        //         engine,
+        //         ctx.cluster_manager,
+        //         ctx.partition_manager,
+        //         ctx.config,
+        //     ))
+        // } else {
+        //     log::debug!("[Executor] Using local backend");
+        //     ExecutorBackend::Local(DataFusionExecutor::new(engine))
+        // };
 
-        Self { backend }
+        // Self { backend }
     }
 
     /// 执行 SQL 查询（流式版本）

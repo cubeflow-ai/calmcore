@@ -1,3 +1,4 @@
+use crate::catalog::PartitionStrategy;
 /// Segment 加载器模块
 ///
 /// 用于 Custom 分区策略，支持从外部文件加载数据到 segment
@@ -71,7 +72,9 @@ impl SegmentLoader {
             .join("tables")
             .join(table_name)
             .join("partitions")
-            .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(partition_name))
+            .join(PartitionStrategy::generate_partition_dir_name(
+                partition_name,
+            ))
             .join("temp_load");
 
         std::fs::create_dir_all(&temp_dir)

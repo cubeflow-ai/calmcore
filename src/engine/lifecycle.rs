@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::catalog::Catalog;
+use crate::cluster::{self, ClusterManager};
 use crate::partition::Partition;
 use crate::utils::error::CoreResult;
 
@@ -17,7 +18,10 @@ impl Engine {
     /// ```rust
     /// let engine = Engine::new(EngineConfig::default()).unwrap();
     /// ```
-    pub fn new(config: EngineConfig) -> CoreResult<Arc<Self>> {
+    pub fn new(
+        config: EngineConfig,
+        cluster_manager: Arc<ClusterManager>,
+    ) -> CoreResult<Arc<Self>> {
         let (persist_tx, persist_rx) = mpsc::unbounded_channel();
         let (partition_notify_tx, partition_notify_rx) = mpsc::unbounded_channel();
         let partitions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -33,7 +37,7 @@ impl Engine {
             persist_tx,
             partition_notify_tx: Arc::new(partition_notify_tx),
             persist_task_handle: persist_task_handle.clone(),
-            distributed_context: Arc::new(tokio::sync::RwLock::new(None)),
+            cluster_manager,
         });
 
         // 启动后台持久化任务（需要 Arc<Self>）
@@ -54,123 +58,123 @@ impl Engine {
 
     /// 加载所有已存在的表和它们的 partition
     pub async fn load_existing_tables(self: &Arc<Self>) -> CoreResult<()> {
-        log::info!("🔍 [Engine] Loading existing tables...");
-        let table_names = self.catalog.list_tables();
-        log::info!("🔍 [Engine] Found {} tables", table_names.len());
+        // log::info!("🔍 [Engine] Loading existing tables...");
+        // let table_names = self.catalog.list_tables();
+        // log::info!("🔍 [Engine] Found {} tables", table_names.len());
 
-        for table_name in table_names {
-            log::info!("🔍 [Engine] Loading table: {}", table_name);
-            let meta = match self.catalog.get_table(&table_name) {
-                Ok(meta) => meta,
-                Err(e) => {
-                    log::warn!("⚠️  Failed to get metadata for table {}: {}", table_name, e);
-                    continue;
-                }
-            };
+        // for table_name in table_names {
+        //     log::info!("🔍 [Engine] Loading table: {}", table_name);
+        //     let meta = match self.catalog.get_table(&table_name) {
+        //         Ok(meta) => meta,
+        //         Err(e) => {
+        //             log::warn!("⚠️  Failed to get metadata for table {}: {}", table_name, e);
+        //             continue;
+        //         }
+        //     };
 
-            let table_dir = self.config.data_dir.join("tables").join(&table_name);
-            let partitions_dir = table_dir.join("partitions");
+        //     let table_dir = self.config.data_dir.join("tables").join(&table_name);
+        //     let partitions_dir = table_dir.join("partitions");
 
-            // 统一扫描 partitions 子目录，不依赖分区策略
-            log::info!(
-                "🔍 [Engine] Scanning partition directories for table {}...",
-                table_name
-            );
+        //     // 统一扫描 partitions 子目录，不依赖分区策略
+        //     log::info!(
+        //         "🔍 [Engine] Scanning partition directories for table {}...",
+        //         table_name
+        //     );
 
-            let mut partition_names: Vec<String> = Vec::new();
-            if partitions_dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(&partitions_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_dir() {
-                            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                                if let Some(partition_name) =
-                                    crate::catalog::PartitionStrategy::extract_partition_from_dir_name(
-                                        dir_name,
-                                    )
-                                {
-                                    partition_names.push(partition_name);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        //     let mut partition_names: Vec<String> = Vec::new();
+        //     if partitions_dir.exists() {
+        //         if let Ok(entries) = std::fs::read_dir(&partitions_dir) {
+        //             for entry in entries.flatten() {
+        //                 let path = entry.path();
+        //                 if path.is_dir() {
+        //                     if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+        //                         if let Some(partition_name) =
+        //                             crate::catalog::PartitionStrategy::extract_partition_from_dir_name(
+        //                                 dir_name,
+        //                             )
+        //                         {
+        //                             partition_names.push(partition_name);
+        //                         }
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //     }
 
-            // 如果没有找到任何 partition，根据策略创建默认的
-            if partition_names.is_empty() {
-                log::info!(
-                    "🔍 [Engine] No existing partitions found, creating default partitions for table {}",
-                    table_name
-                );
-                partition_names = meta
-                    .partition_strategy
-                    .generate_partitions()
-                    .unwrap_or_else(Vec::new);
-            } else {
-                log::info!(
-                    "🔍 [Engine] Found {} partitions for table {}",
-                    partition_names.len(),
-                    table_name
-                );
-            }
+        //     // 如果没有找到任何 partition，根据策略创建默认的
+        //     if partition_names.is_empty() {
+        //         log::info!(
+        //             "🔍 [Engine] No existing partitions found, creating default partitions for table {}",
+        //             table_name
+        //         );
+        //         partition_names = meta
+        //             .partition_strategy
+        //             .generate_partitions()
+        //             .unwrap_or_else(Vec::new);
+        //     } else {
+        //         log::info!(
+        //             "🔍 [Engine] Found {} partitions for table {}",
+        //             partition_names.len(),
+        //             table_name
+        //         );
+        //     }
 
-            // 加载所有 partition
-            for partition_name in partition_names {
-                let partition_dir = partitions_dir.join(
-                    crate::catalog::PartitionStrategy::generate_partition_dir_name(&partition_name),
-                );
+        //     // 加载所有 partition
+        //     for partition_name in partition_names {
+        //         let partition_dir = partitions_dir.join(
+        //             crate::catalog::PartitionStrategy::generate_partition_dir_name(&partition_name),
+        //         );
 
-                // 检查目录是否存在
-                if !partition_dir.exists() {
-                    log::info!(
-                        "🔍 [Engine] Partition directory does not exist, creating new partition: {}",
-                        partition_name
-                    );
-                    // 如果目录不存在，创建新的 partition
-                    let partition = Partition::new(
-                        partition_name.clone(),
-                        table_name.clone(),
-                        partition_dir,
-                        meta.schema.clone(),
-                        (*self.partition_notify_tx).clone(),
-                    );
-                    let partition = Arc::new(partition);
-                    self.add_partition_with_table(&table_name, partition).await;
-                } else {
-                    log::info!("🔍 [Engine] Loading existing partition: {}", partition_name);
-                    // 如果目录存在，从磁盘加载
-                    match Partition::load(
-                        partition_name.clone(),
-                        table_name.clone(),
-                        partition_dir.clone(),
-                        meta.schema.clone(),
-                        (*self.partition_notify_tx).clone(),
-                    ) {
-                        Ok(partition) => {
-                            let partition = Arc::new(partition);
-                            self.add_partition_with_table(&table_name, partition).await;
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "⚠️  Failed to load partition {} for table {}: {}",
-                                partition_name,
-                                table_name,
-                                e
-                            );
-                        }
-                    }
-                }
-            }
+        //         // 检查目录是否存在
+        //         if !partition_dir.exists() {
+        //             log::info!(
+        //                 "🔍 [Engine] Partition directory does not exist, creating new partition: {}",
+        //                 partition_name
+        //             );
+        //             // 如果目录不存在，创建新的 partition
+        //             let partition = Partition::new(
+        //                 partition_name.clone(),
+        //                 table_name.clone(),
+        //                 partition_dir,
+        //                 meta.schema.clone(),
+        //                 (*self.partition_notify_tx).clone(),
+        //             );
+        //             let partition = Arc::new(partition);
+        //             self.add_partition_with_table(&table_name, partition).await;
+        //         } else {
+        //             log::info!("🔍 [Engine] Loading existing partition: {}", partition_name);
+        //             // 如果目录存在，从磁盘加载
+        //             match Partition::load(
+        //                 partition_name.clone(),
+        //                 table_name.clone(),
+        //                 partition_dir.clone(),
+        //                 meta.schema.clone(),
+        //                 (*self.partition_notify_tx).clone(),
+        //             ) {
+        //                 Ok(partition) => {
+        //                     let partition = Arc::new(partition);
+        //                     self.add_partition_with_table(&table_name, partition).await;
+        //                 }
+        //                 Err(e) => {
+        //                     log::error!(
+        //                         "⚠️  Failed to load partition {} for table {}: {}",
+        //                         partition_name,
+        //                         table_name,
+        //                         e
+        //                     );
+        //                 }
+        //             }
+        //         }
+        //     }
 
-            let loaded_count = self.list_partitions(&table_name).await.len();
+        //     let loaded_count = self.list_partitions(&table_name).await.len();
 
-            log::info!(
-                "✅ Loaded table '{}' with {} partitions",
-                table_name,
-                loaded_count
-            );
-        }
+        //     log::info!(
+        //         "✅ Loaded table '{}' with {} partitions",
+        //         table_name,
+        //         loaded_count
+        //     );
+        // }
 
         Ok(())
     }

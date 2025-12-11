@@ -607,7 +607,6 @@ impl Config {
     /// 转换为 ClusterConfig（仅当配置了集群时返回 Some）
     pub fn to_cluster_config(&self) -> Option<ClusterConfig> {
         self.cluster.as_ref().map(|cluster| ClusterConfig {
-            enabled: !cluster.seed_nodes.is_empty(),
             node_id: cluster.node_id.clone(),
             cluster_id: cluster.cluster_id.clone(),
             listen_addr: cluster.listen_addr.clone(),

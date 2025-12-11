@@ -346,7 +346,7 @@ impl PartitionStrategy {
                 let partition_start = start + (partition_index * step);
 
                 // 格式化基础分区名
-                let base_name = Self::format_partition_id(partition_start);
+                let base_name = PartitionStrategy::format_partition_id(partition_start);
 
                 // 如果启用了并行度，随机选择一个子分区
                 if let Some(p) = parallelism {
@@ -469,34 +469,6 @@ impl TableMeta {
     /// 获取分区数量（如果可预知）
     pub fn num_partitions(&self) -> Option<usize> {
         self.partition_strategy.num_partitions()
-    }
-
-    /// 获取表的目录路径
-    pub fn table_dir(&self, work_dir: &Path) -> PathBuf {
-        work_dir.join("tables").join(&self.table_name)
-    }
-
-    /// 获取 partition 目录路径（使用 partition_name 字符串）
-    pub fn partition_dir_by_name(&self, work_dir: &Path, partition_name: &str) -> PathBuf {
-        let dir_name = PartitionStrategy::generate_partition_dir_name(partition_name);
-        self.table_dir(work_dir).join("partitions").join(dir_name)
-    }
-
-    /// 获取 partition 目录路径（使用 partition_name 字符串）- 别名方法
-    pub fn partition_dir_by_id(&self, work_dir: &Path, partition_name: &str) -> PathBuf {
-        self.partition_dir_by_name(work_dir, partition_name)
-    }
-
-    /// 获取 segment 目录路径（使用字符串 partition_name
-    pub fn segment_dir_by_id(
-        &self,
-        work_dir: &PathBuf,
-        partition_name: &str,
-        start: u64,
-        end: u64,
-    ) -> PathBuf {
-        self.partition_dir_by_id(work_dir, partition_name)
-            .join(format!("segment-{}-{}", start, end))
     }
 }
 
