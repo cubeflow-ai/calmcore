@@ -64,11 +64,11 @@ impl Engine {
     /// 持久化整个表的所有 partition
     ///
     /// 这是一个同步操作：调用后，该表的所有 partition 的所有 segment 保证已持久化完毕
-    pub async fn flush_table(&self, table_name: &str) -> CoreResult<()> {
+    pub async fn flush_table(&self, catalog: &crate::catalog::Catalog, table_name: &str) -> CoreResult<()> {
         log::info!("🔄 Flushing table '{}'...", table_name);
 
         // 1. 获取表的元数据以确定有多少个 partition
-        let meta = self.catalog.get_table(table_name)?;
+        let meta = catalog.get_table(table_name)?;
         let num_partitions = meta.num_partitions().unwrap_or(1);
 
         log::info!(

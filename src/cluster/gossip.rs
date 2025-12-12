@@ -92,9 +92,15 @@ impl ClusterManager {
             node_id: node_id.clone(),
             config,
             listen_addr,
-            node_manager: Arc::new(NodeManager::new(chitchat.clone())),
+            node_manager: Arc::new(NodeManager::new(chitchat.clone()).await),
             partition_manager: Arc::new(PartitionManager::new(node_id.clone(), chitchat.clone())),
         };
+
+        if let Err(e) = manager.node_manager.run_election().await {
+            log::error!("❌ [Cluster] Election failed: {:?}", e);
+        } else {
+            log::info!("✅ [Cluster] Election completed successfully");
+        }
 
         log::info!("✅ [Cluster] ClusterManager started successfully");
 
@@ -157,6 +163,8 @@ impl ClusterManager {
             // Seed nodes start immediately without waiting
             log::info!("🌱 [Cluster] Starting as SEED node (will not wait for other seeds)");
             log::info!("🔗 [Cluster] Will accept connections from other nodes...");
+
+            tokio::time::sleep(Duration::from_secs(15)).await; // Give time to start
         } else {
             // Regular nodes must wait for seed nodes
             log::info!("🔗 [Cluster] Starting as WORKER node, connecting to seed nodes...");

@@ -427,11 +427,13 @@ impl Catalog {
     ///
     /// 从分区策略生成分区列表
     pub fn get_partition_names(&self, table_name: &str) -> CoreResult<Vec<String>> {
-        let table = self.get_table(table_name)?;
-        let partitions = table
-            .partition_strategy
-            .generate_partitions()
-            .unwrap_or_else(|| vec!["partition_000000000000000000".to_string()]);
-        Ok(partitions)
+        Ok(self
+            .partition_routes
+            .read()
+            .unwrap()
+            .keys()
+            .filter(|(t_name, _)| t_name == table_name)
+            .map(|(_, p_name)| p_name.clone())
+            .collect())
     }
 }

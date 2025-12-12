@@ -610,14 +610,14 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                 false,
             )]));
 
-            let table_names = self.engine.list_tables();
-            let tables: Vec<&str> = table_names.iter().map(|s| s.as_str()).collect();
+            // let table_names = self.engine.list_tables();
+            // let tables: Vec<&str> = table_names.iter().map(|s| s.as_str()).collect();
 
-            let tables_array = StringArray::from(tables);
-            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(tables_array)])
-                .map_err(io::Error::other)?;
+            // let tables_array = StringArray::from(tables);
+            // let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(tables_array)])
+            //     .map_err(io::Error::other)?;
 
-            return write_query_result(results, &schema, &[batch]);
+            // return write_query_result(results, &schema, &[batch]);
         }
 
         // SHOW PARTITIONS [FROM|IN] table

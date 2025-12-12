@@ -204,115 +204,116 @@ async fn create_index(
     Path(index): Path<String>,
     Json(payload): Json<CreateIndexRequest>,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
-    // 构建 Schema
-    let mut fields = Vec::new();
+    todo!()
+    // // 构建 Schema
+    // let mut fields = Vec::new();
 
-    if let Some(mappings) = payload.mappings {
-        for (field_name, mapping) in mappings.properties {
-            let should_index = mapping.index.unwrap_or(true);
-            // 统一将字段名转为小写
-            let field_name_lower = field_name.to_lowercase();
+    // if let Some(mappings) = payload.mappings {
+    //     for (field_name, mapping) in mappings.properties {
+    //         let should_index = mapping.index.unwrap_or(true);
+    //         // 统一将字段名转为小写
+    //         let field_name_lower = field_name.to_lowercase();
 
-            let field = match mapping.field_type.as_str() {
-                "text" | "keyword" => FieldOption::Keyword {
-                    name: field_name_lower.clone(),
-                    index: should_index,
-                    is_array: false,
-                    persist_option: None,
-                    case_sensitive: true,
-                    description: None,
-                    default_value: None,
-                    nullable: true,
-                },
-                "long" | "integer" => FieldOption::I64 {
-                    name: field_name_lower.clone(),
-                    index: should_index,
-                    description: None,
-                    default_value: None,
-                    nullable: true,
-                },
-                "float" | "double" => FieldOption::F64 {
-                    name: field_name_lower.clone(),
-                    index: should_index,
-                    description: None,
-                    default_value: None,
-                    nullable: true,
-                },
-                "boolean" => FieldOption::Boolean {
-                    name: field_name_lower.clone(),
-                    index: should_index,
-                    description: None,
-                    default_value: None,
-                    nullable: true,
-                },
-                "date" => FieldOption::Timestamp {
-                    name: field_name_lower.clone(),
-                    index: should_index,
-                    format: Some("iso8601".to_string()),
-                    description: None,
-                    default_value: None,
-                    nullable: true,
-                },
-                _ => FieldOption::Keyword {
-                    name: field_name_lower.clone(),
-                    index: should_index,
-                    is_array: false,
-                    persist_option: None,
-                    case_sensitive: true,
-                    description: None,
-                    default_value: None,
-                    nullable: true,
-                },
-            };
+    //         let field = match mapping.field_type.as_str() {
+    //             "text" | "keyword" => FieldOption::Keyword {
+    //                 name: field_name_lower.clone(),
+    //                 index: should_index,
+    //                 is_array: false,
+    //                 persist_option: None,
+    //                 case_sensitive: true,
+    //                 description: None,
+    //                 default_value: None,
+    //                 nullable: true,
+    //             },
+    //             "long" | "integer" => FieldOption::I64 {
+    //                 name: field_name_lower.clone(),
+    //                 index: should_index,
+    //                 description: None,
+    //                 default_value: None,
+    //                 nullable: true,
+    //             },
+    //             "float" | "double" => FieldOption::F64 {
+    //                 name: field_name_lower.clone(),
+    //                 index: should_index,
+    //                 description: None,
+    //                 default_value: None,
+    //                 nullable: true,
+    //             },
+    //             "boolean" => FieldOption::Boolean {
+    //                 name: field_name_lower.clone(),
+    //                 index: should_index,
+    //                 description: None,
+    //                 default_value: None,
+    //                 nullable: true,
+    //             },
+    //             "date" => FieldOption::Timestamp {
+    //                 name: field_name_lower.clone(),
+    //                 index: should_index,
+    //                 format: Some("iso8601".to_string()),
+    //                 description: None,
+    //                 default_value: None,
+    //                 nullable: true,
+    //             },
+    //             _ => FieldOption::Keyword {
+    //                 name: field_name_lower.clone(),
+    //                 index: should_index,
+    //                 is_array: false,
+    //                 persist_option: None,
+    //                 case_sensitive: true,
+    //                 description: None,
+    //                 default_value: None,
+    //                 nullable: true,
+    //             },
+    //         };
 
-            fields.push(field);
-        }
-    }
+    //         fields.push(field);
+    //     }
+    // }
 
-    // 如果没有指定 mappings，添加默认的 _id 字段
-    if fields.is_empty() {
-        fields.push(FieldOption::Keyword {
-            name: "_id".to_string(),
-            index: true,
-            is_array: false,
-            persist_option: None,
-            case_sensitive: true,
-            description: None,
-            default_value: None,
-            nullable: true,
-        });
-    }
+    // // 如果没有指定 mappings，添加默认的 _id 字段
+    // if fields.is_empty() {
+    //     fields.push(FieldOption::Keyword {
+    //         name: "_id".to_string(),
+    //         index: true,
+    //         is_array: false,
+    //         persist_option: None,
+    //         case_sensitive: true,
+    //         description: None,
+    //         default_value: None,
+    //         nullable: true,
+    //     });
+    // }
 
-    // 创建 Schema，使用 _id 作为主键
-    let schema = Schema::new(
-        index.clone(),
-        Some("_id".to_string()),
-        true,
-        fields,
-        crate::schema::PersistPolicy::default(),
-        None, // description
-    );
+    // // 创建 Schema，使用 _id 作为主键
+    // let schema = Schema::new(
+    //     index.clone(),
+    //     Some("_id".to_string()),
+    //     true,
+    //     fields,
+    //     crate::schema::PersistPolicy::default(),
+    //     None, // description
+    // );
 
-    // 创建表（索引）
-    server
-        .engine
-        .create_table(
-            &index,
-            schema,
-            PartitionStrategy::Hash {
-                field: "_id".to_string(),
-                num_partitions: 1,
-            },
-            1, // 默认 1 个分区
-        )
-        .await
-        .map_err(|e| internal_error(e.to_string()))?;
+    // // 创建表（索引）
+    // server
+    //     .engine
+    //     .create_table(
+    //         &index,
+    //         schema,
+    //         PartitionStrategy::Hash {
+    //             field: "_id".to_string(),
+    //             num_partitions: 1,
+    //         },
+    //         1, // 默认 1 个分区
+    //     )
+    //     .await
+    //     .map_err(|e| internal_error(e.to_string()))?;
 
-    Ok(poem::web::Json(serde_json::json!({
-        "acknowledged": true,
-        "shards_acknowledged": true,
-        "index": index
-    })))
+    // Ok(poem::web::Json(serde_json::json!({
+    //     "acknowledged": true,
+    //     "shards_acknowledged": true,
+    //     "index": index
+    // })))
 }
 
 /// 删除索引
@@ -322,15 +323,16 @@ async fn delete_index(
     Data(server): Data<&Arc<ElasticsearchServer>>,
     Path(index): Path<String>,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
-    server
-        .engine
-        .drop_table(&index)
-        .await
-        .map_err(|e| not_found(format!("Index not found: {}", e)))?;
+    todo!()
+    // server
+    //     .engine
+    //     .drop_table(&index)
+    //     .await
+    //     .map_err(|e| not_found(format!("Index not found: {}", e)))?;
 
-    Ok(poem::web::Json(serde_json::json!({
-        "acknowledged": true
-    })))
+    // Ok(poem::web::Json(serde_json::json!({
+    //     "acknowledged": true
+    // })))
 }
 
 /// 获取索引信息
@@ -387,20 +389,21 @@ async fn get_index(
 async fn list_indices(
     Data(server): Data<&Arc<ElasticsearchServer>>,
 ) -> Result<String, poem::Error> {
-    let tables = server.engine.list_tables();
+    todo!()
+    // let tables = server.engine.list_tables();
 
-    let mut output = String::new();
-    output.push_str("health status index    uuid                   pri rep docs.count docs.deleted store.size pri.store.size\n");
+    // let mut output = String::new();
+    // output.push_str("health status index    uuid                   pri rep docs.count docs.deleted store.size pri.store.size\n");
 
-    for (i, table) in tables.iter().enumerate() {
-        output.push_str(&format!(
-            "green  open   {:8} {:22} 1   0          0            0       0b            0b\n",
-            table,
-            format!("calm-{}", i)
-        ));
-    }
+    // for (i, table) in tables.iter().enumerate() {
+    //     output.push_str(&format!(
+    //         "green  open   {:8} {:22} 1   0          0            0       0b            0b\n",
+    //         table,
+    //         format!("calm-{}", i)
+    //     ));
+    // }
 
-    Ok(output)
+    // Ok(output)
 }
 
 /// 索引文档（指定 ID）
@@ -412,46 +415,47 @@ async fn index_document_with_id(
     Query(query): Query<std::collections::HashMap<String, String>>,
     Json(document): Json<Value>,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
-    // 添加 _id 字段到文档
-    let mut doc = document;
-    if let Value::Object(ref mut map) = doc {
-        map.insert("_id".to_string(), Value::String(id.clone()));
-    }
+    todo!()
+    // // 添加 _id 字段到文档
+    // let mut doc = document;
+    // if let Value::Object(ref mut map) = doc {
+    //     map.insert("_id".to_string(), Value::String(id.clone()));
+    // }
 
-    // 获取表元数据
-    let meta = server
-        .engine
-        .get_table_meta(&index)
-        .map_err(|e| not_found(e.to_string()))?;
+    // // 获取表元数据
+    // let meta = server
+    //     .engine
+    //     .get_table_meta(&index)
+    //     .map_err(|e| not_found(e.to_string()))?;
 
-    // 转换为 RecordBatch
-    let batch =
-        crate::utils::arrow_utils::json_to_record_batch(&[doc], meta.schema.to_arrow_schema())
-            .map_err(|e| internal_error(e.to_string()))?;
+    // // 转换为 RecordBatch
+    // let batch =
+    //     crate::utils::arrow_utils::json_to_record_batch(&[doc], meta.schema.to_arrow_schema())
+    //         .map_err(|e| internal_error(e.to_string()))?;
 
-    // 获取 routing 参数
-    let routing = query.get("routing").map(|s| s.to_string());
+    // // 获取 routing 参数
+    // let routing = query.get("routing").map(|s| s.to_string());
 
-    // 调用 insert_batch
-    let stats = server
-        .engine
-        .insert_batch(&index, batch, routing)
-        .await
-        .map_err(|e| internal_error(e.to_string()))?;
+    // // 调用 insert_batch
+    // let stats = server
+    //     .engine
+    //     .insert_batch(&index, batch, routing)
+    //     .await
+    //     .map_err(|e| internal_error(e.to_string()))?;
 
-    Ok(poem::web::Json(serde_json::json!({
-        "_index": index,
-        "_id": id,
-        "_version": 1,
-        "result": "created",
-        "_shards": {
-            "total": 1,
-            "successful": 1,
-            "failed": 0
-        },
-        "_seq_no": stats.rows_inserted,
-        "_primary_term": 1
-    })))
+    // Ok(poem::web::Json(serde_json::json!({
+    //     "_index": index,
+    //     "_id": id,
+    //     "_version": 1,
+    //     "result": "created",
+    //     "_shards": {
+    //         "total": 1,
+    //         "successful": 1,
+    //         "failed": 0
+    //     },
+    //     "_seq_no": stats.rows_inserted,
+    //     "_primary_term": 1
+    // })))
 }
 
 /// 索引文档（自动生成 ID）
@@ -463,49 +467,50 @@ async fn index_document(
     Query(query): Query<std::collections::HashMap<String, String>>,
     Json(document): Json<Value>,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
-    // 生成唯一 ID
-    let id = uuid::Uuid::new_v4().to_string();
+    todo!()
+    // // 生成唯一 ID
+    // let id = uuid::Uuid::new_v4().to_string();
 
-    // 添加 _id 字段到文档
-    let mut doc = document;
-    if let Value::Object(ref mut map) = doc {
-        map.insert("_id".to_string(), Value::String(id.clone()));
-    }
+    // // 添加 _id 字段到文档
+    // let mut doc = document;
+    // if let Value::Object(ref mut map) = doc {
+    //     map.insert("_id".to_string(), Value::String(id.clone()));
+    // }
 
-    // 获取表元数据
-    let meta = server
-        .engine
-        .get_table_meta(&index)
-        .map_err(|e| not_found(e.to_string()))?;
+    // // 获取表元数据
+    // let meta = server
+    //     .engine
+    //     .get_table_meta(&index)
+    //     .map_err(|e| not_found(e.to_string()))?;
 
-    // 转换为 RecordBatch
-    let batch =
-        crate::utils::arrow_utils::json_to_record_batch(&[doc], meta.schema.to_arrow_schema())
-            .map_err(|e| internal_error(e.to_string()))?;
+    // // 转换为 RecordBatch
+    // let batch =
+    //     crate::utils::arrow_utils::json_to_record_batch(&[doc], meta.schema.to_arrow_schema())
+    //         .map_err(|e| internal_error(e.to_string()))?;
 
-    // 获取 routing 参数
-    let routing = query.get("routing").map(|s| s.to_string());
+    // // 获取 routing 参数
+    // let routing = query.get("routing").map(|s| s.to_string());
 
-    // 调用 insert_batch
-    let stats = server
-        .engine
-        .insert_batch(&index, batch, routing)
-        .await
-        .map_err(|e| internal_error(e.to_string()))?;
+    // // 调用 insert_batch
+    // let stats = server
+    //     .engine
+    //     .insert_batch(&index, batch, routing)
+    //     .await
+    //     .map_err(|e| internal_error(e.to_string()))?;
 
-    Ok(poem::web::Json(serde_json::json!({
-        "_index": index,
-        "_id": id,
-        "_version": 1,
-        "result": "created",
-        "_shards": {
-            "total": 1,
-            "successful": 1,
-            "failed": 0
-        },
-        "_seq_no": stats.rows_inserted,
-        "_primary_term": 1
-    })))
+    // Ok(poem::web::Json(serde_json::json!({
+    //     "_index": index,
+    //     "_id": id,
+    //     "_version": 1,
+    //     "result": "created",
+    //     "_shards": {
+    //         "total": 1,
+    //         "successful": 1,
+    //         "failed": 0
+    //     },
+    //     "_seq_no": stats.rows_inserted,
+    //     "_primary_term": 1
+    // })))
 }
 
 /// 获取文档
@@ -607,255 +612,256 @@ async fn bulk_operation_impl(
     default_index: Option<String>,
     body: String,
 ) -> Result<Response, poem::Error> {
-    use std::collections::HashMap;
+    // use std::collections::HashMap;
 
-    let mut items = Vec::new();
-    let mut errors = false;
+    // let mut items = Vec::new();
+    // let mut errors = false;
 
-    // 解析 NDJSON 格式
-    let lines: Vec<&str> = body.lines().collect();
-    let mut i = 0;
+    // // 解析 NDJSON 格式
+    // let lines: Vec<&str> = body.lines().collect();
+    // let mut i = 0;
 
-    // 按索引分组文档: index_name -> routing -> vec<(doc_id, doc)>
-    let mut docs_by_index: HashMap<String, HashMap<Option<String>, Vec<(String, Value)>>> =
-        HashMap::new();
+    // // 按索引分组文档: index_name -> routing -> vec<(doc_id, doc)>
+    // let mut docs_by_index: HashMap<String, HashMap<Option<String>, Vec<(String, Value)>>> =
+    //     HashMap::new();
 
-    while i < lines.len() {
-        if lines[i].trim().is_empty() {
-            i += 1;
-            continue;
-        }
+    // while i < lines.len() {
+    //     if lines[i].trim().is_empty() {
+    //         i += 1;
+    //         continue;
+    //     }
 
-        // 解析操作行
-        let action: Value = serde_json::from_str(lines[i])
-            .map_err(|e| bad_request(format!("Invalid JSON in action line: {}", e)))?;
+    //     // 解析操作行
+    //     let action: Value = serde_json::from_str(lines[i])
+    //         .map_err(|e| bad_request(format!("Invalid JSON in action line: {}", e)))?;
 
-        i += 1;
+    //     i += 1;
 
-        // 获取操作类型
-        let (action_type, action_meta) = if let Some(index_action) = action.get("index") {
-            ("index", index_action)
-        } else if let Some(create_action) = action.get("create") {
-            ("create", create_action)
-        } else if let Some(update_action) = action.get("update") {
-            ("update", update_action)
-        } else if let Some(delete_action) = action.get("delete") {
-            // Delete 操作暂时跳过,直接添加成功响应
-            let index_name = delete_action
-                .get("_index")
-                .and_then(|v| v.as_str())
-                .or(default_index.as_deref())
-                .unwrap_or("");
-            let doc_id = delete_action
-                .get("_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+    //     // 获取操作类型
+    //     let (action_type, action_meta) = if let Some(index_action) = action.get("index") {
+    //         ("index", index_action)
+    //     } else if let Some(create_action) = action.get("create") {
+    //         ("create", create_action)
+    //     } else if let Some(update_action) = action.get("update") {
+    //         ("update", update_action)
+    //     } else if let Some(delete_action) = action.get("delete") {
+    //         // Delete 操作暂时跳过,直接添加成功响应
+    //         let index_name = delete_action
+    //             .get("_index")
+    //             .and_then(|v| v.as_str())
+    //             .or(default_index.as_deref())
+    //             .unwrap_or("");
+    //         let doc_id = delete_action
+    //             .get("_id")
+    //             .and_then(|v| v.as_str())
+    //             .unwrap_or("");
 
-            items.push(json!({
-                "delete": {
-                    "_index": index_name,
-                    "_type": "_doc",
-                    "_id": doc_id,
-                    "_version": 2,
-                    "result": "deleted",
-                    "_shards": {"total": 2, "successful": 1, "failed": 0},
-                    "_seq_no": 1,
-                    "_primary_term": 1,
-                    "status": 200
-                }
-            }));
-            continue;
-        } else {
-            return Err(bad_request("Unknown action type".to_string()).into());
-        };
+    //         items.push(json!({
+    //             "delete": {
+    //                 "_index": index_name,
+    //                 "_type": "_doc",
+    //                 "_id": doc_id,
+    //                 "_version": 2,
+    //                 "result": "deleted",
+    //                 "_shards": {"total": 2, "successful": 1, "failed": 0},
+    //                 "_seq_no": 1,
+    //                 "_primary_term": 1,
+    //                 "status": 200
+    //             }
+    //         }));
+    //         continue;
+    //     } else {
+    //         return Err(bad_request("Unknown action type".to_string()).into());
+    //     };
 
-        // 获取索引、ID 和 routing
-        let index_name = action_meta
-            .get("_index")
-            .and_then(|v| v.as_str())
-            .or(default_index.as_deref())
-            .ok_or_else(|| bad_request("Missing _index".to_string()))?;
+    //     // 获取索引、ID 和 routing
+    //     let index_name = action_meta
+    //         .get("_index")
+    //         .and_then(|v| v.as_str())
+    //         .or(default_index.as_deref())
+    //         .ok_or_else(|| bad_request("Missing _index".to_string()))?;
 
-        let doc_id = action_meta
-            .get("_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    //     let doc_id = action_meta
+    //         .get("_id")
+    //         .and_then(|v| v.as_str())
+    //         .map(|s| s.to_string())
+    //         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        // 获取 routing 参数(对应我们的 partition)
-        let routing = action_meta
-            .get("routing")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+    //     // 获取 routing 参数(对应我们的 partition)
+    //     let routing = action_meta
+    //         .get("routing")
+    //         .and_then(|v| v.as_str())
+    //         .map(|s| s.to_string());
 
-        // 处理不同操作类型
-        match action_type {
-            "index" | "create" => {
-                if i >= lines.len() {
-                    return Err(bad_request("Missing document after action".to_string()).into());
-                }
+    //     // 处理不同操作类型
+    //     match action_type {
+    //         "index" | "create" => {
+    //             if i >= lines.len() {
+    //                 return Err(bad_request("Missing document after action".to_string()).into());
+    //             }
 
-                // 解析文档
-                let mut doc: Value = serde_json::from_str(lines[i])
-                    .map_err(|e| bad_request(format!("Invalid JSON in document line: {}", e)))?;
+    //             // 解析文档
+    //             let mut doc: Value = serde_json::from_str(lines[i])
+    //                 .map_err(|e| bad_request(format!("Invalid JSON in document line: {}", e)))?;
 
-                if let Value::Object(ref mut map) = doc {
-                    map.insert("_id".to_string(), Value::String(doc_id.clone()));
-                }
+    //             if let Value::Object(ref mut map) = doc {
+    //                 map.insert("_id".to_string(), Value::String(doc_id.clone()));
+    //             }
 
-                i += 1;
+    //             i += 1;
 
-                // 按索引和routing分组
-                docs_by_index
-                    .entry(index_name.to_string())
-                    .or_insert_with(HashMap::new)
-                    .entry(routing)
-                    .or_insert_with(Vec::new)
-                    .push((doc_id, doc));
-            }
-            _ => {
-                errors = true;
-            }
-        }
-    }
+    //             // 按索引和routing分组
+    //             docs_by_index
+    //                 .entry(index_name.to_string())
+    //                 .or_insert_with(HashMap::new)
+    //                 .entry(routing)
+    //                 .or_insert_with(Vec::new)
+    //                 .push((doc_id, doc));
+    //         }
+    //         _ => {
+    //             errors = true;
+    //         }
+    //     }
+    // }
 
-    // 批量插入: 按索引和routing分组处理
-    for (index_name, routing_groups) in docs_by_index {
-        let table_meta = match server.engine.get_table_meta(&index_name) {
-            Ok(m) => m,
-            Err(e) => {
-                errors = true;
-                // 为该索引的所有文档添加错误响应
-                for routing_docs in routing_groups.values() {
-                    for (doc_id, _) in routing_docs {
-                        items.push(json!({
-                            "index": {
-                                "_index": index_name,
-                                "_type": "_doc",
-                                "_id": doc_id,
-                                "status": 404,
-                                "error": {
-                                    "type": "index_not_found_exception",
-                                    "reason": e.to_string()
-                                }
-                            }
-                        }));
-                    }
-                }
-                continue;
-            }
-        };
+    // // 批量插入: 按索引和routing分组处理
+    // for (index_name, routing_groups) in docs_by_index {
+    //     let table_meta = match server.engine.get_table_meta(&index_name) {
+    //         Ok(m) => m,
+    //         Err(e) => {
+    //             errors = true;
+    //             // 为该索引的所有文档添加错误响应
+    //             for routing_docs in routing_groups.values() {
+    //                 for (doc_id, _) in routing_docs {
+    //                     items.push(json!({
+    //                         "index": {
+    //                             "_index": index_name,
+    //                             "_type": "_doc",
+    //                             "_id": doc_id,
+    //                             "status": 404,
+    //                             "error": {
+    //                                 "type": "index_not_found_exception",
+    //                                 "reason": e.to_string()
+    //                             }
+    //                         }
+    //                     }));
+    //                 }
+    //             }
+    //             continue;
+    //         }
+    //     };
 
-        for (routing, doc_id_docs) in routing_groups {
-            // 提取文档和ID
-            let (doc_ids, docs): (Vec<String>, Vec<Value>) = doc_id_docs.into_iter().unzip();
+    //     for (routing, doc_id_docs) in routing_groups {
+    //         // 提取文档和ID
+    //         let (doc_ids, docs): (Vec<String>, Vec<Value>) = doc_id_docs.into_iter().unzip();
 
-            // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
-            let normalized_docs: Vec<Value> = docs
-                .into_iter()
-                .map(|value| {
-                    if let Value::Object(map) = value {
-                        let mut new_map = serde_json::Map::new();
-                        for (key, val) in map {
-                            new_map.insert(key.to_lowercase(), val);
-                        }
-                        Value::Object(new_map)
-                    } else {
-                        value
-                    }
-                })
-                .collect();
+    //         // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
+    //         let normalized_docs: Vec<Value> = docs
+    //             .into_iter()
+    //             .map(|value| {
+    //                 if let Value::Object(map) = value {
+    //                     let mut new_map = serde_json::Map::new();
+    //                     for (key, val) in map {
+    //                         new_map.insert(key.to_lowercase(), val);
+    //                     }
+    //                     Value::Object(new_map)
+    //                 } else {
+    //                     value
+    //                 }
+    //             })
+    //             .collect();
 
-            // 将 JSON 文档转换为 RecordBatch
-            let batch = match crate::utils::arrow_utils::json_to_record_batch(
-                &normalized_docs,
-                table_meta.schema.to_arrow_schema(),
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    errors = true;
-                    for doc_id in doc_ids {
-                        items.push(json!({
-                            "index": {
-                                "_index": index_name,
-                                "_type": "_doc",
-                                "_id": doc_id,
-                                "status": 400,
-                                "error": {
-                                    "type": "mapper_parsing_exception",
-                                    "reason": e.to_string()
-                                }
-                            }
-                        }));
-                    }
-                    continue;
-                }
-            };
+    //         // 将 JSON 文档转换为 RecordBatch
+    //         let batch = match crate::utils::arrow_utils::json_to_record_batch(
+    //             &normalized_docs,
+    //             table_meta.schema.to_arrow_schema(),
+    //         ) {
+    //             Ok(b) => b,
+    //             Err(e) => {
+    //                 errors = true;
+    //                 for doc_id in doc_ids {
+    //                     items.push(json!({
+    //                         "index": {
+    //                             "_index": index_name,
+    //                             "_type": "_doc",
+    //                             "_id": doc_id,
+    //                             "status": 400,
+    //                             "error": {
+    //                                 "type": "mapper_parsing_exception",
+    //                                 "reason": e.to_string()
+    //                             }
+    //                         }
+    //                     }));
+    //                 }
+    //                 continue;
+    //             }
+    //         };
 
-            // 调用 insert_batch
-            match server
-                .engine
-                .insert_batch(&index_name, batch, routing)
-                .await
-            {
-                Ok(stats) => {
-                    log::debug!(
-                        "✅ Bulk insert: {} rows into {} partitions of '{}'",
-                        stats.rows_inserted,
-                        stats.partitions_affected,
-                        index_name
-                    );
+    //         // 调用 insert_batch
+    //         match server
+    //             .engine
+    //             .insert_batch(&index_name, batch, routing)
+    //             .await
+    //         {
+    //             Ok(stats) => {
+    //                 log::debug!(
+    //                     "✅ Bulk insert: {} rows into {} partitions of '{}'",
+    //                     stats.rows_inserted,
+    //                     stats.partitions_affected,
+    //                     index_name
+    //                 );
 
-                    for doc_id in doc_ids {
-                        items.push(json!({
-                            "index": {
-                                "_index": index_name,
-                                "_type": "_doc",
-                                "_id": doc_id,
-                                "_version": 1,
-                                "result": "created",
-                                "_shards": {"total": 2, "successful": 1, "failed": 0},
-                                "_seq_no": 0,
-                                "_primary_term": 1,
-                                "status": 201
-                            }
-                        }));
-                    }
-                }
-                Err(e) => {
-                    errors = true;
-                    for doc_id in doc_ids {
-                        items.push(json!({
-                            "index": {
-                                "_index": index_name,
-                                "_type": "_doc",
-                                "_id": doc_id,
-                                "status": 500,
-                                "error": {
-                                    "type": "engine_exception",
-                                    "reason": e.to_string()
-                                }
-                            }
-                        }));
-                    }
-                }
-            }
-        }
-    }
+    //                 for doc_id in doc_ids {
+    //                     items.push(json!({
+    //                         "index": {
+    //                             "_index": index_name,
+    //                             "_type": "_doc",
+    //                             "_id": doc_id,
+    //                             "_version": 1,
+    //                             "result": "created",
+    //                             "_shards": {"total": 2, "successful": 1, "failed": 0},
+    //                             "_seq_no": 0,
+    //                             "_primary_term": 1,
+    //                             "status": 201
+    //                         }
+    //                     }));
+    //                 }
+    //             }
+    //             Err(e) => {
+    //                 errors = true;
+    //                 for doc_id in doc_ids {
+    //                     items.push(json!({
+    //                         "index": {
+    //                             "_index": index_name,
+    //                             "_type": "_doc",
+    //                             "_id": doc_id,
+    //                             "status": 500,
+    //                             "error": {
+    //                                 "type": "engine_exception",
+    //                                 "reason": e.to_string()
+    //                             }
+    //                         }
+    //                     }));
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
-    // 创建响应，明确设置 Content-Type 为 application/json（不带 charset）
-    let response_body = serde_json::json!({
-        "took": 10,
-        "errors": errors,
-        "items": items
-    });
+    // // 创建响应，明确设置 Content-Type 为 application/json（不带 charset）
+    // let response_body = serde_json::json!({
+    //     "took": 10,
+    //     "errors": errors,
+    //     "items": items
+    // });
 
-    let json_string = serde_json::to_string(&response_body)
-        .map_err(|e| internal_error(format!("Failed to serialize response: {}", e)))?;
+    // let json_string = serde_json::to_string(&response_body)
+    //     .map_err(|e| internal_error(format!("Failed to serialize response: {}", e)))?;
 
-    Ok(Response::builder()
-        .content_type("application/json")
-        .body(json_string))
+    // Ok(Response::builder()
+    //     .content_type("application/json")
+    //     .body(json_string))
+    todo!()
 }
 
 /// 搜索文档（POST）
@@ -1046,252 +1052,253 @@ async fn search_impl(
     search_req: SearchRequest,
     typed_keys: bool,
 ) -> Result<Response, poem::Error> {
-    let start_time = std::time::Instant::now();
+    // let start_time = std::time::Instant::now();
 
-    // 获取表元数据
-    let meta = server
-        .engine
-        .get_table_meta(&index)
-        .map_err(|_| not_found(format!("Index '{}' not found", index)))?;
+    // // 获取表元数据
+    // let meta = server
+    //     .engine
+    //     .get_table_meta(&index)
+    //     .map_err(|_| not_found(format!("Index '{}' not found", index)))?;
 
-    // 🔧 检查是否是聚合查询
-    let aggs = search_req
-        .aggregations
-        .as_ref()
-        .or(search_req.aggs.as_ref());
-    if let Some(aggregations) = aggs {
-        log::info!("🔍 [ES Agg] Processing aggregation query");
-        let schema_arc = Arc::new(meta.schema.clone());
-        let aggregations_owned = aggregations.clone();
-        return handle_aggregation_search(
-            server,
-            index,
-            search_req,
-            aggregations_owned,
-            schema_arc,
-            typed_keys,
-        )
-        .await;
-    }
+    // // 🔧 检查是否是聚合查询
+    // let aggs = search_req
+    //     .aggregations
+    //     .as_ref()
+    //     .or(search_req.aggs.as_ref());
+    // if let Some(aggregations) = aggs {
+    //     log::info!("🔍 [ES Agg] Processing aggregation query");
+    //     let schema_arc = Arc::new(meta.schema.clone());
+    //     let aggregations_owned = aggregations.clone();
+    //     return handle_aggregation_search(
+    //         server,
+    //         index,
+    //         search_req,
+    //         aggregations_owned,
+    //         schema_arc,
+    //         typed_keys,
+    //     )
+    //     .await;
+    // }
 
-    // 构建 SQL 查询
-    let mut sql = format!("SELECT * FROM {}", index);
-    let mut where_clause = String::new();
+    // // 构建 SQL 查询
+    // let mut sql = format!("SELECT * FROM {}", index);
+    // let mut where_clause = String::new();
 
-    // 转换 ES DSL 查询为 SQL WHERE 条件
-    if let Some(query) = &search_req.query {
-        log::info!("🔍 [ES Search] Input query: {:?}", query);
-        if let Some(where_sql) = convert_es_query_to_sql(query, &meta.schema) {
-            where_clause = format!(" WHERE {}", where_sql);
-            sql.push_str(&where_clause);
-            log::debug!("✅ [ES Search] Generated WHERE clause: {}", where_clause);
-        } else {
-            log::warn!("⚠️  [ES Search] convert_es_query_to_sql returned None");
-        }
-    }
+    // // 转换 ES DSL 查询为 SQL WHERE 条件
+    // if let Some(query) = &search_req.query {
+    //     log::info!("🔍 [ES Search] Input query: {:?}", query);
+    //     if let Some(where_sql) = convert_es_query_to_sql(query, &meta.schema) {
+    //         where_clause = format!(" WHERE {}", where_sql);
+    //         sql.push_str(&where_clause);
+    //         log::debug!("✅ [ES Search] Generated WHERE clause: {}", where_clause);
+    //     } else {
+    //         log::warn!("⚠️  [ES Search] convert_es_query_to_sql returned None");
+    //     }
+    // }
 
-    // 添加排序
-    if let Some(sort) = &search_req.sort {
-        if let Some(order_by) = convert_es_sort_to_sql(sort) {
-            if !order_by.is_empty() {
-                sql.push_str(&format!(" ORDER BY {}", order_by));
-                log::debug!("🔍 [ES Search] Added ORDER BY: {}", order_by);
-            }
-        }
-    }
+    // // 添加排序
+    // if let Some(sort) = &search_req.sort {
+    //     if let Some(order_by) = convert_es_sort_to_sql(sort) {
+    //         if !order_by.is_empty() {
+    //             sql.push_str(&format!(" ORDER BY {}", order_by));
+    //             log::debug!("🔍 [ES Search] Added ORDER BY: {}", order_by);
+    //         }
+    //     }
+    // }
 
-    // 添加 LIMIT (ES 的 from + size)
-    let from = search_req.from.unwrap_or(0);
-    let size = search_req.size.unwrap_or(10);
-    if from > 0 {
-        sql.push_str(&format!(" LIMIT {} OFFSET {}", size, from));
-    } else {
-        sql.push_str(&format!(" LIMIT {}", size));
-    }
+    // // 添加 LIMIT (ES 的 from + size)
+    // let from = search_req.from.unwrap_or(0);
+    // let size = search_req.size.unwrap_or(10);
+    // if from > 0 {
+    //     sql.push_str(&format!(" LIMIT {} OFFSET {}", size, from));
+    // } else {
+    //     sql.push_str(&format!(" LIMIT {}", size));
+    // }
 
-    log::debug!("🔍 [ES Search] Generated SQL: {}", sql);
+    // log::debug!("🔍 [ES Search] Generated SQL: {}", sql);
 
-    // 先执行 COUNT 查询获取总数
-    use futures::StreamExt;
-    let count_sql = format!("SELECT COUNT(*) FROM {}{}", index, where_clause);
-    let mut count_stream = server
-        .engine
-        .clone()
-        .execute_sql_stream(&count_sql)
-        .await
-        .map_err(|e| internal_error(format!("Count query failed: {}", e)))?;
+    // // 先执行 COUNT 查询获取总数
+    // use futures::StreamExt;
+    // let count_sql = format!("SELECT COUNT(*) FROM {}{}", index, where_clause);
+    // let mut count_stream = server
+    //     .engine
+    //     .clone()
+    //     .execute_sql_stream(&count_sql)
+    //     .await
+    //     .map_err(|e| internal_error(format!("Count query failed: {}", e)))?;
 
-    let mut count_batches = Vec::new();
-    while let Some(batch_result) = count_stream.next().await {
-        let batch = batch_result.map_err(|e| internal_error(format!("Stream error: {}", e)))?;
-        count_batches.push(batch);
-    }
+    // let mut count_batches = Vec::new();
+    // while let Some(batch_result) = count_stream.next().await {
+    //     let batch = batch_result.map_err(|e| internal_error(format!("Stream error: {}", e)))?;
+    //     count_batches.push(batch);
+    // }
 
-    let total_count = if !count_batches.is_empty() && count_batches[0].num_rows() > 0 {
-        use datafusion::arrow::array::*;
-        let batch = &count_batches[0];
-        if batch.num_columns() > 0 && batch.num_rows() > 0 {
-            let column = batch.column(0);
-            if let Some(int64_array) = column.as_any().downcast_ref::<Int64Array>() {
-                int64_array.value(0) as usize
-            } else if let Some(uint64_array) = column.as_any().downcast_ref::<UInt64Array>() {
-                uint64_array.value(0) as usize
-            } else {
-                0
-            }
-        } else {
-            0
-        }
-    } else {
-        0
-    };
+    // let total_count = if !count_batches.is_empty() && count_batches[0].num_rows() > 0 {
+    //     use datafusion::arrow::array::*;
+    //     let batch = &count_batches[0];
+    //     if batch.num_columns() > 0 && batch.num_rows() > 0 {
+    //         let column = batch.column(0);
+    //         if let Some(int64_array) = column.as_any().downcast_ref::<Int64Array>() {
+    //             int64_array.value(0) as usize
+    //         } else if let Some(uint64_array) = column.as_any().downcast_ref::<UInt64Array>() {
+    //             uint64_array.value(0) as usize
+    //         } else {
+    //             0
+    //         }
+    //     } else {
+    //         0
+    //     }
+    // } else {
+    //     0
+    // };
 
-    // 执行实际查询
-    let mut search_stream = match server.engine.clone().execute_sql_stream(&sql).await {
-        Ok(s) => s,
-        Err(e) => {
-            let msg = format!("Query execution failed: {}", e);
-            log::error!("❌ [ES Search] Error: {}", msg);
-            return Err(internal_error(msg).into());
-        }
-    };
+    // // 执行实际查询
+    // let mut search_stream = match server.engine.clone().execute_sql_stream(&sql).await {
+    //     Ok(s) => s,
+    //     Err(e) => {
+    //         let msg = format!("Query execution failed: {}", e);
+    //         log::error!("❌ [ES Search] Error: {}", msg);
+    //         return Err(internal_error(msg).into());
+    //     }
+    // };
 
-    let mut search_batches = Vec::new();
-    while let Some(batch_result) = search_stream.next().await {
-        let batch = match batch_result {
-            Ok(b) => b,
-            Err(e) => {
-                let msg = format!("Stream error: {}", e);
-                log::error!("❌ [ES Search] Stream error: {}", msg);
-                return Err(internal_error(msg).into());
-            }
-        };
-        search_batches.push(batch);
-    }
+    // let mut search_batches = Vec::new();
+    // while let Some(batch_result) = search_stream.next().await {
+    //     let batch = match batch_result {
+    //         Ok(b) => b,
+    //         Err(e) => {
+    //             let msg = format!("Stream error: {}", e);
+    //             log::error!("❌ [ES Search] Stream error: {}", msg);
+    //             return Err(internal_error(msg).into());
+    //         }
+    //     };
+    //     search_batches.push(batch);
+    // }
 
-    let result = if search_batches.is_empty() {
-        use datafusion::arrow::array::RecordBatch;
-        use datafusion::arrow::datatypes::Schema;
-        RecordBatch::new_empty(std::sync::Arc::new(Schema::empty()))
-    } else if search_batches.len() == 1 {
-        search_batches.into_iter().next().unwrap()
-    } else {
-        use datafusion::arrow::compute::concat_batches;
-        let schema = search_batches[0].schema();
-        concat_batches(&schema, &search_batches).map_err(|e| {
-            let msg = format!("Failed to concat batches: {}", e);
-            log::error!("❌ [ES Search] Concat error: {}", msg);
-            internal_error(msg)
-        })?
-    };
+    // let result = if search_batches.is_empty() {
+    //     use datafusion::arrow::array::RecordBatch;
+    //     use datafusion::arrow::datatypes::Schema;
+    //     RecordBatch::new_empty(std::sync::Arc::new(Schema::empty()))
+    // } else if search_batches.len() == 1 {
+    //     search_batches.into_iter().next().unwrap()
+    // } else {
+    //     use datafusion::arrow::compute::concat_batches;
+    //     let schema = search_batches[0].schema();
+    //     concat_batches(&schema, &search_batches).map_err(|e| {
+    //         let msg = format!("Failed to concat batches: {}", e);
+    //         log::error!("❌ [ES Search] Concat error: {}", msg);
+    //         internal_error(msg)
+    //     })?
+    // };
 
-    // 将 RecordBatch 转换为 JSON
-    let all_docs =
-        crate::utils::arrow_utils::record_batch_to_json(&result).unwrap_or_else(|_| vec![]);
+    // // 将 RecordBatch 转换为 JSON
+    // let all_docs =
+    //     crate::utils::arrow_utils::record_batch_to_json(&result).unwrap_or_else(|_| vec![]);
 
-    // 提取排序字段名称（如果有排序）
-    let sort_fields: Vec<String> = if let Some(sort) = &search_req.sort {
-        if let Some(arr) = sort.as_array() {
-            arr.iter()
-                .filter_map(|s| {
-                    if let Some(obj) = s.as_object() {
-                        obj.keys().next().map(|k| k.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            vec![]
-        }
-    } else {
-        vec![]
-    };
+    // // 提取排序字段名称（如果有排序）
+    // let sort_fields: Vec<String> = if let Some(sort) = &search_req.sort {
+    //     if let Some(arr) = sort.as_array() {
+    //         arr.iter()
+    //             .filter_map(|s| {
+    //                 if let Some(obj) = s.as_object() {
+    //                     obj.keys().next().map(|k| k.to_string())
+    //                 } else {
+    //                     None
+    //                 }
+    //             })
+    //             .collect()
+    //     } else {
+    //         vec![]
+    //     }
+    // } else {
+    //     vec![]
+    // };
 
-    if !sort_fields.is_empty() {
-        log::debug!("🔍 [ES Sort] Extracted sort fields: {:?}", sort_fields);
-    }
+    // if !sort_fields.is_empty() {
+    //     log::debug!("🔍 [ES Sort] Extracted sort fields: {:?}", sort_fields);
+    // }
 
-    // 注意: LIMIT 和 OFFSET 已经在 SQL 中处理了,这里不需要再分页
-    let hits: Vec<Value> = all_docs
-        .into_iter()
-        .map(|doc: Value| {
-            // 处理 _source：如果是数组，取第一个元素；否则直接使用
-            let source = if doc.is_array() {
-                doc.as_array()
-                    .and_then(|arr| arr.first())
-                    .cloned()
-                    .unwrap_or(doc.clone())
-            } else {
-                doc.clone()
-            };
+    // // 注意: LIMIT 和 OFFSET 已经在 SQL 中处理了,这里不需要再分页
+    // let hits: Vec<Value> = all_docs
+    //     .into_iter()
+    //     .map(|doc: Value| {
+    //         // 处理 _source：如果是数组，取第一个元素；否则直接使用
+    //         let source = if doc.is_array() {
+    //             doc.as_array()
+    //                 .and_then(|arr| arr.first())
+    //                 .cloned()
+    //                 .unwrap_or(doc.clone())
+    //         } else {
+    //             doc.clone()
+    //         };
 
-            let id = source
-                .get("_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
+    //         let id = source
+    //             .get("_id")
+    //             .and_then(|v| v.as_str())
+    //             .unwrap_or("unknown")
+    //             .to_string();
 
-            // 提取排序值
-            let sort_values: Vec<Value> = sort_fields
-                .iter()
-                .filter_map(|field| source.get(field).cloned())
-                .collect();
+    //         // 提取排序值
+    //         let sort_values: Vec<Value> = sort_fields
+    //             .iter()
+    //             .filter_map(|field| source.get(field).cloned())
+    //             .collect();
 
-            if !sort_values.is_empty() {
-                log::debug!(
-                    "🔍 [ES Sort] Document id={}, sort values={:?}",
-                    id,
-                    sort_values
-                );
-            }
+    //         if !sort_values.is_empty() {
+    //             log::debug!(
+    //                 "🔍 [ES Sort] Document id={}, sort values={:?}",
+    //                 id,
+    //                 sort_values
+    //             );
+    //         }
 
-            let mut hit = json!({
-                "_index": index,
-                "_type": "_doc",
-                "_id": id,
-                "_score": 1.0,
-                "_source": source
-            });
+    //         let mut hit = json!({
+    //             "_index": index,
+    //             "_type": "_doc",
+    //             "_id": id,
+    //             "_score": 1.0,
+    //             "_source": source
+    //         });
 
-            // 如果有排序，添加 sort 字段
-            if !sort_values.is_empty() {
-                if let Some(obj) = hit.as_object_mut() {
-                    obj.insert("sort".to_string(), json!(sort_values));
-                }
-            }
+    //         // 如果有排序，添加 sort 字段
+    //         if !sort_values.is_empty() {
+    //             if let Some(obj) = hit.as_object_mut() {
+    //                 obj.insert("sort".to_string(), json!(sort_values));
+    //             }
+    //         }
 
-            hit
-        })
-        .collect();
+    //         hit
+    //     })
+    //     .collect();
 
-    let took = start_time.elapsed().as_millis() as u64;
+    // let took = start_time.elapsed().as_millis() as u64;
 
-    let response_body = serde_json::json!({
-        "took": took,
-        "timed_out": false,
-        "_shards": {
-            "total": meta.num_partitions().unwrap_or(1),
-            "successful": meta.num_partitions().unwrap_or(1),
-            "skipped": 0,
-            "failed": 0
-        },
-        "hits": {
-            "total": {
-                "value": total_count,
-                "relation": "eq"
-            },
-            "max_score": 1.0,
-            "hits": hits
-        }
-    });
+    // let response_body = serde_json::json!({
+    //     "took": took,
+    //     "timed_out": false,
+    //     "_shards": {
+    //         "total": meta.num_partitions().unwrap_or(1),
+    //         "successful": meta.num_partitions().unwrap_or(1),
+    //         "skipped": 0,
+    //         "failed": 0
+    //     },
+    //     "hits": {
+    //         "total": {
+    //             "value": total_count,
+    //             "relation": "eq"
+    //         },
+    //         "max_score": 1.0,
+    //         "hits": hits
+    //     }
+    // });
 
-    let json_string = serde_json::to_string(&response_body)
-        .map_err(|e| internal_error(format!("Failed to serialize response: {}", e)))?;
+    // let json_string = serde_json::to_string(&response_body)
+    //     .map_err(|e| internal_error(format!("Failed to serialize response: {}", e)))?;
 
-    Ok(Response::builder()
-        .content_type("application/json")
-        .body(json_string))
+    // Ok(Response::builder()
+    //     .content_type("application/json")
+    //     .body(json_string))
+    todo!()
 }
 
 /// 将 ES DSL 查询转换为 SQL WHERE 条件

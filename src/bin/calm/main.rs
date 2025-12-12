@@ -1,9 +1,10 @@
 mod config;
 
 use calm::{
+    catalog::Catalog,
     cluster::{ClusterManager, PartitionManager},
     engine::Engine,
-    protocol::{elasticsearch::ElasticsearchServer, graphql::GraphQLServer, mysql::MysqlServer},
+    // protocol::{elasticsearch::ElasticsearchServer, graphql::GraphQLServer, mysql::MysqlServer},
 };
 use config::Config;
 use std::io::Write;
@@ -32,90 +33,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化集群
     let cluster_manager = Arc::new(ClusterManager::new(config.to_cluster_config()).await?);
 
+    // 创建 Catalog
+    let catalog = Arc::new(Catalog::new(config.engine.data_dir.clone())?);
+
     // 创建 Engine
     let engine_config = config.to_engine_config();
-    let engine = Engine::new(engine_config, cluster_manager.clone())?;
+    let engine = Engine::new(engine_config)?;
 
-    // 加载已存在的表
+    // 加载已存在的表（暂时为空方法）
     println!("📚 Loading existing tables...");
     engine.load_existing_tables().await?;
     println!("✓ Tables loaded");
     println!();
 
     // 存储服务器任务句柄
-    let mut handles = Vec::new();
+    // let mut handles = Vec::new();
 
-    // 启动 GraphQL 服务
-    if let Some(port) = config.graphql_port {
-        let addr = format!("{}:{}", config.host, port);
-        println!("🚀 Starting GraphQL server on {}", addr);
-        println!("   GraphQL Playground: http://{}", addr);
-        println!("   GraphQL Playground: http://{}/playground", addr);
+    // // 启动 GraphQL 服务
+    // if let Some(port) = config.graphql_port {
+    //     let addr = format!("{}:{}", config.host, port);
+    //     println!("🚀 Starting GraphQL server on {}", addr);
+    //     println!("   GraphQL Playground: http://{}", addr);
+    //     println!("   GraphQL Playground: http://{}/playground", addr);
 
-        let engine_clone = engine.clone();
-        let handle = tokio::spawn(async move {
-            let server = GraphQLServer::new(engine_clone);
-            if let Err(e) = server.start(&addr).await {
-                eprintln!("❌ GraphQL server error: {}", e);
-            }
-        });
-        handles.push(handle);
-    }
+    //     let engine_clone = engine.clone();
+    //     let catalog_clone = catalog.clone();
+    //     let handle = tokio::spawn(async move {
+    //         let server = GraphQLServer::new(engine_clone, catalog_clone);
+    //         if let Err(e) = server.start(&addr).await {
+    //             eprintln!("❌ GraphQL server error: {}", e);
+    //         }
+    //     });
+    //     handles.push(handle);
+    // }
 
-    // 启动 Elasticsearch 服务
-    if let Some(port) = config.es_port {
-        let addr = format!("{}:{}", config.host, port);
-        println!("🚀 Starting Elasticsearch server on {}", addr);
-        println!("   Health check: http://{}/_cluster/health", addr);
+    // // 启动 Elasticsearch 服务
+    // if let Some(port) = config.es_port {
+    //     let addr = format!("{}:{}", config.host, port);
+    //     println!("🚀 Starting Elasticsearch server on {}", addr);
+    //     println!("   Health check: http://{}/_cluster/health", addr);
 
-        let engine_clone = engine.clone();
-        let handle = tokio::spawn(async move {
-            let server = ElasticsearchServer::new(engine_clone);
-            if let Err(e) = server.start(&addr).await {
-                eprintln!("❌ Elasticsearch server error: {}", e);
-            }
-        });
-        handles.push(handle);
-    }
+    //     let engine_clone = engine.clone();
+    //     let handle = tokio::spawn(async move {
+    //         let server = ElasticsearchServer::new(engine_clone);
+    //         if let Err(e) = server.start(&addr).await {
+    //             eprintln!("❌ Elasticsearch server error: {}", e);
+    //         }
+    //     });
+    //     handles.push(handle);
+    // }
+    // // 启动 MySQL 服务
+    // if let Some(port) = config.mysql_port {
+    //     let addr = format!("{}:{}", config.host, port);
+    //     println!("🚀 Starting MySQL server on {}", addr);
+    //     println!(
+    //         "   Connect: mysql -h {} -P {} -u {} {}",
+    //         config.host,
+    //         port,
+    //         config.user,
+    //         if config.password.is_empty() { "" } else { "-p" }
+    //     );
 
-    // 启动 MySQL 服务
-    if let Some(port) = config.mysql_port {
-        let addr = format!("{}:{}", config.host, port);
-        println!("🚀 Starting MySQL server on {}", addr);
-        println!(
-            "   Connect: mysql -h {} -P {} -u {} {}",
-            config.host,
-            port,
-            config.user,
-            if config.password.is_empty() { "" } else { "-p" }
-        );
+    //     let engine_clone = engine.clone();
+    //     let user = config.user.clone();
+    //     let password = config.password.clone();
+    //     let handle = tokio::spawn(async move {
+    //         let server = MysqlServer::new(engine_clone, user, password);
+    //         if let Err(e) = server.start(&addr).await {
+    //             eprintln!("❌ MySQL server error: {}", e);
+    //         }
+    //     });
+    //     handles.push(handle);
+    // }
 
-        let engine_clone = engine.clone();
-        let user = config.user.clone();
-        let password = config.password.clone();
-        let handle = tokio::spawn(async move {
-            let server = MysqlServer::new(engine_clone, user, password);
-            if let Err(e) = server.start(&addr).await {
-                eprintln!("❌ MySQL server error: {}", e);
-            }
-        });
-        handles.push(handle);
-    }
-
-    if handles.is_empty() {
-        eprintln!("❌ No servers enabled. Use --help for usage information.");
-        return Err("No servers enabled".into());
-    }
+    // if handles.is_empty() {
+    //     eprintln!("❌ No servers enabled. Use --help for usage information.");
+    //     return Err("No servers enabled".into());
+    // }
 
     println!();
     println!("✓ All servers started");
     println!("📊 Press Ctrl+C to shutdown");
     println!();
 
-    // 等待所有服务器任务
-    for handle in handles {
-        let _ = handle.await;
-    }
+    // // 等待所有服务器任务
+    // for handle in handles {
+    //     let _ = handle.await;
+    // }
 
     // 关闭引擎
     println!("\n🛑 Shutting down...");

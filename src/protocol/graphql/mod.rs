@@ -1,5 +1,3 @@
-pub(crate) mod internal;
-
 use std::sync::Arc;
 
 use async_graphql::{Context, EmptySubscription, Object, Result, Schema, SimpleObject};
@@ -10,8 +8,8 @@ use serde_json::Value as JsonValue;
 
 use crate::{
     catalog::PartitionStrategy,
-    engine::Engine,
     schema::{field::FieldOption, PersistPolicy, Schema as CalmSchema},
+    service::{ddl::DDLService, CalmService},
     utils::arrow_utils,
 };
 
@@ -19,9 +17,9 @@ use crate::{
 pub type CalmGraphQLSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 
 /// 创建 GraphQL Schema
-pub fn create_schema(engine: Arc<Engine>) -> CalmGraphQLSchema {
+pub fn create_schema(service: Arc<CalmService>) -> CalmGraphQLSchema {
     Schema::build(QueryRoot, MutationRoot, EmptySubscription)
-        .data(engine)
+        .data(service)
         .finish()
 }
 
@@ -1116,8 +1114,12 @@ impl QueryRoot {
     /// # 返回: ["users", "orders", "products"]
     /// ```
     async fn tables(&self, ctx: &Context<'_>) -> Result<Vec<String>> {
-        let engine = ctx.data::<Arc<Engine>>()?;
-        Ok(engine.list_tables())
+        let service = ctx.data::<Arc<CalmService>>()?.clone();
+        Ok(service
+            .ddl_service()
+            .clone()
+            .list_tables(tarpc::context::current())
+            .await)
     }
 
     /// 获取表的基本信息
@@ -1145,9 +1147,14 @@ impl QueryRoot {
     /// }
     /// ```
     async fn table(&self, ctx: &Context<'_>, name: String) -> Result<Option<Table>> {
-        let engine = ctx.data::<Arc<Engine>>()?;
+        let service = ctx.data::<Arc<CalmService>>()?;
 
-        let meta = match engine.get_table_meta(&name) {
+        let meta = match service
+            .ddl_service()
+            .clone()
+            .get_table_meta(tarpc::context::current(), name.clone())
+            .await
+        {
             Ok(meta) => meta,
             Err(_) => return Ok(None),
         };
@@ -1210,52 +1217,55 @@ impl QueryRoot {
     /// }
     /// ```
     async fn partitions(&self, ctx: &Context<'_>, table: String) -> Result<Vec<PartitionInfo>> {
-        let engine = ctx.data::<Arc<Engine>>()?;
+        let service = ctx.data::<Arc<CalmService>>()?;
 
         // 获取表的所有分区 ID
-        let partition_ids = engine.list_partitions(&table).await;
+        let partition_ids = service
+            .ddl_service()
+            .clone()
+            .list_partitions(tarpc::context::current(), table.clone())
+            .await?;
 
         let mut partition_infos = Vec::new();
 
         for partition_id in partition_ids {
-            if let Some(partition) = engine.get_partition(&table, &partition_id).await {
-                // 获取 frozen segments
-                let frozen_segments = partition.get_frozen_segments();
-                let mut segments = Vec::new();
+            // 通过 DDLService RPC 获取分区详情（会自动路由到正确的节点）
+            match service
+                .ddl_service()
+                .clone()
+                .get_partition_detail(
+                    tarpc::context::current(),
+                    table.clone(),
+                    partition_id.clone(),
+                )
+                .await
+            {
+                Ok(detail) => {
+                    let segments = detail
+                        .segments
+                        .into_iter()
+                        .map(|s| SegmentInfo {
+                            segment_id: s.segment_id,
+                            doc_count: s.doc_count,
+                            deleted_count: s.deleted_count,
+                            is_persisted: s.is_persisted,
+                            base_path: s.base_path,
+                            is_external_reference: s.is_external_reference,
+                            external_data_path: s.external_data_path,
+                        })
+                        .collect::<Vec<_>>();
 
-                // 收集 frozen segments 信息
-                for (seg_id, segment) in frozen_segments.iter() {
-                    segments.push(SegmentInfo {
-                        segment_id: *seg_id,
-                        doc_count: segment.doc_count(),
-                        deleted_count: segment.deleted_count(),
-                        is_persisted: segment.is_persisted(),
-                        base_path: segment.base_path(),
-                        is_external_reference: segment.is_external_reference(),
-                        external_data_path: segment.get_external_data_path(),
+                    partition_infos.push(PartitionInfo {
+                        partition_id,
+                        segment_count: segments.len(),
+                        segments,
                     });
                 }
-
-                // 释放读锁
-                drop(frozen_segments);
-
-                // 获取当前 segment（ID = 0 表示当前活跃 segment）
-                let current_segment = partition.get_current_segment();
-                segments.push(SegmentInfo {
-                    segment_id: 0,
-                    doc_count: current_segment.doc_count(),
-                    deleted_count: current_segment.deleted_count(),
-                    is_persisted: current_segment.is_persisted(),
-                    base_path: current_segment.base_path(),
-                    is_external_reference: current_segment.is_external_reference(),
-                    external_data_path: current_segment.get_external_data_path(),
-                });
-
-                partition_infos.push(PartitionInfo {
-                    partition_id,
-                    segment_count: segments.len(),
-                    segments,
-                });
+                Err(e) => {
+                    log::error!("Failed to get partition detail: {}", e);
+                    // 跳过失败的分区
+                    continue;
+                }
             }
         }
 
@@ -1293,9 +1303,14 @@ impl QueryRoot {
     /// }
     /// ```
     async fn table_detail(&self, ctx: &Context<'_>, name: String) -> Result<Option<TableDetail>> {
-        let engine = ctx.data::<Arc<Engine>>()?;
+        let service = ctx.data::<Arc<CalmService>>()?;
 
-        let meta = match engine.get_table_meta(&name) {
+        let meta = match service
+            .ddl_service()
+            .clone()
+            .get_table_meta(tarpc::context::current(), name.clone())
+            .await
+        {
             Ok(meta) => meta,
             Err(_) => return Ok(None),
         };
@@ -1324,61 +1339,59 @@ impl QueryRoot {
             })
             .collect();
 
-        // 获取所有分区信息
-        let partition_ids = engine.list_partitions(&name).await;
+        let partition_ids = service
+            .ddl_service()
+            .clone()
+            .list_partitions(tarpc::context::current(), name.clone())
+            .await?;
         let mut partition_infos = Vec::new();
         let mut total_segments = 0;
         let mut total_documents = 0u64;
 
         for partition_id in partition_ids {
-            if let Some(partition) = engine.get_partition(&name, &partition_id).await {
-                // 获取 frozen segments
-                let frozen_segments = partition.get_frozen_segments();
-                let mut segments = Vec::new();
+            // 通过 DDLService RPC 获取分区详情（会自动路由到正确的节点）
+            match service
+                .ddl_service()
+                .clone()
+                .get_partition_detail(
+                    tarpc::context::current(),
+                    name.clone(),
+                    partition_id.clone(),
+                )
+                .await
+            {
+                Ok(detail) => {
+                    let segments = detail
+                        .segments
+                        .iter()
+                        .map(|s| SegmentInfo {
+                            segment_id: s.segment_id,
+                            doc_count: s.doc_count,
+                            deleted_count: s.deleted_count,
+                            is_persisted: s.is_persisted,
+                            base_path: s.base_path.clone(),
+                            is_external_reference: s.is_external_reference,
+                            external_data_path: s.external_data_path.clone(),
+                        })
+                        .collect::<Vec<_>>();
 
-                // 收集 frozen segments 信息
-                for (seg_id, segment) in frozen_segments.iter() {
-                    let doc_count = segment.doc_count();
-                    let deleted_count = segment.deleted_count();
-                    total_documents += doc_count as u64 - deleted_count;
+                    // 统计文档数
+                    for seg in &segments {
+                        total_documents += (seg.doc_count as u64).saturating_sub(seg.deleted_count);
+                    }
 
-                    segments.push(SegmentInfo {
-                        segment_id: *seg_id,
-                        doc_count,
-                        deleted_count,
-                        is_persisted: segment.is_persisted(),
-                        base_path: segment.base_path(),
-                        is_external_reference: segment.is_external_reference(),
-                        external_data_path: segment.get_external_data_path(),
+                    total_segments += segments.len();
+
+                    partition_infos.push(PartitionInfo {
+                        partition_id,
+                        segment_count: segments.len(),
+                        segments,
                     });
                 }
-
-                // 释放读锁
-                drop(frozen_segments);
-
-                // 获取当前 segment
-                let current_segment = partition.get_current_segment();
-                let doc_count = current_segment.doc_count();
-                let deleted_count = current_segment.deleted_count();
-                total_documents += doc_count as u64 - deleted_count;
-
-                segments.push(SegmentInfo {
-                    segment_id: 0,
-                    doc_count,
-                    deleted_count,
-                    is_persisted: current_segment.is_persisted(),
-                    base_path: current_segment.base_path(),
-                    is_external_reference: current_segment.is_external_reference(),
-                    external_data_path: current_segment.get_external_data_path(),
-                });
-
-                total_segments += segments.len();
-
-                partition_infos.push(PartitionInfo {
-                    partition_id,
-                    segment_count: segments.len(),
-                    segments,
-                });
+                Err(e) => {
+                    log::error!("Failed to get partition detail: {}", e);
+                    continue;
+                }
             }
         }
 
@@ -1424,69 +1437,70 @@ impl QueryRoot {
     /// }
     /// ```
     async fn query(&self, ctx: &Context<'_>, sql: String) -> Result<QueryResult> {
-        let engine = ctx.data::<Arc<Engine>>()?;
+        todo!()
+        // let engine = ctx.data::<Arc<Engine>>()?;
 
-        // 使用 Engine 的 execute_sql_stream 方法
-        use futures::StreamExt;
-        let mut stream = engine
-            .execute_sql_stream(&sql)
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("Query failed: {}", e)))?;
+        // // 使用 Engine 的 execute_sql_stream 方法
+        // use futures::StreamExt;
+        // let mut stream = engine
+        //     .execute_sql_stream(&sql)
+        //     .await
+        //     .map_err(|e| async_graphql::Error::new(format!("Query failed: {}", e)))?;
 
-        // Collect stream
-        let mut batches = Vec::new();
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result
-                .map_err(|e| async_graphql::Error::new(format!("Stream error: {}", e)))?;
-            batches.push(batch);
-        }
+        // // Collect stream
+        // let mut batches = Vec::new();
+        // while let Some(batch_result) = stream.next().await {
+        //     let batch = batch_result
+        //         .map_err(|e| async_graphql::Error::new(format!("Stream error: {}", e)))?;
+        //     batches.push(batch);
+        // }
 
-        if batches.is_empty() {
-            return Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                total_rows: 0,
-            });
-        }
+        // if batches.is_empty() {
+        //     return Ok(QueryResult {
+        //         columns: vec![],
+        //         rows: vec![],
+        //         total_rows: 0,
+        //     });
+        // }
 
-        // 合并 batches
-        let result = if batches.len() == 1 {
-            batches.into_iter().next().unwrap()
-        } else {
-            use datafusion::arrow::compute::concat_batches;
-            let schema = batches[0].schema();
-            concat_batches(&schema, &batches).map_err(|e| {
-                async_graphql::Error::new(format!("Failed to concat batches: {}", e))
-            })?
-        };
+        // // 合并 batches
+        // let result = if batches.len() == 1 {
+        //     batches.into_iter().next().unwrap()
+        // } else {
+        //     use datafusion::arrow::compute::concat_batches;
+        //     let schema = batches[0].schema();
+        //     concat_batches(&schema, &batches).map_err(|e| {
+        //         async_graphql::Error::new(format!("Failed to concat batches: {}", e))
+        //     })?
+        // };
 
-        if result.num_rows() == 0 {
-            return Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                total_rows: 0,
-            });
-        }
+        // if result.num_rows() == 0 {
+        //     return Ok(QueryResult {
+        //         columns: vec![],
+        //         rows: vec![],
+        //         total_rows: 0,
+        //     });
+        // }
 
-        // 获取列名
-        let columns: Vec<String> = result
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect();
+        // // 获取列名
+        // let columns: Vec<String> = result
+        //     .schema()
+        //     .fields()
+        //     .iter()
+        //     .map(|f| f.name().clone())
+        //     .collect();
 
-        // 转换为 JSON
-        let rows = arrow_utils::record_batch_to_json(&result)
-            .map_err(|e| async_graphql::Error::new(format!("Failed to convert to JSON: {}", e)))?;
+        // // 转换为 JSON
+        // let rows = arrow_utils::record_batch_to_json(&result)
+        //     .map_err(|e| async_graphql::Error::new(format!("Failed to convert to JSON: {}", e)))?;
 
-        let total_rows = rows.len();
+        // let total_rows = rows.len();
 
-        Ok(QueryResult {
-            columns,
-            rows,
-            total_rows,
-        })
+        // Ok(QueryResult {
+        //     columns,
+        //     rows,
+        //     total_rows,
+        // })
     }
 }
 
@@ -1536,7 +1550,7 @@ impl MutationRoot {
     ///
     /// 详细配置参考 `CreateTableInput` 类型文档。
     async fn create_table(&self, ctx: &Context<'_>, input: CreateTableInput) -> Result<Table> {
-        let engine = ctx.data::<Arc<Engine>>()?;
+        let service = ctx.data::<Arc<CalmService>>()?;
 
         // 构建字段
         let mut fields = Vec::new();
@@ -1751,11 +1765,12 @@ impl MutationRoot {
                 (PartitionStrategy::None, 1)
             };
 
-        // 创建表
-        engine
-            .create_table(&input.name, schema, partition_strategy, num_partitions)
+        service
+            .ddl_service()
+            .clone()
+            .create_table(tarpc::context::current(), schema, partition_strategy)
             .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+            .map_err(|e| async_graphql::Error::new(format!("Failed to create table: {}", e)))?;
 
         // 返回创建的表信息
         let field_info: Vec<Field> = fields
@@ -1806,13 +1821,13 @@ impl MutationRoot {
     /// }
     /// ```
     async fn drop_table(&self, ctx: &Context<'_>, name: String) -> Result<bool> {
-        let engine = ctx.data::<Arc<Engine>>()?;
-
-        engine
-            .drop_table(&name)
+        let service = ctx.data::<Arc<CalmService>>()?;
+        service
+            .ddl_service()
+            .clone()
+            .drop_table(tarpc::context::current(), name)
             .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-
+            .map_err(|e| async_graphql::Error::new(format!("Failed to drop table: {}", e)))?;
         Ok(true)
     }
 
@@ -1837,25 +1852,16 @@ impl MutationRoot {
     /// }
     /// ```
     async fn flush_table(&self, ctx: &Context<'_>, name: String) -> Result<bool> {
-        let engine = ctx.data::<Arc<Engine>>()?;
+        let service = ctx.data::<Arc<CalmService>>()?;
 
-        engine
-            .flush_table(&name)
+        service
+            .ddl_service()
+            .clone()
+            .flush_table(tarpc::context::current(), name)
             .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to flush table: {}", e)))?;
 
         Ok(true)
-    }
-
-    /// 持久化表(别名,与 flushTable 功能相同)
-    ///
-    /// `flushTable` 的别名,功能完全相同。
-    ///
-    /// # MCP 提示
-    ///
-    /// **建议使用 `flushTable` 以保持一致性。**
-    async fn table_persist(&self, ctx: &Context<'_>, name: String) -> Result<bool> {
-        self.flush_table(ctx, name).await
     }
 
     /// 插入数据
@@ -2060,59 +2066,58 @@ impl MutationRoot {
         ctx: &Context<'_>,
         input: LoadSegmentInput,
     ) -> Result<LoadSegmentResult> {
-        let engine = ctx.data::<Arc<Engine>>()?;
+        todo!()
+        // let engine = ctx.data::<Arc<Engine>>()?;
 
-        // 验证文件路径
-        let file_path = std::path::PathBuf::from(&input.file_path);
-        if !file_path.exists() {
-            return Err(async_graphql::Error::new(format!(
-                "File does not exist: {}",
-                input.file_path
-            )));
-        }
+        // // 验证文件路径
+        // let file_path = std::path::PathBuf::from(&input.file_path);
+        // if !file_path.exists() {
+        //     return Err(async_graphql::Error::new(format!(
+        //         "File does not exist: {}",
+        //         input.file_path
+        //     )));
+        // }
 
-        // 转换 handler_type（可选）
-        let handler_type = input.handler_type.map(|ht| ht.into());
+        // // 转换 handler_type（可选）
+        // let handler_type = input.handler_type.map(|ht| ht.into());
 
-        // 调用 engine 的 load_segment 方法
-        let doc_count = engine
-            .load_segment(
-                &input.table,
-                input.partition_name.clone(),
-                file_path,
-                handler_type,
-            )
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("Load segment failed: {}", e)))?;
+        // // 调用 engine 的 load_segment 方法
+        // let doc_count = engine
+        //     .load_segment(
+        //         &input.table,
+        //         input.partition_name.clone(),
+        //         file_path,
+        //         handler_type,
+        //     )
+        //     .await
+        //     .map_err(|e| async_graphql::Error::new(format!("Load segment failed: {}", e)))?;
 
-        Ok(LoadSegmentResult {
-            success: true,
-            documents_loaded: doc_count,
-            partition_name: input.partition_name,
-            message: format!(
-                "Successfully loaded {} documents from {}",
-                doc_count, input.file_path
-            ),
-        })
+        // Ok(LoadSegmentResult {
+        //     success: true,
+        //     documents_loaded: doc_count,
+        //     partition_name: input.partition_name,
+        //     message: format!(
+        //         "Successfully loaded {} documents from {}",
+        //         doc_count, input.file_path
+        //     ),
+        // })
     }
 }
 
 // ===== GraphQL Server =====
 
 /// GraphQL 服务器
-pub struct GraphQLServer {
-    engine: Arc<Engine>,
-}
+pub struct GraphQLServer {}
 
 impl GraphQLServer {
-    pub fn new(engine: Arc<Engine>) -> Self {
-        Self { engine }
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// 启动 GraphQL 服务器
-    pub async fn start(self, addr: &str) -> Result<(), std::io::Error> {
+    pub async fn start(self, addr: &str, service: Arc<CalmService>) -> Result<(), std::io::Error> {
         // 创建 GraphQL Schema
-        let graphql_schema = create_schema(self.engine.clone());
+        let graphql_schema = create_schema(service);
 
         // GraphQL endpoint
         let graphql_endpoint = async_graphql_poem::GraphQL::new(graphql_schema);
@@ -2122,33 +2127,6 @@ impl GraphQLServer {
             .at("/", get(root))
             .at("/health", get(health))
             .at("/graphql", post(graphql_endpoint))
-            .at(
-                "/playground",
-                get(poem::endpoint::make_sync(move |_| {
-                    poem::web::Html(
-                        r#"
-                        <!DOCTYPE html>
-                        <html>
-                        <head>
-                            <title>GraphQL Playground</title>
-                            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/graphql-playground-react/build/static/css/index.css" />
-                            <script src="https://cdn.jsdelivr.net/npm/graphql-playground-react/build/static/js/middleware.js"></script>
-                        </head>
-                        <body>
-                            <div id="root"></div>
-                            <script>
-                                window.addEventListener('load', function() {
-                                    GraphQLPlayground.init(document.getElementById('root'), {
-                                        endpoint: '/graphql'
-                                    })
-                                })
-                            </script>
-                        </body>
-                        </html>
-                        "#.to_string()
-                    )
-                })),
-            )
             .with(Cors::new());
 
         Server::new(TcpListener::bind(addr)).run(app).await
@@ -2168,6 +2146,5 @@ async fn root() -> poem::web::Json<serde_json::Value> {
         "name": "Calm Database - GraphQL Server",
         "version": "0.1.0",
         "graphql_endpoint": "/graphql",
-        "playground": "/playground"
     }))
 }

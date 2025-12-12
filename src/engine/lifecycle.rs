@@ -3,8 +3,6 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::catalog::Catalog;
-use crate::cluster::{self, ClusterManager};
 use crate::partition::Partition;
 use crate::utils::error::CoreResult;
 
@@ -14,30 +12,26 @@ use super::Engine;
 impl Engine {
     /// 创建新的 Engine 实例
     ///
+    /// **Engine 职责**：只管本地数据操作
+    /// - 不依赖 Catalog（由外部传入）
+    /// - 不依赖 ClusterManager（由外部传入）
+    ///
     /// # 示例
     /// ```rust
     /// let engine = Engine::new(EngineConfig::default()).unwrap();
     /// ```
-    pub fn new(
-        config: EngineConfig,
-        cluster_manager: Arc<ClusterManager>,
-    ) -> CoreResult<Arc<Self>> {
+    pub fn new(config: EngineConfig) -> CoreResult<Arc<Self>> {
         let (persist_tx, persist_rx) = mpsc::unbounded_channel();
         let (partition_notify_tx, partition_notify_rx) = mpsc::unbounded_channel();
         let partitions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let persist_task_handle = Arc::new(tokio::sync::Mutex::new(None));
 
-        // 创建 Catalog
-        let catalog = Arc::new(Catalog::new(config.data_dir.clone())?);
-
         let engine = Arc::new(Self {
             config,
-            catalog,
             partitions,
             persist_tx,
             partition_notify_tx: Arc::new(partition_notify_tx),
             persist_task_handle: persist_task_handle.clone(),
-            cluster_manager,
         });
 
         // 启动后台持久化任务（需要 Arc<Self>）

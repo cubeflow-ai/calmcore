@@ -187,24 +187,6 @@ impl Engine {
         Ok(())
     }
 
-    /// 执行 SQL 查询（流式版本）
-    ///
-    /// 返回 DataFusion 的原生 Stream，避免全部加载到内存
-    ///
-    /// # 优势
-    /// - 内存占用可控（不会一次性 collect 所有结果）
-    /// - 适合大数据量查询
-    /// - 支持 Ballista 分布式执行
-    pub async fn execute_sql_stream(
-        self: &Arc<Self>,
-        sql: &str,
-    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
-        use crate::compute::Executor;
-
-        let executor = Executor::new(self.clone());
-        executor.execute_sql_stream(sql).await
-    }
-
     /// 加载外部文件到 segment
     ///
     /// # 参数

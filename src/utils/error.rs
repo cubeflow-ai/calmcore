@@ -71,3 +71,9 @@ impl From<datafusion::error::DataFusionError> for CoreError {
         CoreError::Internal(format!("DataFusion error: {}", err))
     }
 }
+
+impl From<tarpc::client::RpcError> for CoreError {
+    fn from(err: tarpc::client::RpcError) -> Self {
+        CoreError::Network(format!("RPC error: {}", err))
+    }
+}

@@ -392,7 +392,7 @@ impl InformationSchemaExecutor {
                 Err(_) => continue, // 跳过无法获取 schema 的表
             };
 
-            let table_schema = &table.schema;
+            let schema = &table.schema;
 
             // 遍历所有字段
             for (ordinal, field) in table_schema.fields.iter().enumerate() {

@@ -729,7 +729,7 @@ impl DistributedExecutor {
     /// 获取表 Schema
     async fn get_table_schema(&self, table_name: &str) -> CoreResult<SchemaRef> {
         // 尝试从本地 Engine 获取表 Schema
-        match self.engine.get_table_meta(table_name) {
+        match self.engine.get_table_meta(table_name).await {
             Ok(table_meta) => Ok(table_meta.schema.to_arrow_schema()),
             Err(_) => Err(CoreError::NotExisted(format!(
                 "Table '{}' not found",

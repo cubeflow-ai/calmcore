@@ -6,18 +6,15 @@
 //! - 元数据同步
 //! - 自动故障转移
 //! - 投票协调（Voting-based failover）
-//! - 查询路由（Query routing）
 
-pub(crate) mod client;
 pub(crate) mod event;
 pub mod gossip;
 pub(crate) mod node_manager;
 pub(crate) mod partition_manager;
-pub mod query_router;
 
+pub use event::ClusterEvent;
 pub use gossip::ClusterManager;
 pub use partition_manager::PartitionManager;
-pub use query_router::QueryRouter;
 
 use crate::utils::error::CoreResult;
 use std::net::SocketAddr;
