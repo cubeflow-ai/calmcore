@@ -25,7 +25,7 @@ use tokio::sync::Mutex;
 
 use super::ClusterConfig;
 use crate::cluster::node_manager::NodeManager;
-use crate::cluster::PartitionManager;
+use crate::cluster::{gossip, PartitionManager};
 use crate::utils::error::{CoreError, CoreResult};
 
 /// Gossip key prefixes for different types of data
@@ -39,7 +39,7 @@ const KEY_PARTITION_COUNT: &str = "partition_count";
 /// Uses Chitchat for Gossip-based communication and failure detection.
 pub struct ClusterManager {
     /// Chitchat handle for Gossip communication
-    chitchat_handle: ChitchatHandle,
+    chitchat_handle: Option<ChitchatHandle>,
 
     /// Chitchat instance (cloneable Arc for background tasks)
     pub chitchat: Arc<Mutex<Chitchat>>,
@@ -55,7 +55,9 @@ pub struct ClusterManager {
     config: ClusterConfig,
 
     /// Gossip listen address
-    listen_addr: String,
+    gossip_listen_addr: Option<SocketAddr>,
+
+    pub internal_listen_addr: Option<SocketAddr>,
 }
 
 impl ClusterManager {
@@ -63,27 +65,37 @@ impl ClusterManager {
     ///
     /// # Requirements
     /// - Requirements 1.2: Join cluster via seed nodes when configured
-    pub async fn new(config: Option<ClusterConfig>) -> CoreResult<Self> {
-        let config = match config {
-            None => todo!("Standalone mode is not implemented in this version"),
-            Some(c) => c,
-        };
-
+    pub async fn new(config: ClusterConfig) -> CoreResult<Self> {
         // Validate configuration
         config.validate()?;
 
+        let real_ip = config
+            .real_ip()
+            .ok_or_else(|| CoreError::ConfigError("Cannot determine real IP".to_string()))?;
+
+        let gossip_listen_addr = format!("{}:{}", real_ip, config.gossip_port)
+            .parse::<SocketAddr>()
+            .map_err(|e| CoreError::ConfigError(format!("Invalid gossip listen address: {}", e)))?;
+
+        let internal_listen_addr = format!("{}:{}", real_ip, config.internal_port)
+            .parse::<SocketAddr>()
+            .map_err(|e| CoreError::ConfigError(format!("Invalid RPC listen address: {}", e)))?;
+
         let node_id = config.node_id.clone();
-        let listen_addr = config.listen_addr.clone();
 
         log::info!("🚀 [Cluster] Starting node {}", node_id);
-        log::info!("📡 [Cluster] Listen address: {}", listen_addr);
+        log::info!("📡 [Cluster] gossip Listen address: {}", gossip_listen_addr);
+        log::info!(
+            "📡 [Cluster] internal Listen address: {}",
+            internal_listen_addr
+        );
         log::info!(
             "🌐 [Cluster] Running in CLUSTER mode with {} seed nodes",
             config.seed_nodes.len()
         );
 
         // Initialize Chitchat
-        let chitchat_handle = Self::init_chitchat(&config).await?;
+        let chitchat_handle = Self::init_chitchat(&config, gossip_listen_addr.clone()).await?;
         let chitchat = chitchat_handle.chitchat().clone();
 
         let manager = Self {
@@ -91,7 +103,8 @@ impl ClusterManager {
             chitchat: chitchat.clone(),
             node_id: node_id.clone(),
             config,
-            listen_addr,
+            gossip_listen_addr: Some(gossip_listen_addr),
+            internal_listen_addr: Some(internal_listen_addr),
             node_manager: Arc::new(NodeManager::new(chitchat.clone()).await),
             partition_manager: Arc::new(PartitionManager::new(node_id.clone(), chitchat.clone())),
         };
@@ -107,15 +120,20 @@ impl ClusterManager {
         Ok(manager)
     }
 
+    pub fn is_cluster_model(&self) -> bool {
+        self.internal_listen_addr.is_none()
+    }
+
     /// Initialize Chitchat for cluster communication
     ///
     /// # Requirements
     /// - Requirements 1.2: Join cluster via seed nodes
     /// - Requirements 1.3: Receive current cluster membership and topology
     /// - Requirements 1.4: Fail if cannot contact any seed node
-    async fn init_chitchat(config: &ClusterConfig) -> CoreResult<ChitchatHandle> {
-        let listen_addr: SocketAddr = config.parse_listen_addr()?;
-
+    async fn init_chitchat(
+        config: &ClusterConfig,
+        listen_addr: SocketAddr,
+    ) -> CoreResult<ChitchatHandle> {
         // Create Chitchat ID
         let chitchat_id = ChitchatId::new(
             config.node_id.clone(),
@@ -157,7 +175,7 @@ impl ClusterManager {
             .map_err(|e| CoreError::Internal(format!("Failed to start Chitchat: {}", e)))?;
 
         // If we have seed nodes, decide whether to wait or start immediately
-        let is_seed = config.is_seed_node();
+        let is_seed = config.is_seed_node(listen_addr);
 
         if is_seed {
             // Seed nodes start immediately without waiting

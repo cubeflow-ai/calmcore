@@ -29,8 +29,11 @@ pub struct ClusterConfig {
     /// 集群 ID（同一集群的节点必须相同）
     pub cluster_id: String,
 
-    /// Gossip 监听地址 (UDP)
-    pub listen_addr: String,
+    /// Gossip 监听端口 (UDP)
+    pub gossip_port: u16,
+
+    /// 内部 RPC 服务端口 (TCP)
+    pub internal_port: u16,
 
     /// 种子节点列表（用于初始加入集群）
     /// Empty = standalone mode
@@ -58,7 +61,8 @@ impl Default for ClusterConfig {
         Self {
             node_id: format!("node-{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
             cluster_id: "calm-cluster".to_string(),
-            listen_addr: "0.0.0.0:7946".to_string(),
+            gossip_port: 7946,
+            internal_port: 7947,
             seed_nodes: vec![],
             gossip_interval: Duration::from_millis(500),
             failure_timeout: Duration::from_secs(10),
@@ -70,16 +74,6 @@ impl Default for ClusterConfig {
 }
 
 impl ClusterConfig {
-    /// Parse listen address to SocketAddr
-    pub fn parse_listen_addr(&self) -> CoreResult<SocketAddr> {
-        self.listen_addr.parse().map_err(|e| {
-            crate::utils::error::CoreError::Internal(format!(
-                "Invalid listen address '{}': {}",
-                self.listen_addr, e
-            ))
-        })
-    }
-
     /// Parse seed nodes to SocketAddr list
     pub fn parse_seed_nodes(&self) -> CoreResult<Vec<SocketAddr>> {
         self.seed_nodes
@@ -95,27 +89,13 @@ impl ClusterConfig {
             .collect()
     }
 
-    /// Get our advertise address (real IP + port)
-    ///
-    /// If listen_addr is 0.0.0.0, tries to determine real IP by connecting to seed nodes.
-    /// Returns "hostname:port" format.
-    pub fn get_advertise_addr(&self) -> Option<String> {
-        let listen_addr = self.parse_listen_addr().ok()?;
-        let port = listen_addr.port();
-
-        // If not binding to 0.0.0.0, use listen address as-is
-        let ip_str = listen_addr.ip().to_string();
-        if !ip_str.starts_with("0.0.0.0") && !ip_str.starts_with("::") {
-            return Some(format!("{}:{}", ip_str, port));
-        }
-
+    pub fn real_ip(&self) -> Option<String> {
         // Try to get real IP by connecting to a seed node
         for seed in &self.seed_nodes {
             if let Some(real_ip) = crate::utils::net::get_real_ip(seed, Duration::from_secs(1)) {
-                return Some(format!("{}:{}", real_ip, port));
+                return Some(real_ip);
             }
         }
-
         None
     }
 
@@ -126,37 +106,17 @@ impl ClusterConfig {
     /// - If seed_nodes is configured → Check if our IP is in the list
     ///   - NOT in list → We ARE a seed node
     ///   - In list → We are a worker node
-    pub fn is_seed_node(&self) -> bool {
+    pub fn is_seed_node(&self, my_addr: SocketAddr) -> bool {
         // If no seed nodes configured, default to being a seed node
         if self.seed_nodes.is_empty() {
             return true;
         }
 
-        // Get our advertise address (real IP + port)
-        let my_addr = match self.get_advertise_addr() {
-            Some(addr) => addr,
-            None => {
-                // Fallback: if we can't determine real IP, assume we're a seed node
-                log::warn!("[Cluster] Cannot determine real IP, assuming seed node");
-                return true;
-            }
-        };
-
-        // Extract IP from our address
-        let my_ip = if let Some(colon_pos) = my_addr.rfind(':') {
-            &my_addr[..colon_pos]
-        } else {
-            &my_addr
-        };
-
         // Check if our IP appears in any seed node address
         let found_self = self.seed_nodes.iter().any(|seed| {
-            if let Some(colon_pos) = seed.rfind(':') {
-                let seed_ip = &seed[..colon_pos];
-                seed_ip == my_ip
-            } else {
-                seed == my_ip
-            }
+            seed.parse::<SocketAddr>()
+                .map(|addr| addr.ip() == my_addr.ip())
+                .unwrap_or(false)
         });
 
         // If we're NOT in the seed list, we're a seed node
@@ -170,25 +130,14 @@ impl ClusterConfig {
 
     /// Validate configuration
     pub fn validate(&self) -> CoreResult<()> {
-        // Validate listen address
-        self.parse_listen_addr()?;
-
         // Cluster mode requires seed nodes
         if self.seed_nodes.is_empty() {
-            return Err(crate::utils::error::CoreError::Internal(
+            return Err(crate::utils::error::CoreError::ConfigError(
                 "seed_nodes cannot be empty in cluster mode. For single-node deployment, do not initialize ClusterManager.".to_string(),
             ));
         }
-
         // Validate seed nodes
         self.parse_seed_nodes()?;
-
-        // Validate min_cluster_size
-        if self.min_cluster_size < 1 {
-            return Err(crate::utils::error::CoreError::Internal(
-                "min_cluster_size must be at least 1".to_string(),
-            ));
-        }
 
         Ok(())
     }

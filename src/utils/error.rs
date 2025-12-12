@@ -40,6 +40,9 @@ pub enum CoreError {
 
     #[error("timeout: {0}")]
     Timeout(String),
+
+    #[error("{0}")]
+    ConfigError(String),
 }
 
 impl CoreError {
@@ -57,6 +60,7 @@ impl CoreError {
             CoreError::EcodeError(_) => 9,
             CoreError::Network(_) => 10,
             CoreError::Timeout(_) => 11,
+            CoreError::ConfigError(_) => 12,
         }
     }
 

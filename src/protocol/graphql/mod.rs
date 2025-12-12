@@ -1119,7 +1119,7 @@ impl QueryRoot {
             .ddl_service()
             .clone()
             .list_tables(tarpc::context::current())
-            .await)
+            .await?)
     }
 
     /// 获取表的基本信息
@@ -2107,17 +2107,19 @@ impl MutationRoot {
 // ===== GraphQL Server =====
 
 /// GraphQL 服务器
-pub struct GraphQLServer {}
+pub struct GraphQLServer {
+    service: Arc<CalmService>,
+}
 
 impl GraphQLServer {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(service: Arc<CalmService>) -> Self {
+        Self { service }
     }
 
     /// 启动 GraphQL 服务器
-    pub async fn start(self, addr: &str, service: Arc<CalmService>) -> Result<(), std::io::Error> {
+    pub async fn start(self, addr: &str) -> Result<(), std::io::Error> {
         // 创建 GraphQL Schema
-        let graphql_schema = create_schema(service);
+        let graphql_schema = create_schema(self.service);
 
         // GraphQL endpoint
         let graphql_endpoint = async_graphql_poem::GraphQL::new(graphql_schema);

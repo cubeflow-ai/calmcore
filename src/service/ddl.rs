@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use base64::engine;
 use serde::{Deserialize, Serialize};
 use tarpc::{client, context::Context};
 use tokio_serde::formats::Bincode;
@@ -86,14 +87,14 @@ pub trait DDLService {
 pub struct DDLServiceImpl {
     engine: Arc<Engine>,
     catalog: Arc<Catalog>,
-    cluster_manager: Arc<ClusterManager>,
+    cluster_manager: Option<Arc<ClusterManager>>,
 }
 
 impl DDLServiceImpl {
     pub fn new(
         engine: Arc<Engine>,
         catalog: Arc<Catalog>,
-        cluster_manager: Arc<ClusterManager>,
+        cluster_manager: Option<Arc<ClusterManager>>,
     ) -> Self {
         Self {
             engine,
@@ -104,7 +105,10 @@ impl DDLServiceImpl {
 
     /// 判断当前节点是否是中央节点
     fn am_i_coord_node(&self) -> bool {
-        self.cluster_manager.node_manager.is_coord()
+        self.cluster_manager
+            .as_ref()
+            .map(|m| m.node_manager.is_coord())
+            .unwrap_or(true)
     }
 
     /// 作为协调者创建表
@@ -397,6 +401,19 @@ impl DDLServiceImpl {
         }
 
         log::info!("✅ [CoordNode] Table '{}' flushed successfully", table_name);
+        Ok(())
+    }
+
+    pub async fn load_existing_tables(&self) -> CoreResult<()> {
+        if !self.cluster_manager.is_cluster_model() {
+            // 集群模式下，默认不加载任何partition
+            return Ok(());
+        }
+
+        self.engine
+            .load_existing_tables_from_disk(&self.catalog)
+            .await?;
+
         Ok(())
     }
 
@@ -710,8 +727,11 @@ impl DDLServiceImpl {
         let owner_addr = self
             .cluster_manager
             .node_manager
-            .node_internal_addr(&owner_node_id)
-            .await?;
+            .get_node_internal_addr(&owner_node_id)
+            .await
+            .ok_or_else(|| {
+                CoreError::Internal(format!("Node '{}' address not found", owner_node_id))
+            })?;
 
         log::info!(
             "📤 [CoordNode] Forwarding get_partition_detail to owner node {}",
@@ -740,27 +760,10 @@ impl DDLServiceImpl {
         table_name: String,
         partition_id: String,
     ) -> CoreResult<PartitionDetail> {
-        let coord_node = self
-            .cluster_manager
-            .node_manager
-            .get_center_node()
-            .await
-            .ok_or_else(|| CoreError::Internal("No coordinator elected".to_string()))?;
+        log::info!("📤 [Node] Forwarding get_partition_detail to coordinator");
 
-        let coord_addr = self.internal_addr(&coord_node).await?;
-
-        log::info!(
-            "📤 [Node] Forwarding get_partition_detail to coordinator {}",
-            coord_addr
-        );
-
-        let transport = tarpc::serde_transport::tcp::connect(coord_addr, || Bincode::default())
-            .await
-            .map_err(|e| CoreError::Network(format!("Failed to connect to coordinator: {}", e)))?;
-
-        let client = DDLServiceClient::new(tarpc::client::Config::default(), transport).spawn();
-
-        client
+        self.coord_client()
+            .await?
             .get_partition_detail(tarpc::context::current(), table_name, partition_id)
             .await
             .map_err(|e| CoreError::Network(format!("RPC call failed: {}", e)))?
@@ -842,6 +845,7 @@ impl DDLService for DDLServiceImpl {
                 .await?
                 .list_tables(tarpc::context::current())
                 .await
+                .map_err(|e| CoreError::Network(format!("RPC call failed: {}", e)))?
         }
     }
 

@@ -13,6 +13,7 @@ use crate::{
         ddl::{DDLService, DDLServiceImpl},
         dml::DMLService,
     },
+    utils::error::CoreResult,
 };
 
 pub(crate) mod ddl;
@@ -37,8 +38,9 @@ pub struct CalmService {
     /// DML 服务实现
     dml: DMLService,
 
-    /// tarpc server 监听地址
-    rpc_addr: SocketAddr,
+    catalog: Arc<Catalog>,
+    cluster_manager: Option<Arc<ClusterManager>>,
+    engine: Arc<Engine>,
 }
 
 impl CalmService {
@@ -51,13 +53,14 @@ impl CalmService {
     pub fn new(
         engine: Arc<Engine>,
         catalog: Arc<Catalog>,
-        cluster_manager: Arc<ClusterManager>,
-        rpc_addr: SocketAddr,
+        cluster_manager: Option<Arc<ClusterManager>>,
     ) -> Self {
         Self {
             ddl: DDLServiceImpl::new(engine.clone(), catalog.clone(), cluster_manager.clone()),
             dml: DMLService::new(),
-            rpc_addr,
+            catalog,
+            cluster_manager,
+            engine,
         }
     }
 
@@ -65,10 +68,16 @@ impl CalmService {
     ///
     /// 监听 rpc_addr，处理集群内部的 RPC 请求
     pub async fn start_rpc_server(self: Arc<Self>) -> Result<JoinHandle<()>, std::io::Error> {
-        let listener =
-            tarpc::serde_transport::tcp::listen(&self.rpc_addr, Bincode::default).await?;
+        let rpc_addr = match self.cluster_manager.internal_listen_addr {
+            Some(addr) => addr,
+            None => {
+                log::info!("CalmService start by single node mode, no RPC server started");
+                return Ok(tokio::spawn(async {}));
+            }
+        };
+        let listener = tarpc::serde_transport::tcp::listen(rpc_addr, Bincode::default).await?;
 
-        log::info!("🚀 CalmService RPC server listening on {}", self.rpc_addr);
+        log::info!("🚀 CalmService RPC server listening on {}", rpc_addr);
 
         let handle = tokio::spawn(async move {
             listener
@@ -108,5 +117,11 @@ impl CalmService {
     /// 获取 DML Service（用于本地调用）
     pub fn dml_service(&self) -> &DMLService {
         &self.dml
+    }
+
+    pub async fn stop(&self) -> CoreResult<()> {
+        self.engine.stop().await?;
+        //TODO: ANSJ
+        Ok(())
     }
 }

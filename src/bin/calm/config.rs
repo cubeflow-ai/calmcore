@@ -1,5 +1,4 @@
 use calm::cluster::ClusterConfig;
-use calm::compute::distributed::DistributedConfig;
 use calm::engine::EngineConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -209,9 +208,13 @@ pub struct ClusterSettings {
     #[serde(default = "default_cluster_id")]
     pub cluster_id: String,
 
-    /// Gossip 监听地址 (UDP)
-    #[serde(default = "default_gossip_addr")]
-    pub listen_addr: String,
+    /// Gossip 监听端口 (UDP)
+    #[serde(default = "default_gossip_port")]
+    pub gossip_port: u16,
+
+    /// 内部 RPC 服务端口 (TCP)
+    #[serde(default = "default_internal_port")]
+    pub internal_port: u16,
 
     /// 种子节点列表（用于初始加入集群）
     #[serde(default)]
@@ -250,8 +253,12 @@ fn default_cluster_id() -> String {
     "calm-cluster".to_string()
 }
 
-fn default_gossip_addr() -> String {
-    "0.0.0.0:7946".to_string()
+fn default_gossip_port() -> u16 {
+    7946
+}
+
+fn default_internal_port() -> u16 {
+    7947
 }
 
 fn default_gossip_interval_ms() -> u64 {
@@ -279,7 +286,8 @@ impl Default for ClusterSettings {
         Self {
             node_id: default_node_id(),
             cluster_id: default_cluster_id(),
-            listen_addr: default_gossip_addr(),
+            gossip_port: default_gossip_port(),
+            internal_port: default_internal_port(),
             seed_nodes: vec![],
             gossip_interval_ms: default_gossip_interval_ms(),
             failure_timeout_secs: default_failure_timeout_secs(),
@@ -481,15 +489,26 @@ impl Config {
                         return Err("Missing value for --cluster-id".into());
                     }
                 }
-                "--gossip-addr" => {
+                "--gossip-port" => {
                     if i + 1 < args.len() {
                         config
                             .cluster
                             .get_or_insert_with(ClusterSettings::default)
-                            .listen_addr = args[i + 1].clone();
+                            .gossip_port = args[i + 1].parse()?;
                         i += 2;
                     } else {
-                        return Err("Missing value for --gossip-addr".into());
+                        return Err("Missing value for --gossip-port".into());
+                    }
+                }
+                "--internal-port" => {
+                    if i + 1 < args.len() {
+                        config
+                            .cluster
+                            .get_or_insert_with(ClusterSettings::default)
+                            .internal_port = args[i + 1].parse()?;
+                        i += 2;
+                    } else {
+                        return Err("Missing value for --internal-port".into());
                     }
                 }
                 "--seed-nodes" => {
@@ -561,11 +580,17 @@ impl Config {
                 .get_or_insert_with(ClusterSettings::default)
                 .cluster_id = val;
         }
-        if let Ok(val) = std::env::var("CALM_GOSSIP_ADDR") {
+        if let Ok(val) = std::env::var("CALM_GOSSIP_PORT") {
             config
                 .cluster
                 .get_or_insert_with(ClusterSettings::default)
-                .listen_addr = val;
+                .gossip_port = val.parse()?;
+        }
+        if let Ok(val) = std::env::var("CALM_INTERNAL_PORT") {
+            config
+                .cluster
+                .get_or_insert_with(ClusterSettings::default)
+                .internal_port = val.parse()?;
         }
         if let Ok(val) = std::env::var("CALM_SEED_NODES") {
             config
@@ -609,7 +634,8 @@ impl Config {
         self.cluster.as_ref().map(|cluster| ClusterConfig {
             node_id: cluster.node_id.clone(),
             cluster_id: cluster.cluster_id.clone(),
-            listen_addr: cluster.listen_addr.clone(),
+            gossip_port: cluster.gossip_port,
+            internal_port: cluster.internal_port,
             seed_nodes: cluster.seed_nodes.clone(),
             gossip_interval: Duration::from_millis(cluster.gossip_interval_ms),
             failure_timeout: Duration::from_secs(cluster.failure_timeout_secs),
@@ -620,19 +646,19 @@ impl Config {
     }
 
     /// 转换为 DistributedConfig（仅当配置了集群时返回 Some）
-    pub fn to_distributed_config(&self) -> Option<DistributedConfig> {
-        self.cluster.as_ref().map(|cluster| {
-            let distributed = &cluster.distributed;
-            DistributedConfig {
-                query_timeout_ms: distributed.query_timeout_ms,
-                shuffle_buffer_size: distributed.shuffle_buffer_size,
-                max_concurrent_queries: distributed.max_concurrent_queries,
-                rpc_port: distributed.rpc_port,
-                connect_timeout_ms: distributed.connect_timeout_ms,
-                request_timeout_ms: distributed.request_timeout_ms,
-            }
-        })
-    }
+    // pub fn to_distributed_config(&self) -> Option<DistributedConfig> {
+    //     self.cluster.as_ref().map(|cluster| {
+    //         let distributed = &cluster.distributed;
+    //         DistributedConfig {
+    //             query_timeout_ms: distributed.query_timeout_ms,
+    //             shuffle_buffer_size: distributed.shuffle_buffer_size,
+    //             max_concurrent_queries: distributed.max_concurrent_queries,
+    //             rpc_port: distributed.rpc_port,
+    //             connect_timeout_ms: distributed.connect_timeout_ms,
+    //             request_timeout_ms: distributed.request_timeout_ms,
+    //         }
+    //     })
+    // }
 
     /// 打印帮助信息
     fn print_help() {
@@ -666,7 +692,8 @@ impl Config {
         println!("CLUSTER OPTIONS:");
         println!("    --node-id <ID>                 节点 ID [default: auto-generated]");
         println!("    --cluster-id <ID>              集群 ID [default: calm-cluster]");
-        println!("    --gossip-addr <ADDR>           Gossip 监听地址 [default: 0.0.0.0:7946]");
+        println!("    --gossip-port <PORT>           Gossip 监听端口 [default: 7946]");
+        println!("    --internal-port <PORT>         内部 RPC 服务端口 [default: 7947]");
         println!("    --seed-nodes <NODES>           种子节点列表 (逗号分隔)");
         println!();
         println!("ENVIRONMENT VARIABLES:");
@@ -681,7 +708,8 @@ impl Config {
         println!("    CALM_LOG_FILE                  日志文件路径");
         println!("    CALM_NODE_ID                   节点 ID");
         println!("    CALM_CLUSTER_ID                集群 ID");
-        println!("    CALM_GOSSIP_ADDR               Gossip 监听地址");
+        println!("    CALM_GOSSIP_PORT               Gossip 监听端口");
+        println!("    CALM_INTERNAL_PORT             内部 RPC 服务端口");
         println!("    CALM_SEED_NODES                种子节点列表 (逗号分隔)");
         println!();
         println!("EXAMPLES:");

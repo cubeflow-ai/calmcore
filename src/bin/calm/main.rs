@@ -4,7 +4,8 @@ use calm::{
     catalog::Catalog,
     cluster::{ClusterManager, PartitionManager},
     engine::Engine,
-    // protocol::{elasticsearch::ElasticsearchServer, graphql::GraphQLServer, mysql::MysqlServer},
+    protocol::graphql::GraphQLServer,
+    service::CalmService, // protocol::{elasticsearch::ElasticsearchServer, graphql::GraphQLServer, mysql::MysqlServer},
 };
 use config::Config;
 use std::io::Write;
@@ -31,41 +32,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // 初始化集群
-    let cluster_manager = Arc::new(ClusterManager::new(config.to_cluster_config()).await?);
+    let cluster_manager = match config.to_cluster_config() {
+        Some(conf) => Some(Arc::new(ClusterManager::new(conf).await?)),
+        None => None,
+    };
 
     // 创建 Catalog
     let catalog = Arc::new(Catalog::new(config.engine.data_dir.clone())?);
 
     // 创建 Engine
-    let engine_config = config.to_engine_config();
-    let engine = Engine::new(engine_config)?;
+    let engine = Engine::new(config.to_engine_config())?;
+
+    let calm_service = Arc::new(CalmService::new(engine, catalog, cluster_manager));
 
     // 加载已存在的表（暂时为空方法）
     println!("📚 Loading existing tables...");
-    engine.load_existing_tables().await?;
+    calm_service.ddl_service().load_existing_tables().await?;
     println!("✓ Tables loaded");
     println!();
 
     // 存储服务器任务句柄
-    // let mut handles = Vec::new();
+    let mut handles = Vec::new();
 
-    // // 启动 GraphQL 服务
-    // if let Some(port) = config.graphql_port {
-    //     let addr = format!("{}:{}", config.host, port);
-    //     println!("🚀 Starting GraphQL server on {}", addr);
-    //     println!("   GraphQL Playground: http://{}", addr);
-    //     println!("   GraphQL Playground: http://{}/playground", addr);
+    // 启动内部服务 ，如果是cluster模式才启动
+    handles.push({
+        let calm_service = calm_service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = calm_service.start_rpc_server().await {
+                eprintln!("❌ Internal RPC server error: {}", e);
+            }
+        })
+    });
 
-    //     let engine_clone = engine.clone();
-    //     let catalog_clone = catalog.clone();
-    //     let handle = tokio::spawn(async move {
-    //         let server = GraphQLServer::new(engine_clone, catalog_clone);
-    //         if let Err(e) = server.start(&addr).await {
-    //             eprintln!("❌ GraphQL server error: {}", e);
-    //         }
-    //     });
-    //     handles.push(handle);
-    // }
+    // 启动 GraphQL 服务
+    if let Some(port) = config.graphql_port {
+        let addr = format!("{}:{}", config.host, port);
+        println!("🚀 Starting GraphQL server on {}", addr);
+        println!("   GraphQL Playground: http://{}", addr);
+        println!("   GraphQL Playground: http://{}/playground", addr);
+        let service = calm_service.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = GraphQLServer::new(service).start(&addr).await {
+                eprintln!("❌ GraphQL server error: {}", e);
+            }
+        });
+        handles.push(handle);
+    }
 
     // // 启动 Elasticsearch 服务
     // if let Some(port) = config.es_port {
@@ -116,22 +128,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📊 Press Ctrl+C to shutdown");
     println!();
 
-    // // 等待所有服务器任务
-    // for handle in handles {
-    //     let _ = handle.await;
-    // }
+    // 等待所有服务器任务
+    for handle in handles {
+        let _ = handle.await;
+    }
 
     // 关闭引擎
     println!("\n🛑 Shutting down...");
 
-    // Gracefully shutdown cluster if enabled
-    println!("🌐 Shutting down cluster manager...");
-    if let Err(e) = cluster_manager.shutdown().await {
-        eprintln!("⚠️  Cluster shutdown error: {}", e);
-    }
-    println!("✓ Cluster manager shutdown complete");
-
-    engine.stop().await?;
+    calm_service.stop().await?;
     println!("✓ Shutdown complete");
 
     Ok(())
