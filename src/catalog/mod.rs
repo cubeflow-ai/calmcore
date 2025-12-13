@@ -63,6 +63,13 @@ impl Catalog {
             }
         }
 
+        fs::create_dir_all(self.work_dir.join("tables").join(&table_name)).map_err(|e| {
+            CoreError::IOError(format!(
+                "Failed to create table directory '{}': {}",
+                table_name, e
+            ))
+        })?;
+
         // 保存表元数据
         self.save_table_meta(&meta)?;
 
@@ -243,8 +250,14 @@ impl Catalog {
         let content = serde_json::to_string_pretty(meta)
             .map_err(|e| CoreError::IOError(format!("Failed to serialize table meta: {}", e)))?;
 
-        fs::write(&meta_path, content)
-            .map_err(|e| CoreError::IOError(format!("Failed to write table meta: {}", e)))?;
+        fs::write(&meta_path, content).map_err(|e| {
+            log::error!(
+                "Saved table meta for '{}': {}",
+                meta.table_name,
+                meta_path.display()
+            );
+            CoreError::IOError(format!("Failed to write table meta: {}", e))
+        })?;
 
         Ok(())
     }

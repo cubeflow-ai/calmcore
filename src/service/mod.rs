@@ -13,7 +13,7 @@ use crate::{
         ddl::{DDLService, DDLServiceImpl},
         dml::DMLService,
     },
-    utils::error::CoreResult,
+    utils::error::{CoreError, CoreResult},
 };
 
 pub(crate) mod ddl;
@@ -64,49 +64,89 @@ impl CalmService {
         }
     }
 
+    /// 初始化 DDL Service
+    pub async fn init(self: Arc<Self>) -> Result<JoinHandle<()>, CoreError> {
+        //启动内部结点服务
+        let calm_service = self.clone();
+        let handler = tokio::spawn(async move {
+            if let Err(e) = calm_service.start_rpc_server().await {
+                panic!("❌ Internal RPC server error: {}", e);
+            }
+        });
+
+        // 1. 获取中央结点。
+        if let Some(cm) = &self.cluster_manager {
+            let coor = cm.node_manager.run_election().await?;
+            // 1.如果中央结点是自己，
+            // 2.加载所有tables
+            // 3.加载全部路由
+            // 4.将当前节点状态设置为 Ready
+            cm.set_my_status_ready().await;
+        } else {
+            // 2.加载所有tables
+        }
+
+        Ok(handler)
+    }
+
     /// 启动 tarpc RPC 服务器
     ///
     /// 监听 rpc_addr，处理集群内部的 RPC 请求
     pub async fn start_rpc_server(self: Arc<Self>) -> Result<JoinHandle<()>, std::io::Error> {
-        let rpc_addr = match self.cluster_manager.internal_listen_addr {
-            Some(addr) => addr,
-            None => {
-                log::info!("CalmService start by single node mode, no RPC server started");
-                return Ok(tokio::spawn(async {}));
-            }
-        };
-        let listener = tarpc::serde_transport::tcp::listen(rpc_addr, Bincode::default).await?;
+        if let Some(cm) = self.cluster_manager.as_ref() {
+            let config = cm.config();
+            let realip = config.real_ip().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Real IP must be set in cluster mode",
+                )
+            })?;
 
-        log::info!("🚀 CalmService RPC server listening on {}", rpc_addr);
+            let addr_str = format!("{}:{}", realip, config.internal_port);
 
-        let handle = tokio::spawn(async move {
-            listener
-                .filter_map(|r| async move {
-                    match r {
-                        Ok(transport) => Some(transport),
-                        Err(e) => {
-                            log::warn!("❌ Failed to accept connection: {}", e);
-                            None
+            let internal_listen_addr = addr_str.parse::<SocketAddr>().map_err(|e| {
+                CoreError::ConfigError(format!("Invalid RPC listen address: {}", e))
+            })?;
+
+            let listener =
+                tarpc::serde_transport::tcp::listen(internal_listen_addr, Bincode::default).await?;
+
+            log::info!(
+                "🚀 CalmService RPC server listening on {}",
+                internal_listen_addr
+            );
+
+            let handle = tokio::spawn(async move {
+                listener
+                    .filter_map(|r| async move {
+                        match r {
+                            Ok(transport) => Some(transport),
+                            Err(e) => {
+                                log::warn!("❌ Failed to accept connection: {}", e);
+                                None
+                            }
                         }
-                    }
-                })
-                // 为每个连接创建一个 channel
-                .for_each_concurrent(None, move |transport| {
-                    let ddl_service = self.ddl.clone();
-                    async move {
-                        let server = tarpc::server::BaseChannel::with_defaults(transport);
-                        server
-                            .execute(ddl_service.serve())
-                            .for_each(|response| async move {
-                                tokio::spawn(response);
-                            })
-                            .await;
-                    }
-                })
-                .await;
-        });
-
-        Ok(handle)
+                    })
+                    // 为每个连接创建一个 channel
+                    .for_each_concurrent(None, move |transport| {
+                        let ddl_service = self.ddl.clone();
+                        async move {
+                            let server = tarpc::server::BaseChannel::with_defaults(transport);
+                            server
+                                .execute(ddl_service.serve())
+                                .for_each(|response| async move {
+                                    tokio::spawn(response);
+                                })
+                                .await;
+                        }
+                    })
+                    .await;
+            });
+            cm.node_manager.set_internal_addr(&addr_str).await;
+            Ok(handle)
+        } else {
+            Ok(tokio::spawn(async {}))
+        }
     }
 
     /// 获取 DDL Service（用于本地调用）

@@ -138,7 +138,7 @@ fn default_log_level() -> String {
 }
 
 fn default_log_target() -> String {
-    "file".to_string()
+    "console".to_string()
 }
 
 fn default_log_file() -> Option<PathBuf> {
@@ -200,10 +200,6 @@ impl Default for EngineSettings {
 /// 集群配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterSettings {
-    /// 本节点 ID（唯一标识）
-    #[serde(default = "default_node_id")]
-    pub node_id: String,
-
     /// 集群 ID（同一集群的节点必须相同）
     #[serde(default = "default_cluster_id")]
     pub cluster_id: String,
@@ -232,25 +228,13 @@ pub struct ClusterSettings {
     #[serde(default = "default_suspect_timeout_secs")]
     pub suspect_timeout_secs: u64,
 
-    /// 投票超时（秒）
-    #[serde(default = "default_vote_timeout_secs")]
-    pub vote_timeout_secs: u64,
-
-    /// 最小集群大小
-    #[serde(default = "default_min_cluster_size")]
-    pub min_cluster_size: usize,
-
     /// 分布式查询配置
     #[serde(default)]
     pub distributed: DistributedSettings,
 }
 
-fn default_node_id() -> String {
-    format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8])
-}
-
 fn default_cluster_id() -> String {
-    "calm-cluster".to_string()
+    "".to_string()
 }
 
 fn default_gossip_port() -> u16 {
@@ -284,7 +268,6 @@ fn default_min_cluster_size() -> usize {
 impl Default for ClusterSettings {
     fn default() -> Self {
         Self {
-            node_id: default_node_id(),
             cluster_id: default_cluster_id(),
             gossip_port: default_gossip_port(),
             internal_port: default_internal_port(),
@@ -292,8 +275,6 @@ impl Default for ClusterSettings {
             gossip_interval_ms: default_gossip_interval_ms(),
             failure_timeout_secs: default_failure_timeout_secs(),
             suspect_timeout_secs: default_suspect_timeout_secs(),
-            vote_timeout_secs: default_vote_timeout_secs(),
-            min_cluster_size: default_min_cluster_size(),
             distributed: DistributedSettings::default(),
         }
     }
@@ -467,17 +448,6 @@ impl Config {
                     i += 1;
                 }
                 // Cluster arguments
-                "--node-id" => {
-                    if i + 1 < args.len() {
-                        config
-                            .cluster
-                            .get_or_insert_with(ClusterSettings::default)
-                            .node_id = args[i + 1].clone();
-                        i += 2;
-                    } else {
-                        return Err("Missing value for --node-id".into());
-                    }
-                }
                 "--cluster-id" => {
                     if i + 1 < args.len() {
                         config
@@ -568,12 +538,6 @@ impl Config {
         }
 
         // Cluster environment variables
-        if let Ok(val) = std::env::var("CALM_NODE_ID") {
-            config
-                .cluster
-                .get_or_insert_with(ClusterSettings::default)
-                .node_id = val;
-        }
         if let Ok(val) = std::env::var("CALM_CLUSTER_ID") {
             config
                 .cluster
@@ -632,7 +596,6 @@ impl Config {
     /// 转换为 ClusterConfig（仅当配置了集群时返回 Some）
     pub fn to_cluster_config(&self) -> Option<ClusterConfig> {
         self.cluster.as_ref().map(|cluster| ClusterConfig {
-            node_id: cluster.node_id.clone(),
             cluster_id: cluster.cluster_id.clone(),
             gossip_port: cluster.gossip_port,
             internal_port: cluster.internal_port,
@@ -640,8 +603,6 @@ impl Config {
             gossip_interval: Duration::from_millis(cluster.gossip_interval_ms),
             failure_timeout: Duration::from_secs(cluster.failure_timeout_secs),
             suspect_timeout: Duration::from_secs(cluster.suspect_timeout_secs),
-            vote_timeout: Duration::from_secs(cluster.vote_timeout_secs),
-            min_cluster_size: cluster.min_cluster_size,
         })
     }
 

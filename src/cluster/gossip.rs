@@ -19,8 +19,6 @@ use chitchat::transport::UdpTransport;
 use chitchat::{
     spawn_chitchat, Chitchat, ChitchatConfig, ChitchatHandle, ChitchatId, FailureDetectorConfig,
 };
-use datafusion::functions_aggregate::count;
-use rand::seq::SliceRandom;
 use tokio::sync::Mutex;
 
 use super::ClusterConfig;
@@ -28,10 +26,13 @@ use crate::cluster::node_manager::NodeManager;
 use crate::cluster::{gossip, PartitionManager};
 use crate::utils::error::{CoreError, CoreResult};
 
-/// Gossip key prefixes for different types of data
-const KEY_LOAD: &str = "load";
-const KEY_MEMORY: &str = "memory";
-const KEY_PARTITION_COUNT: &str = "partition_count";
+use crate::cluster::keys::*;
+
+enum NodeStatus {
+    Healthy,
+    Suspect,
+    Dead,
+}
 
 /// Cluster Manager with Chitchat integration
 ///
@@ -56,8 +57,6 @@ pub struct ClusterManager {
 
     /// Gossip listen address
     gossip_listen_addr: Option<SocketAddr>,
-
-    pub internal_listen_addr: Option<SocketAddr>,
 }
 
 impl ClusterManager {
@@ -77,51 +76,40 @@ impl ClusterManager {
             .parse::<SocketAddr>()
             .map_err(|e| CoreError::ConfigError(format!("Invalid gossip listen address: {}", e)))?;
 
-        let internal_listen_addr = format!("{}:{}", real_ip, config.internal_port)
-            .parse::<SocketAddr>()
-            .map_err(|e| CoreError::ConfigError(format!("Invalid RPC listen address: {}", e)))?;
-
-        let node_id = config.node_id.clone();
+        // nodeid format is millsecods timstamp yyyyMMddHHssmmMMM  since unix epoch + "_"+ real_ip
+        let node_id = format!(
+            "{}_{}",
+            chrono::Utc::now().format("%Y%m%d%H%M%S%3f"),
+            real_ip
+        );
 
         log::info!("🚀 [Cluster] Starting node {}", node_id);
         log::info!("📡 [Cluster] gossip Listen address: {}", gossip_listen_addr);
-        log::info!(
-            "📡 [Cluster] internal Listen address: {}",
-            internal_listen_addr
-        );
         log::info!(
             "🌐 [Cluster] Running in CLUSTER mode with {} seed nodes",
             config.seed_nodes.len()
         );
 
         // Initialize Chitchat
-        let chitchat_handle = Self::init_chitchat(&config, gossip_listen_addr.clone()).await?;
+        let chitchat_handle =
+            Self::init_chitchat(node_id.clone(), &config, gossip_listen_addr.clone()).await?;
         let chitchat = chitchat_handle.chitchat().clone();
 
         let manager = Self {
-            chitchat_handle,
+            chitchat_handle: Some(chitchat_handle),
             chitchat: chitchat.clone(),
             node_id: node_id.clone(),
             config,
             gossip_listen_addr: Some(gossip_listen_addr),
-            internal_listen_addr: Some(internal_listen_addr),
             node_manager: Arc::new(NodeManager::new(chitchat.clone()).await),
             partition_manager: Arc::new(PartitionManager::new(node_id.clone(), chitchat.clone())),
         };
 
-        if let Err(e) = manager.node_manager.run_election().await {
-            log::error!("❌ [Cluster] Election failed: {:?}", e);
-        } else {
-            log::info!("✅ [Cluster] Election completed successfully");
-        }
+        manager.set_my_status_preparing().await;
 
         log::info!("✅ [Cluster] ClusterManager started successfully");
 
         Ok(manager)
-    }
-
-    pub fn is_cluster_model(&self) -> bool {
-        self.internal_listen_addr.is_none()
     }
 
     /// Initialize Chitchat for cluster communication
@@ -131,12 +119,13 @@ impl ClusterManager {
     /// - Requirements 1.3: Receive current cluster membership and topology
     /// - Requirements 1.4: Fail if cannot contact any seed node
     async fn init_chitchat(
+        node_id: String,
         config: &ClusterConfig,
         listen_addr: SocketAddr,
     ) -> CoreResult<ChitchatHandle> {
         // Create Chitchat ID
         let chitchat_id = ChitchatId::new(
-            config.node_id.clone(),
+            node_id,
             0, // generation (increments on restart)
             listen_addr,
         );
@@ -198,7 +187,7 @@ impl ClusterManager {
                 let live_nodes = guard.live_nodes().count();
                 drop(guard);
 
-                if live_nodes > 0 {
+                if live_nodes > 1 {
                     log::info!(
                         "✅ [Cluster] Successfully joined cluster! Discovered {} live nodes",
                         live_nodes
@@ -220,11 +209,6 @@ impl ClusterManager {
         Ok(chitchat_handle)
     }
 
-    /// Calculate quorum threshold
-    pub fn quorum_threshold(&self, node_count: usize) -> usize {
-        self.config.quorum_threshold(node_count)
-    }
-
     /// Get cluster configuration
     pub fn config(&self) -> &ClusterConfig {
         &self.config
@@ -233,6 +217,41 @@ impl ClusterManager {
     /// Get local node ID
     pub fn node_id(&self) -> &str {
         &self.node_id
+    }
+
+    pub async fn set_my_status_preparing(&self) {
+        self.gossip_set(KEY_NODE_STATUS, VALUE_NODE_STATUS_PREPARING)
+            .await;
+        log::info!(
+            "🔄 [Cluster] Updated node status to '{}'",
+            VALUE_NODE_STATUS_PREPARING
+        );
+    }
+
+    pub async fn set_my_status_ready(&self) {
+        self.gossip_set(KEY_NODE_STATUS, VALUE_NODE_STATUS_READY)
+            .await;
+        log::info!(
+            "✅ [Cluster] Updated node status to '{}'",
+            VALUE_NODE_STATUS_READY
+        );
+    }
+
+    pub async fn set_my_status_decommissioning(&self) {
+        self.gossip_set(KEY_NODE_STATUS, VALUE_NODE_STATUS_DECOMMISSIONING)
+            .await;
+        log::info!(
+            "⚠️  [Cluster] Updated node status to '{}'",
+            VALUE_NODE_STATUS_DECOMMISSIONING
+        );
+    }
+
+    pub async fn set_internal_addr(&self, addr: &str) {
+        self.chitchat
+            .lock()
+            .await
+            .self_node_state()
+            .set(INTERNAL_ADDR_KEY, addr);
     }
 
     // ========================================================================
@@ -329,208 +348,5 @@ impl ClusterManager {
             load,
             memory_usage_bytes
         );
-    }
-
-    // ========================================================================
-    // Event Broadcasting (Requirements 3.4, 12.2)
-    // ========================================================================
-
-    // ========================================================================
-    // Background Tasks
-    // ========================================================================
-
-    // ========================================================================
-    // Graceful Shutdown (Requirements 8.1)
-    // ========================================================================
-
-    /// Gossip key for leaving notification
-    const LEAVING_KEY_PREFIX: &'static str = "leaving:";
-
-    /// Initiate graceful shutdown
-    ///
-    /// This method broadcasts a leaving notification to all peers via Gossip,
-    /// allowing other nodes to initiate voting for this node's partitions
-    /// before the node actually shuts down.
-    ///
-    /// # Requirements
-    /// - Requirements 8.1: Broadcast leaving notification to all peers
-    ///
-    /// # Returns
-    /// Ok(()) when the leaving notification has been broadcast
-    pub async fn shutdown(&self) -> CoreResult<()> {
-        log::info!(
-            "👋 [Cluster] Initiating graceful shutdown for node {}",
-            self.node_id
-        );
-
-        // Broadcast leaving notification via Gossip with node ID
-        // Key format: leaving:{node_id} = "true"
-        let leaving_key = format!("{}{}", Self::LEAVING_KEY_PREFIX, self.node_id);
-        self.gossip_set(&leaving_key, "true").await;
-
-        // Also set a simple "leaving" key on our own state for backward compatibility
-        self.gossip_set("leaving", "true").await;
-
-        log::info!(
-            "📢 [Cluster] Broadcast leaving notification for node {}",
-            self.node_id
-        );
-
-        Ok(())
-    }
-
-    /// Wait for partition transfer to complete before final shutdown
-    ///
-    /// This method blocks until all partitions owned by this node have been
-    /// reassigned to other nodes, or until the timeout expires.
-    ///
-    /// # Arguments
-    /// * `partition_manager` - Reference to PartitionManager to check partition ownership
-    /// * `timeout` - Maximum time to wait for partition transfer
-    ///
-    /// # Requirements
-    /// - Requirements 8.4: Block until all partitions reassigned or timeout
-    ///
-    /// # Returns
-    /// Ok(true) if all partitions were transferred, Ok(false) if timeout expired
-    pub async fn wait_for_partition_transfer(
-        &self,
-        check_fn: impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
-        timeout: Duration,
-    ) -> CoreResult<bool> {
-        log::info!(
-            "⏳ [Cluster] Waiting for partition transfer (timeout: {:?})",
-            timeout
-        );
-
-        let start = std::time::Instant::now();
-        let check_interval = Duration::from_millis(500);
-
-        while start.elapsed() < timeout {
-            // Check if all partitions have been transferred
-            if check_fn().await {
-                log::info!("✅ [Cluster] All partitions transferred successfully");
-                return Ok(true);
-            }
-
-            // Wait before checking again
-            tokio::time::sleep(check_interval).await;
-        }
-
-        log::warn!(
-            "⚠️  [Cluster] Partition transfer timeout after {:?}",
-            timeout
-        );
-        Ok(false)
-    }
-
-    /// Check if a node is leaving the cluster
-    ///
-    /// # Arguments
-    /// * `node_id` - The node ID to check
-    ///
-    /// # Returns
-    /// true if the node has broadcast a leaving notification
-    pub async fn is_node_leaving(&self, node_id: &str) -> bool {
-        let leaving_key = format!("{}{}", Self::LEAVING_KEY_PREFIX, node_id);
-        self.gossip_get(&leaving_key)
-            .await
-            .map(|v| v == "true")
-            .unwrap_or(false)
-    }
-
-    /// Complete the graceful shutdown after partition transfer
-    ///
-    /// This method should be called after wait_for_partition_transfer completes.
-    /// It performs final cleanup and marks the shutdown as complete.
-    ///
-    /// # Requirements
-    /// - Requirements 8.4: Complete shutdown after partition transfer
-    pub async fn complete_shutdown(&self) -> CoreResult<()> {
-        log::info!("🏁 [Cluster] Completing shutdown for node {}", self.node_id);
-
-        // Give time for final Gossip propagation
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // Note: ChitchatHandle::shutdown takes ownership, so we can't call it
-        // on a reference. The handle will be dropped when ClusterManager is dropped.
-
-        log::info!("✅ [Cluster] ClusterManager shutdown complete");
-        Ok(())
-    }
-
-    // ========================================================================
-    // Node Registration (for testing and manual node management)
-    // ========================================================================
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_cluster_mode() {
-        let config = ClusterConfig {
-            node_id: "test-node".to_string(),
-            cluster_id: "test-cluster".to_string(),
-            listen_addr: "127.0.0.1:17946".to_string(),
-            seed_nodes: vec!["127.0.0.1:17946".to_string()], // Self as seed
-            ..Default::default()
-        };
-
-        let manager = ClusterManager::new(Some(config)).await.unwrap();
-
-        assert_eq!(manager.node_id(), "test-node");
-
-        // Should have 1 node (self)
-        let nodes = manager.live_nodes().await;
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].id, "test-node");
-    }
-
-    #[tokio::test]
-    async fn test_gossip_kv_cluster() {
-        let config = ClusterConfig {
-            node_id: "test-node".to_string(),
-            cluster_id: "test-cluster".to_string(),
-            listen_addr: "127.0.0.1:17947".to_string(),
-            seed_nodes: vec!["127.0.0.1:17947".to_string()],
-            ..Default::default()
-        };
-
-        let manager = ClusterManager::new(Some(config)).await.unwrap();
-
-        // Set and get key
-        manager.gossip_set("test_key", "test_value").await;
-        let value = manager.gossip_get("test_key").await;
-        assert_eq!(value, Some("test_value".to_string()));
-
-        // Delete key
-        manager.delete_key("test_key").await.unwrap();
-        let value = manager.gossip_get("test_key").await;
-        assert_eq!(value, None);
-    }
-
-    #[tokio::test]
-    async fn test_update_metrics() {
-        let config = ClusterConfig {
-            node_id: "test-node".to_string(),
-            cluster_id: "test-cluster".to_string(),
-            listen_addr: "127.0.0.1:17948".to_string(),
-            seed_nodes: vec!["127.0.0.1:17948".to_string()],
-            ..Default::default()
-        };
-
-        let manager = ClusterManager::new(Some(config)).await.unwrap();
-
-        // Update metrics
-        manager.update_my_metrics(10, 0.5, 1024 * 1024 * 100).await;
-
-        // Verify metrics are stored
-        let partition_count = manager.gossip_get(KEY_PARTITION_COUNT).await;
-        assert_eq!(partition_count, Some("10".to_string()));
-
-        let load = manager.gossip_get(KEY_LOAD).await;
-        assert_eq!(load, Some("0.5".to_string()));
     }
 }

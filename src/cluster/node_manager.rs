@@ -13,9 +13,7 @@ use crate::{
     cluster::{self, ClusterEvent},
     utils::error::{CoreError, CoreResult},
 };
-
-pub const INTERNAL_ADDR_KEY: &str = "internal_addr";
-pub const CENTER_NODE_KEY: &str = "coord_node";
+use cluster::keys::*;
 
 pub struct NodeManager {
     node_id: String,
@@ -84,12 +82,15 @@ impl NodeManager {
     }
 
     /// 执行一轮选举
-    pub async fn run_election(&self) -> Result<String, Vec<String>> {
+    pub async fn run_election(&self) -> CoreResult<String> {
         // 1. 找到 node_id 最小的结点，同时统计投票
         let mut min_node: Option<ChitchatId> = None;
         let mut coord_votes: HashMap<String, usize> = HashMap::new();
 
         for (node_id, node_state) in self.chitchat.lock().await.node_states() {
+
+            node_state.get()
+
             // 找最小的 node_id
             if min_node.is_none() || node_id.node_id < min_node.as_ref().unwrap().node_id {
                 min_node = Some(node_id.clone());
@@ -101,46 +102,17 @@ impl NodeManager {
             }
         }
 
-        // 2. 如果没有找到任何节点，返回错误
-        if min_node.is_none() {
-            return Err(vec![]);
+        if let Some(v) = min_node {
+            *coord_votes.entry(v.node_id.to_string()).or_insert(0) += 1;
         }
-
-        let min_node = min_node.unwrap();
-        let min_node_id = min_node.node_id.clone();
-
-        // 3. 检查投票一致性：如果超过一半投给了同一个节点，则选举成功
-
-        if coord_votes.len() == 1 {
-            let cluster_coord = coord_votes.keys().next().unwrap().as_str();
-            if cluster_coord == min_node_id {
-                return Ok(cluster_coord.to_string());
-            }
-            return Ok(min_node_id);
-        }
-
-        // 4. 投票不一致，返回所有候选节点
-
-        // 投票给自己认为最小的节点
-        self.chitchat
-            .lock()
-            .await
-            .self_node_state()
-            .set(CENTER_NODE_KEY, &min_node_id);
 
         let mut candidates: Vec<String> = coord_votes.keys().cloned().collect();
-        if !candidates.contains(&min_node_id) {
-            candidates.push(min_node_id);
-        }
         candidates.sort();
 
-        log::warn!(
-            "⚠️ Election split: candidates={:?}, votes={:?}",
-            candidates,
-            coord_votes
-        );
-
-        Err(candidates)
+        candidates
+            .get(0)
+            .cloned()
+            .ok_or_else(|| CoreError::Internal("Election failed: no candidates found".to_string()))
     }
 
     /// 获取当前的中央节点
@@ -233,4 +205,6 @@ impl NodeManager {
     pub async fn node_count(&self) -> usize {
         self.chitchat.lock().await.live_nodes().count()
     }
+
+    
 }

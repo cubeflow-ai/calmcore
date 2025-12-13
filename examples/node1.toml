@@ -1,0 +1,50 @@
+# Calm Database - 节点 1 配置（种子节点）
+# 启动方式: cargo run --bin calm -- --config examples/node1.toml
+
+# 服务监听地址
+host = "127.0.0.1"
+
+# GraphQL 服务端口
+graphql_port = 9567
+
+# 认证信息
+user = "root"
+password = "calm"
+
+# 日志配置
+[log]
+level = "info"
+target = "file"
+file = "logs/node1.log"
+rotation = true
+max_size_mb = 100
+max_files = 10
+
+# 引擎配置
+[engine]
+data_dir = "data"
+persist_check_interval_secs = 60
+max_concurrent_persists = 4
+check_after_flush = true
+
+# 集群配置
+[cluster]
+node_id = "node1"
+cluster_id = "calm-test-cluster"
+gossip_port = 7946
+internal_port = 7947
+seed_nodes = ["127.0.0.1:7946"]
+gossip_interval_ms = 500
+failure_timeout_secs = 10
+suspect_timeout_secs = 10
+vote_timeout_secs = 10
+min_cluster_size = 2
+
+# 分布式查询配置
+[cluster.distributed]
+query_timeout_ms = 30000
+shuffle_buffer_size = 10000
+max_concurrent_queries = 100
+rpc_port = 7947
+connect_timeout_ms = 5000
+request_timeout_ms = 30000

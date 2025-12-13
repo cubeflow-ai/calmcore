@@ -139,10 +139,11 @@ impl DDLServiceImpl {
         // 3. 分区按需创建,无需提前分配
         // 新架构:分区在第一次写入时自动创建,不需要提前通知节点
 
-        // 4. 通过 Gossip 广播缓存失效消息
-        self.cluster_manager
-            .gossip_set(&format!("table_invalidate:{}", table_name), "1")
-            .await;
+        // 4. 通过 Gossip 广播缓存失效消息（仅集群模式）
+        if let Some(cm) = &self.cluster_manager {
+            cm.gossip_set(&format!("table_invalidate:{}", table_name), "1")
+                .await;
+        }
 
         log::info!("✅ [CoordNode] Table '{}' created successfully", table_name);
         Ok(())
@@ -206,7 +207,13 @@ impl DDLServiceImpl {
 
                 for partition_id in partition_ids {
                     // 如果是本节点，直接删除
-                    if node_id_clone == self_clone.cluster_manager.node_id() {
+                    let is_local = self_clone
+                        .cluster_manager
+                        .as_ref()
+                        .map(|cm| node_id_clone == cm.node_id())
+                        .unwrap_or(true);
+
+                    if is_local {
                         if let Err(e) = self_clone
                             .drop_partition_local_impl(&table_name_clone, &partition_id)
                             .await
@@ -252,10 +259,11 @@ impl DDLServiceImpl {
             return Err(e);
         }
 
-        // 5. 通过 Gossip 广播缓存失效消息
-        self.cluster_manager
-            .gossip_set(&format!("table_invalidate:{}", table_name), "1")
-            .await;
+        // 5. 通过 Gossip 广播缓存失效消息（仅集群模式）
+        if let Some(cm) = &self.cluster_manager {
+            cm.gossip_set(&format!("table_invalidate:{}", table_name), "1")
+                .await;
+        }
 
         log::info!("✅ [CoordNode] Table '{}' dropped successfully", table_name);
         Ok(())
@@ -360,7 +368,13 @@ impl DDLServiceImpl {
 
                 for partition_id in partition_ids {
                     // 如果是本节点，直接 flush
-                    if node_id_clone == self_clone.cluster_manager.node_id() {
+                    let is_local = self_clone
+                        .cluster_manager
+                        .as_ref()
+                        .map(|cm| node_id_clone == cm.node_id())
+                        .unwrap_or(true);
+
+                    if is_local {
                         if let Err(e) = self_clone
                             .flush_partition_local_impl(&table_name_clone, &partition_id)
                             .await
@@ -405,7 +419,7 @@ impl DDLServiceImpl {
     }
 
     pub async fn load_existing_tables(&self) -> CoreResult<()> {
-        if !self.cluster_manager.is_cluster_model() {
+        if self.cluster_manager.is_some() {
             // 集群模式下，默认不加载任何partition
             return Ok(());
         }
@@ -548,7 +562,11 @@ impl DDLServiceImpl {
     }
 
     async fn coord_addr(&self) -> CoreResult<String> {
-        let node_manager = &self.cluster_manager.node_manager;
+        let cm = self
+            .cluster_manager
+            .as_ref()
+            .ok_or_else(|| CoreError::Internal("Not in cluster mode".to_string()))?;
+        let node_manager = &cm.node_manager;
 
         if let Some(coord_addr) = node_manager.get_coord_node_addr().await {
             return Ok(coord_addr);
@@ -716,16 +734,25 @@ impl DDLServiceImpl {
             owner_node_id
         );
 
-        // 如果是本节点，直接获取
-        if owner_node_id == self.cluster_manager.node_id() {
+        // 如果是本节点或单机模式，直接获取
+        let is_local = self
+            .cluster_manager
+            .as_ref()
+            .map(|cm| owner_node_id == cm.node_id())
+            .unwrap_or(true);
+
+        if is_local {
             return self
                 .get_partition_detail_local(table_name, partition_id)
                 .await;
         }
 
         // 否则，转发到所有者节点
-        let owner_addr = self
+        let cm = self
             .cluster_manager
+            .as_ref()
+            .ok_or_else(|| CoreError::Internal("Not in cluster mode".to_string()))?;
+        let owner_addr = cm
             .node_manager
             .get_node_internal_addr(&owner_node_id)
             .await
@@ -770,8 +797,11 @@ impl DDLServiceImpl {
     }
 
     async fn internal_addr(&self, node_id: &str) -> CoreResult<String> {
-        self.cluster_manager
-            .node_manager
+        let cm = self
+            .cluster_manager
+            .as_ref()
+            .ok_or_else(|| CoreError::Internal("Not in cluster mode".to_string()))?;
+        cm.node_manager
             .get_node_internal_addr(node_id)
             .await
             .ok_or_else(|| {

@@ -55,21 +55,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut handles = Vec::new();
 
     // 启动内部服务 ，如果是cluster模式才启动
-    handles.push({
-        let calm_service = calm_service.clone();
-        tokio::spawn(async move {
-            if let Err(e) = calm_service.start_rpc_server().await {
-                eprintln!("❌ Internal RPC server error: {}", e);
-            }
-        })
-    });
+    handles.push({calm_service.init().await?);
+   
 
     // 启动 GraphQL 服务
     if let Some(port) = config.graphql_port {
         let addr = format!("{}:{}", config.host, port);
         println!("🚀 Starting GraphQL server on {}", addr);
         println!("   GraphQL Playground: http://{}", addr);
-        println!("   GraphQL Playground: http://{}/playground", addr);
         let service = calm_service.clone();
         let handle = tokio::spawn(async move {
             if let Err(e) = GraphQLServer::new(service).start(&addr).await {

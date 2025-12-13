@@ -20,12 +20,23 @@ use crate::utils::error::CoreResult;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+mod keys {
+    /// Gossip key prefixes for different types of data
+    pub const KEY_LOAD: &str = "load";
+    pub const KEY_MEMORY: &str = "memory";
+    pub const KEY_PARTITION_COUNT: &str = "partition_count";
+    pub const KEY_NODE_STATUS: &str = "status"; // e.g., "healthy", "suspect", "dead"
+    pub const VALUE_NODE_STATUS_PREPARING: &str = "PREPARING";
+    pub const VALUE_NODE_STATUS_READY: &str = "READY";
+    pub const VALUE_NODE_STATUS_DECOMMISSIONING: &str = "DECOMMISSIONING";
+
+    pub const INTERNAL_ADDR_KEY: &str = "internal_addr";
+    pub const CENTER_NODE_KEY: &str = "coord_node";
+}
+
 /// 集群配置
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
-    /// 本节点 ID（唯一标识，generated on first start）
-    pub node_id: String,
-
     /// 集群 ID（同一集群的节点必须相同）
     pub cluster_id: String,
 
@@ -48,18 +59,11 @@ pub struct ClusterConfig {
 
     /// Additional time before marking Suspect as Dead
     pub suspect_timeout: Duration,
-
-    /// Vote timeout (per round)
-    pub vote_timeout: Duration,
-
-    /// Minimum cluster size for operation
-    pub min_cluster_size: usize,
 }
 
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
-            node_id: format!("node-{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
             cluster_id: "calm-cluster".to_string(),
             gossip_port: 7946,
             internal_port: 7947,
@@ -67,8 +71,6 @@ impl Default for ClusterConfig {
             gossip_interval: Duration::from_millis(500),
             failure_timeout: Duration::from_secs(10),
             suspect_timeout: Duration::from_secs(10),
-            vote_timeout: Duration::from_secs(10),
-            min_cluster_size: 3,
         }
     }
 }

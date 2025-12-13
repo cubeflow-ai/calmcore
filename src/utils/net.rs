@@ -1,6 +1,6 @@
 //! Network utility functions
 
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 
 /// Get the local IP address that would be used to connect to a target address
@@ -8,9 +8,12 @@ use std::time::Duration;
 /// This is useful for determining the real IP of the local machine when
 /// the listen address is configured as 0.0.0.0 or ::
 ///
+/// Uses UDP socket to determine the local IP without requiring the target service to be running.
+/// The UDP "connect" operation only sets the default destination and doesn't send any data.
+///
 /// # Arguments
 /// * `target_addr` - Target address to connect to (e.g., "example.com:80" or "192.168.1.1:7946")
-/// * `timeout` - Connection timeout duration
+/// * `_timeout` - Unused (kept for API compatibility)
 ///
 /// # Returns
 /// The local IP address as a string, or None if unable to determine
@@ -24,20 +27,17 @@ use std::time::Duration;
 ///     println!("My real IP is: {}", ip);
 /// }
 /// ```
-pub fn get_real_ip(target_addr: &str, timeout: Duration) -> Option<String> {
-    // Try to resolve and connect to the target
-    if let Ok(mut addrs) = target_addr.to_socket_addrs() {
-        if let Some(addr) = addrs.next() {
-            // Try to connect (with timeout)
-            if let Ok(stream) = TcpStream::connect_timeout(&addr, timeout) {
-                // Get local address from the socket
-                if let Ok(local_addr) = stream.local_addr() {
-                    return Some(local_addr.ip().to_string());
-                }
-            }
-        }
-    }
-    None
+pub fn get_real_ip(target_addr: &str, _timeout: Duration) -> Option<String> {
+    // Parse target address
+    let addr = target_addr.to_socket_addrs().ok()?.next()?;
+
+    // Create UDP socket and "connect" to target (doesn't actually send data)
+    // This allows the OS to choose the appropriate local IP based on routing
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect(addr).ok()?;
+
+    // Get the local address that was selected
+    socket.local_addr().ok().map(|addr| addr.ip().to_string())
 }
 
 #[cfg(test)]
