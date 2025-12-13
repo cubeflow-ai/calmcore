@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use base64::engine;
+use datafusion::arrow::json;
 use serde::{Deserialize, Serialize};
 use tarpc::{client, context::Context};
 use tokio_serde::formats::Bincode;
 
 use crate::{
-    catalog::{Catalog, PartitionStrategy, TableMeta},
+    catalog::{table_meta, Catalog, PartitionStrategy, TableMeta},
     cluster::{node_manager, ClusterManager},
     engine::Engine,
     schema::Schema,
@@ -133,16 +134,24 @@ impl DDLServiceImpl {
             updated_at: now,
         };
 
-        // 2. 创建表（会写入共享存储 data/tables/{name}/meta.json）
-        let _partitions = self.catalog.create_table(table_meta)?;
+        let table_meta_value = serde_json::to_string(&table_meta).map_err(|e| {
+            CoreError::Internal(format!(
+                "Failed to serialize TableMeta for '{}': {}",
+                table_name, e
+            ))
+        })?;
 
-        // 3. 分区按需创建,无需提前分配
-        // 新架构:分区在第一次写入时自动创建,不需要提前通知节点
+        let partitions = self.catalog.create_table(table_meta)?;
 
-        // 4. 通过 Gossip 广播缓存失效消息（仅集群模式）
         if let Some(cm) = &self.cluster_manager {
-            cm.gossip_set(&format!("table_invalidate:{}", table_name), "1")
+            cm.set_key_value(format!("table:{}", table_name), table_meta_value)
                 .await;
+        }
+
+        for partition_name in partitions {
+            // 选择 最空闲节点，创建partition
+            self.cluster_manager
+                .and_then(|cm| cm.node_manager.idle_nodes())
         }
 
         log::info!("✅ [CoordNode] Table '{}' created successfully", table_name);
@@ -415,19 +424,6 @@ impl DDLServiceImpl {
         }
 
         log::info!("✅ [CoordNode] Table '{}' flushed successfully", table_name);
-        Ok(())
-    }
-
-    pub async fn load_existing_tables(&self) -> CoreResult<()> {
-        if self.cluster_manager.is_some() {
-            // 集群模式下，默认不加载任何partition
-            return Ok(());
-        }
-
-        self.engine
-            .load_existing_tables_from_disk(&self.catalog)
-            .await?;
-
         Ok(())
     }
 

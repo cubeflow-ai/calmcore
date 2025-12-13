@@ -81,40 +81,6 @@ impl NodeManager {
         Ok(())
     }
 
-    /// 执行一轮选举
-    pub async fn run_election(&self) -> CoreResult<String> {
-        // 1. 找到 node_id 最小的结点，同时统计投票
-        let mut min_node: Option<ChitchatId> = None;
-        let mut coord_votes: HashMap<String, usize> = HashMap::new();
-
-        for (node_id, node_state) in self.chitchat.lock().await.node_states() {
-
-            node_state.get()
-
-            // 找最小的 node_id
-            if min_node.is_none() || node_id.node_id < min_node.as_ref().unwrap().node_id {
-                min_node = Some(node_id.clone());
-            }
-
-            // 统计每个节点投票给谁
-            if let Some(voted_coord) = node_state.get(CENTER_NODE_KEY) {
-                *coord_votes.entry(voted_coord.to_string()).or_insert(0) += 1;
-            }
-        }
-
-        if let Some(v) = min_node {
-            *coord_votes.entry(v.node_id.to_string()).or_insert(0) += 1;
-        }
-
-        let mut candidates: Vec<String> = coord_votes.keys().cloned().collect();
-        candidates.sort();
-
-        candidates
-            .get(0)
-            .cloned()
-            .ok_or_else(|| CoreError::Internal("Election failed: no candidates found".to_string()))
-    }
-
     /// 获取当前的中央节点
     ///
     /// 返回已选举出的中央节点，如果还未选举出则返回 None
@@ -135,7 +101,7 @@ impl NodeManager {
     }
 
     /// Get all live nodes
-    pub async fn idle_nodes(&self) -> Vec<ChitchatId> {
+    pub async fn idle_node(&self) -> Vec<ChitchatId> {
         //TODO: implement idle node selection logic
         let mut nodes = self.live_nodes().await;
         nodes.shuffle(&mut rand::rng());
@@ -205,6 +171,4 @@ impl NodeManager {
     pub async fn node_count(&self) -> usize {
         self.chitchat.lock().await.live_nodes().count()
     }
-
-    
 }

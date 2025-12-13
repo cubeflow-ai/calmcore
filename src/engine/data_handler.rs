@@ -10,7 +10,7 @@ use crate::catalog::{PartitionStrategy, TableMeta};
 use crate::partition::Partition;
 use crate::utils::error::{CoreError, CoreResult};
 
-use super::config::InsertStats;
+use super::domain::InsertStats;
 use super::Engine;
 
 impl Engine {

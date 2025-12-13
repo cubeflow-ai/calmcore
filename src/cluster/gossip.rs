@@ -23,7 +23,8 @@ use tokio::sync::Mutex;
 
 use super::ClusterConfig;
 use crate::cluster::node_manager::NodeManager;
-use crate::cluster::{gossip, PartitionManager};
+use crate::cluster::{self, gossip, PartitionManager};
+use crate::config::Config;
 use crate::utils::error::{CoreError, CoreResult};
 
 use crate::cluster::keys::*;
@@ -51,12 +52,6 @@ pub struct ClusterManager {
 
     /// Local node ID (UUID, immutable for node lifetime)
     node_id: String,
-
-    /// Cluster configuration
-    config: ClusterConfig,
-
-    /// Gossip listen address
-    gossip_listen_addr: Option<SocketAddr>,
 }
 
 impl ClusterManager {
@@ -64,43 +59,37 @@ impl ClusterManager {
     ///
     /// # Requirements
     /// - Requirements 1.2: Join cluster via seed nodes when configured
-    pub async fn new(config: ClusterConfig) -> CoreResult<Self> {
-        // Validate configuration
-        config.validate()?;
+    pub async fn new(config: &Config) -> CoreResult<Self> {
+        let cluster_config = config
+            .cluster
+            .as_ref()
+            .ok_or_else(|| CoreError::ConfigError("Cluster config missing".to_string()))?;
 
-        let real_ip = config
-            .real_ip()
-            .ok_or_else(|| CoreError::ConfigError("Cannot determine real IP".to_string()))?;
+        let host = config.host.clone().unwrap();
 
-        let gossip_listen_addr = format!("{}:{}", real_ip, config.gossip_port)
+        let gossip_listen_addr = format!("{}:{}", host, cluster_config.gossip_port)
             .parse::<SocketAddr>()
             .map_err(|e| CoreError::ConfigError(format!("Invalid gossip listen address: {}", e)))?;
 
-        // nodeid format is millsecods timstamp yyyyMMddHHssmmMMM  since unix epoch + "_"+ real_ip
-        let node_id = format!(
-            "{}_{}",
-            chrono::Utc::now().format("%Y%m%d%H%M%S%3f"),
-            real_ip
-        );
+        // nodeid format is millsecods timstamp yyyyMMddHHssmmMMM  since unix epoch + "_"+ host
+        let node_id = format!("{}_{}", chrono::Utc::now().format("%Y%m%d%H%M%S%3f"), host);
 
         log::info!("🚀 [Cluster] Starting node {}", node_id);
         log::info!("📡 [Cluster] gossip Listen address: {}", gossip_listen_addr);
         log::info!(
             "🌐 [Cluster] Running in CLUSTER mode with {} seed nodes",
-            config.seed_nodes.len()
+            cluster_config.seed_nodes.len()
         );
 
         // Initialize Chitchat
         let chitchat_handle =
-            Self::init_chitchat(node_id.clone(), &config, gossip_listen_addr.clone()).await?;
+            Self::init_chitchat(node_id.clone(), config, gossip_listen_addr).await?;
         let chitchat = chitchat_handle.chitchat().clone();
 
         let manager = Self {
             chitchat_handle: Some(chitchat_handle),
             chitchat: chitchat.clone(),
             node_id: node_id.clone(),
-            config,
-            gossip_listen_addr: Some(gossip_listen_addr),
             node_manager: Arc::new(NodeManager::new(chitchat.clone()).await),
             partition_manager: Arc::new(PartitionManager::new(node_id.clone(), chitchat.clone())),
         };
@@ -209,9 +198,39 @@ impl ClusterManager {
         Ok(chitchat_handle)
     }
 
-    /// Get cluster configuration
-    pub fn config(&self) -> &ClusterConfig {
-        &self.config
+    fn partition_key(table_name: &str, partition_name: &str) -> String {
+        format!("partition:{}:{}", table_name, partition_name)
+    }
+
+    pub async fn put_partition(&self, table_name: &str, partition_name: &str) {
+        let key = Self::partition_key(table_name, partition_name);
+        let mut guard = self.chitchat.lock().await;
+        guard
+            .self_node_state()
+            .set(key.clone(), self.node_id.clone());
+    }
+
+    pub async fn del_partition(&self, table_name: &str, partition_name: &str) {
+        let key = Self::partition_key(table_name, partition_name);
+        let mut guard = self.chitchat.lock().await;
+        guard.self_node_state().delete(&key);
+    }
+
+    pub async fn get_partition(
+        &self,
+        table_name: &str,
+        partition_name: &str,
+    ) -> Option<(String, String)> {
+        let key = Self::partition_key(table_name, partition_name);
+
+        let guard = self.chitchat.lock().await;
+
+        for (_, state) in guard.node_states() {
+            if let Some(value) = state.get(&key) {
+                return Some(value.to_string());
+            }
+        }
+        None
     }
 
     /// Get local node ID

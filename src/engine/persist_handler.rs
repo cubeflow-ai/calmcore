@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 
 use crate::utils::error::CoreResult;
 
-use super::config::PersistRequest;
+use super::domain::PersistRequest;
 use super::Engine;
 
 impl Engine {
@@ -64,7 +64,11 @@ impl Engine {
     /// 持久化整个表的所有 partition
     ///
     /// 这是一个同步操作：调用后，该表的所有 partition 的所有 segment 保证已持久化完毕
-    pub async fn flush_table(&self, catalog: &crate::catalog::Catalog, table_name: &str) -> CoreResult<()> {
+    pub async fn flush_table(
+        &self,
+        catalog: &crate::catalog::Catalog,
+        table_name: &str,
+    ) -> CoreResult<()> {
         log::info!("🔄 Flushing table '{}'...", table_name);
 
         // 1. 获取表的元数据以确定有多少个 partition
@@ -128,12 +132,12 @@ impl Engine {
         self: Arc<Self>,
         mut persist_rx: mpsc::UnboundedReceiver<PersistRequest>,
         mut partition_notify_rx: mpsc::UnboundedReceiver<(String, String)>,
+        persist_check_interval_secs: u64,
     ) {
         log::info!("[Engine] Persist background task started");
 
         // 定时器
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(self.config.persist_check_interval_secs));
+        let mut interval = tokio::time::interval(Duration::from_secs(persist_check_interval_secs));
 
         // 当前正在持久化的任务
         let active_tasks: Arc<tokio::sync::Mutex<HashMap<(String, String), JoinHandle<()>>>> =

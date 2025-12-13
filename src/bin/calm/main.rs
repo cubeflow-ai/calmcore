@@ -1,23 +1,21 @@
-mod config;
-
 use calm::{
     catalog::Catalog,
     cluster::{ClusterManager, PartitionManager},
+    config::Config,
     engine::Engine,
-    protocol::graphql::GraphQLServer,
+    protocol::graphql::{self, GraphQLServer},
     service::CalmService, // protocol::{elasticsearch::ElasticsearchServer, graphql::GraphQLServer, mysql::MysqlServer},
 };
-use config::Config;
 use std::io::Write;
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 加载配置
     let config = Config::from_args()?;
 
-    // 初始化日志
     init_logger(&config)?;
+
+    config.init()?;
 
     println!("=== Calm Database - Multi-Protocol Server ===");
     println!(
@@ -31,35 +29,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🌐 Host: {}", config.host);
     println!();
 
-    // 初始化集群
-    let cluster_manager = match config.to_cluster_config() {
-        Some(conf) => Some(Arc::new(ClusterManager::new(conf).await?)),
-        None => None,
-    };
+    let (graphql_port, mysql_port, es_port) =
+        (config.graphql_port, config.mysql_port, config.es_port);
 
-    // 创建 Catalog
-    let catalog = Arc::new(Catalog::new(config.engine.data_dir.clone())?);
-
-    // 创建 Engine
-    let engine = Engine::new(config.to_engine_config())?;
-
-    let calm_service = Arc::new(CalmService::new(engine, catalog, cluster_manager));
-
-    // 加载已存在的表（暂时为空方法）
-    println!("📚 Loading existing tables...");
-    calm_service.ddl_service().load_existing_tables().await?;
-    println!("✓ Tables loaded");
-    println!();
+    let calm_service = Arc::new(CalmService::new(config));
 
     // 存储服务器任务句柄
     let mut handles = Vec::new();
 
-    // 启动内部服务 ，如果是cluster模式才启动
-    handles.push({calm_service.init().await?);
-   
-
     // 启动 GraphQL 服务
-    if let Some(port) = config.graphql_port {
+    if let Some(port) = graphql_port {
         let addr = format!("{}:{}", config.host, port);
         println!("🚀 Starting GraphQL server on {}", addr);
         println!("   GraphQL Playground: http://{}", addr);

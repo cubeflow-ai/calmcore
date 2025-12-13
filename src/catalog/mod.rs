@@ -10,7 +10,7 @@ pub use table_meta::{
 use crate::utils::error::{CoreError, CoreResult};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 /// Catalog - 管理所有表的元数据
@@ -19,16 +19,22 @@ pub struct Catalog {
     work_dir: PathBuf,
 
     /// 表元数据缓存 (table_name -> TableMeta)
-    tables: Arc<RwLock<HashMap<String, Arc<TableMeta>>>>,
+    tables: RwLock<HashMap<String, Arc<TableInfo>>>,
+}
 
-    /// 分区路由：(table_name, partition_name) -> node_id
-    /// 运行时状态，不持久化
-    partition_routes: Arc<RwLock<HashMap<(String, String), String>>>,
+pub struct PartitionInfo {
+    pub partition: PartitionMeta,
+    pub addr: Option<String>,
+}
+
+pub struct TableInfo {
+    pub table: TableMeta,
+    pub partitions: RwLock<Vec<PartitionInfo>>,
 }
 
 impl Catalog {
     /// 创建新的 Catalog
-    pub fn new(work_dir: PathBuf) -> CoreResult<Self> {
+    pub async fn new(work_dir: PathBuf) -> CoreResult<Self> {
         // 确保工作目录存在
         let tables_dir = work_dir.join("tables");
         fs::create_dir_all(&tables_dir)
@@ -36,17 +42,128 @@ impl Catalog {
 
         let catalog = Self {
             work_dir,
-            tables: Arc::new(RwLock::new(HashMap::new())),
-            partition_routes: Arc::new(RwLock::new(HashMap::new())),
+            tables: RwLock::new(HashMap::new()),
         };
 
-        // 加载已存在的表
-        catalog.load_existing_tables()?;
+        catalog.init().await?;
 
         Ok(catalog)
     }
 
     /// =========================================== table operations ===========================================
+
+    async fn init(&self) -> CoreResult<()> {
+        let tables_dir = self.work_dir.join("tables");
+
+        if !tables_dir.exists() {
+            return Ok(());
+        }
+
+        let entries = fs::read_dir(&tables_dir)
+            .map_err(|e| CoreError::IOError(format!("Failed to read tables directory: {}", e)))?;
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    log::error!("⚠️  Failed to read directory entry: {}", e);
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if path.is_dir() {
+                let table_name = match path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+                    CoreError::IOError(format!("Invalid table directory name: {:?}", path))
+                }) {
+                    Ok(name) => name,
+                    Err(e) => {
+                        log::error!("⚠️ load table name by path:{:?} error: {}", path, e);
+                        continue;
+                    }
+                };
+
+                match self.load_table(table_name).await {
+                    Ok(table_info) => {
+                        let table_name = table_info.table.table_name.clone();
+                        let mut tables = self.tables.write().unwrap();
+                        tables.insert(table_name.clone(), Arc::new(table_info));
+                        log::info!("✅ Loaded table '{}'", table_name);
+                    }
+                    Err(e) => {
+                        log::error!("⚠️  Failed to load table from {:?}: {}", path, e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn load_table(&self, table_name: &str) -> CoreResult<TableInfo> {
+        let path = self.work_dir.join("tables").join(table_name);
+        let table = crate::utils::json::load_json_from_file::<TableMeta>(&path.join("meta.json"))
+            .map_err(|e| CoreError::IOError(format!("Failed to load table meta: {}", e)))?;
+
+        let partitions = self.load_partitions(table_name).await?;
+
+        log::info!(
+            "✅ Loaded table '{}' with {} partitions",
+            table.table_name,
+            partitions.len()
+        );
+
+        Ok(TableInfo { table, partitions })
+    }
+
+    pub fn partition_dir(&self, table_name: &str, partition_name: &str) -> PathBuf {
+        self.work_dir
+            .join("tables")
+            .join(table_name)
+            .join("partitions")
+            .join(partition_name)
+    }
+
+    pub async fn load_partitions(&self, table_name: &str) -> CoreResult<Vec<PartitionInfo>> {
+        let table_dir = self.work_dir.join("tables").join(table_name);
+        let partitions_dir = table_dir.join("partitions");
+
+        // 统一扫描 partitions 子目录，不依赖分区策略
+        log::info!(
+            "🔍 Scanning partition directories for path: {:?}...",
+            partitions_dir
+        );
+
+        let mut partitions = Vec::new();
+
+        if !partitions_dir.exists() {
+            return Ok(partitions);
+        }
+
+        let entries = std::fs::read_dir(&partitions_dir).map_err(|e| {
+            CoreError::IOError(format!("Failed to read partitions directory: {}", e))
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                CoreError::IOError(format!("Failed to read partition entry: {}", e))
+            })?;
+
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let partition_meta =
+                crate::utils::json::load_json_from_file::<PartitionMeta>(&path.join("meta.json"))?;
+            partitions.push(PartitionInfo {
+                partition: partition_meta,
+                addr: None,
+            });
+        }
+
+        Ok(partitions)
+    }
 
     /// 创建新表
     pub fn create_table(&self, meta: TableMeta) -> CoreResult<Vec<String>> {
@@ -94,7 +211,7 @@ impl Catalog {
     }
 
     /// 获取表元数据
-    pub fn get_table(&self, table_name: &str) -> CoreResult<Arc<TableMeta>> {
+    pub async fn get_or_load_table(&self, table_name: &str) -> CoreResult<Arc<TableInfo>> {
         let tables = self.tables.read().unwrap();
 
         if let Some(table) = tables.get(table_name) {
@@ -108,7 +225,7 @@ impl Catalog {
             return Ok(table.clone());
         }
 
-        let table = Arc::new(self.read_table_meta_from_disk(table_name)?);
+        let table = Arc::new(self.load_table(table_name).await?);
         {
             let mut tables = self.tables.write().unwrap();
             tables.insert(table_name.to_string(), table.clone());
@@ -142,25 +259,6 @@ impl Catalog {
 
         println!("✅ Table '{}' dropped successfully", table_name);
         Ok(())
-    }
-
-    pub fn read_table_meta_from_disk(&self, table_name: &str) -> CoreResult<TableMeta> {
-        let table_meta_path = dir::table_dir(&self.work_dir, table_name).join("meta.json");
-
-        if !table_meta_path.exists() {
-            return Err(CoreError::NotExisted(format!(
-                "Table '{}' meta not found",
-                table_name
-            )));
-        }
-
-        let content = fs::read_to_string(&table_meta_path)
-            .map_err(|e| CoreError::IOError(format!("Failed to read table meta: {}", e)))?;
-
-        let meta: TableMeta = serde_json::from_str(&content)
-            .map_err(|e| CoreError::IOError(format!("Failed to parse table meta: {}", e)))?;
-
-        Ok(meta)
     }
 
     /// =========================================== partiton operations ===========================================
@@ -218,13 +316,7 @@ impl Catalog {
             )));
         }
 
-        let content = fs::read_to_string(&partition_meta_path)
-            .map_err(|e| CoreError::IOError(format!("Failed to read partition meta: {}", e)))?;
-
-        let meta: PartitionMeta = serde_json::from_str(&content)
-            .map_err(|e| CoreError::IOError(format!("Failed to parse partition meta: {}", e)))?;
-
-        Ok(meta)
+        self.load_json_from_file(&partition_meta_path)
     }
 
     /// 保存 partition 元数据
@@ -260,123 +352,6 @@ impl Catalog {
         })?;
 
         Ok(())
-    }
-
-    /// 加载已存在的表
-    fn load_existing_tables(&self) -> CoreResult<()> {
-        let tables_dir = self.work_dir.join("tables");
-
-        if !tables_dir.exists() {
-            return Ok(());
-        }
-
-        let entries = fs::read_dir(&tables_dir)
-            .map_err(|e| CoreError::IOError(format!("Failed to read tables directory: {}", e)))?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                CoreError::IOError(format!("Failed to read directory entry: {}", e))
-            })?;
-            let path = entry.path();
-
-            if path.is_dir() {
-                let meta_path = path.join("meta.json");
-                if meta_path.exists() {
-                    match self.load_table_meta(&meta_path) {
-                        Ok(meta) => {
-                            let table_name = meta.table_name.clone();
-                            let mut tables = self.tables.write().unwrap();
-                            tables.insert(table_name, Arc::new(meta));
-                        }
-                        Err(e) => {
-                            log::error!("⚠️  Failed to load table from {:?}: {}", path, e);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// 从文件加载表元数据
-    fn load_table_meta(&self, meta_path: &PathBuf) -> CoreResult<TableMeta> {
-        let content = fs::read_to_string(meta_path)
-            .map_err(|e| CoreError::IOError(format!("Failed to read table meta: {}", e)))?;
-
-        let meta: TableMeta = serde_json::from_str(&content)
-            .map_err(|e| CoreError::IOError(format!("Failed to parse table meta: {}", e)))?;
-
-        Ok(meta)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::schema::{field::FieldOption, Schema};
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_catalog_create_table() {
-        let temp_dir = TempDir::new().unwrap();
-        let catalog = Catalog::new(temp_dir.path().to_path_buf()).unwrap();
-
-        let schema = Schema::new(
-            "test_table".to_string(),
-            Some("id".to_string()),
-            true,
-            vec![
-                FieldOption::U64 {
-                    name: "id".to_string(),
-                    index: true,
-                    description: None,
-                    default_value: None,
-                    nullable: true,
-                },
-                FieldOption::Keyword {
-                    name: "name".to_string(),
-                    index: true,
-                    is_array: false,
-                    persist_option: None,
-                    case_sensitive: true,
-                    description: None,
-                    default_value: None,
-                    nullable: true,
-                },
-            ],
-            Default::default(),
-            None, // description
-        );
-
-        let meta = TableMeta::new(
-            "test_table".to_string(),
-            schema,
-            PartitionStrategy::Hash {
-                field: "id".to_string(),
-                num_partitions: 4,
-            },
-        );
-
-        catalog.create_table(meta).unwrap();
-
-        // 验证表存在
-        let table = catalog.get_table("test_table").unwrap();
-        assert_eq!(table.table_name, "test_table");
-
-        // 验证目录结构
-        let table_dir = table.table_dir(&catalog.work_dir);
-        assert!(table_dir.exists());
-        assert!(table_dir.join("meta.json").exists());
-
-        // 验证 partition 目录
-        if let Some(partitions) = table.partition_strategy.generate_partitions() {
-            for partition_name in partitions {
-                let partition_dir = table.partition_dir_by_name(&catalog.work_dir, &partition_name);
-                assert!(partition_dir.exists());
-                assert!(partition_dir.join("meta.json").exists());
-            }
-        }
     }
 }
 

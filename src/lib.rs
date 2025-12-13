@@ -7,8 +7,8 @@ pub mod service;
 pub mod utils;
 // pub mod analyzer;  // Temporarily disabled due to missing dependencies
 pub mod protocol;
-// TODO: 暂时禁用,等 tarpc Bincode API 问题解决后再启用
-// pub(crate) mod service;
+
+pub mod config;
 pub(crate) mod storage;
 
 // Re-export modules for backward compatibility

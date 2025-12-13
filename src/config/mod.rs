@@ -1,15 +1,15 @@
-use calm::cluster::ClusterConfig;
-use calm::engine::EngineConfig;
+pub mod cluster;
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::Duration;
+
+use crate::{config::cluster::ClusterSettings, utils::error::CoreResult};
 
 /// 服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// 监听地址
-    #[serde(default = "default_host")]
-    pub host: String,
+    /// 监听地址, 不建议填写。初始化时会自动选择合适的地址
+    pub host: Option<String>,
 
     /// GraphQL 服务端口
     #[serde(default = "default_graphql_port")]
@@ -86,15 +86,6 @@ pub struct EngineSettings {
     /// 最大并发持久化的 Partition 数量
     #[serde(default = "default_max_concurrent_persists")]
     pub max_concurrent_persists: usize,
-
-    /// 是否在 flush 后立即检查持久化
-    #[serde(default = "default_check_after_flush")]
-    pub check_after_flush: bool,
-}
-
-// 默认值函数
-fn default_host() -> String {
-    "127.0.0.1".to_string()
 }
 
 fn default_graphql_port() -> Option<u16> {
@@ -129,10 +120,6 @@ fn default_max_concurrent_persists() -> usize {
     4
 }
 
-fn default_check_after_flush() -> bool {
-    true
-}
-
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -160,7 +147,7 @@ fn default_log_max_files() -> usize {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            host: default_host(),
+            host: None,
             graphql_port: default_graphql_port(),
             es_port: default_es_port(),
             mysql_port: default_mysql_port(),
@@ -192,155 +179,6 @@ impl Default for EngineSettings {
             data_dir: default_data_dir(),
             persist_check_interval_secs: default_persist_interval(),
             max_concurrent_persists: default_max_concurrent_persists(),
-            check_after_flush: default_check_after_flush(),
-        }
-    }
-}
-
-/// 集群配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClusterSettings {
-    /// 集群 ID（同一集群的节点必须相同）
-    #[serde(default = "default_cluster_id")]
-    pub cluster_id: String,
-
-    /// Gossip 监听端口 (UDP)
-    #[serde(default = "default_gossip_port")]
-    pub gossip_port: u16,
-
-    /// 内部 RPC 服务端口 (TCP)
-    #[serde(default = "default_internal_port")]
-    pub internal_port: u16,
-
-    /// 种子节点列表（用于初始加入集群）
-    #[serde(default)]
-    pub seed_nodes: Vec<String>,
-
-    /// Gossip 间隔（毫秒）
-    #[serde(default = "default_gossip_interval_ms")]
-    pub gossip_interval_ms: u64,
-
-    /// 故障检测超时（秒）
-    #[serde(default = "default_failure_timeout_secs")]
-    pub failure_timeout_secs: u64,
-
-    /// 可疑状态超时（秒）
-    #[serde(default = "default_suspect_timeout_secs")]
-    pub suspect_timeout_secs: u64,
-
-    /// 分布式查询配置
-    #[serde(default)]
-    pub distributed: DistributedSettings,
-}
-
-fn default_cluster_id() -> String {
-    "".to_string()
-}
-
-fn default_gossip_port() -> u16 {
-    7946
-}
-
-fn default_internal_port() -> u16 {
-    7947
-}
-
-fn default_gossip_interval_ms() -> u64 {
-    500
-}
-
-fn default_failure_timeout_secs() -> u64 {
-    10
-}
-
-fn default_suspect_timeout_secs() -> u64 {
-    10
-}
-
-fn default_vote_timeout_secs() -> u64 {
-    10
-}
-
-fn default_min_cluster_size() -> usize {
-    3
-}
-
-impl Default for ClusterSettings {
-    fn default() -> Self {
-        Self {
-            cluster_id: default_cluster_id(),
-            gossip_port: default_gossip_port(),
-            internal_port: default_internal_port(),
-            seed_nodes: vec![],
-            gossip_interval_ms: default_gossip_interval_ms(),
-            failure_timeout_secs: default_failure_timeout_secs(),
-            suspect_timeout_secs: default_suspect_timeout_secs(),
-            distributed: DistributedSettings::default(),
-        }
-    }
-}
-
-/// 分布式查询配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DistributedSettings {
-    /// 查询超时时间（毫秒）
-    #[serde(default = "default_query_timeout_ms")]
-    pub query_timeout_ms: u64,
-
-    /// Shuffle 缓冲区大小（行数）
-    #[serde(default = "default_shuffle_buffer_size")]
-    pub shuffle_buffer_size: usize,
-
-    /// 最大并发查询数
-    #[serde(default = "default_max_concurrent_queries")]
-    pub max_concurrent_queries: usize,
-
-    /// 节点间通信端口（RPC）
-    #[serde(default = "default_rpc_port")]
-    pub rpc_port: u16,
-
-    /// 连接超时时间（毫秒）
-    #[serde(default = "default_connect_timeout_ms")]
-    pub connect_timeout_ms: u64,
-
-    /// 请求超时时间（毫秒）
-    #[serde(default = "default_request_timeout_ms")]
-    pub request_timeout_ms: u64,
-}
-
-fn default_query_timeout_ms() -> u64 {
-    30_000
-}
-
-fn default_shuffle_buffer_size() -> usize {
-    10_000
-}
-
-fn default_max_concurrent_queries() -> usize {
-    100
-}
-
-fn default_rpc_port() -> u16 {
-    7947
-}
-
-fn default_connect_timeout_ms() -> u64 {
-    5_000
-}
-
-fn default_request_timeout_ms() -> u64 {
-    30_000
-}
-
-impl Default for DistributedSettings {
-    fn default() -> Self {
-        Self {
-            query_timeout_ms: default_query_timeout_ms(),
-            shuffle_buffer_size: default_shuffle_buffer_size(),
-            max_concurrent_queries: default_max_concurrent_queries(),
-            rpc_port: default_rpc_port(),
-            connect_timeout_ms: default_connect_timeout_ms(),
-            request_timeout_ms: default_request_timeout_ms(),
         }
     }
 }
@@ -357,7 +195,7 @@ impl Config {
             match args[i].as_str() {
                 "--host" | "-h" => {
                     if i + 1 < args.len() {
-                        config.host = args[i + 1].clone();
+                        config.host = Some(args[i + 1].clone());
                         i += 2;
                     } else {
                         return Err("Missing value for --host".into());
@@ -510,7 +348,7 @@ impl Config {
 
         // 从环境变量覆盖
         if let Ok(host) = std::env::var("CALM_HOST") {
-            config.host = host;
+            config.host = Some(host);
         }
         if let Ok(port) = std::env::var("CALM_GRAPHQL_PORT") {
             config.graphql_port = Some(port.parse()?);
@@ -583,44 +421,6 @@ impl Config {
         Ok(config)
     }
 
-    /// 转换为 EngineConfig
-    pub fn to_engine_config(&self) -> EngineConfig {
-        EngineConfig {
-            data_dir: self.engine.data_dir.clone(),
-            persist_check_interval_secs: self.engine.persist_check_interval_secs,
-            max_concurrent_persists: self.engine.max_concurrent_persists,
-            check_after_flush: self.engine.check_after_flush,
-        }
-    }
-
-    /// 转换为 ClusterConfig（仅当配置了集群时返回 Some）
-    pub fn to_cluster_config(&self) -> Option<ClusterConfig> {
-        self.cluster.as_ref().map(|cluster| ClusterConfig {
-            cluster_id: cluster.cluster_id.clone(),
-            gossip_port: cluster.gossip_port,
-            internal_port: cluster.internal_port,
-            seed_nodes: cluster.seed_nodes.clone(),
-            gossip_interval: Duration::from_millis(cluster.gossip_interval_ms),
-            failure_timeout: Duration::from_secs(cluster.failure_timeout_secs),
-            suspect_timeout: Duration::from_secs(cluster.suspect_timeout_secs),
-        })
-    }
-
-    /// 转换为 DistributedConfig（仅当配置了集群时返回 Some）
-    // pub fn to_distributed_config(&self) -> Option<DistributedConfig> {
-    //     self.cluster.as_ref().map(|cluster| {
-    //         let distributed = &cluster.distributed;
-    //         DistributedConfig {
-    //             query_timeout_ms: distributed.query_timeout_ms,
-    //             shuffle_buffer_size: distributed.shuffle_buffer_size,
-    //             max_concurrent_queries: distributed.max_concurrent_queries,
-    //             rpc_port: distributed.rpc_port,
-    //             connect_timeout_ms: distributed.connect_timeout_ms,
-    //             request_timeout_ms: distributed.request_timeout_ms,
-    //         }
-    //     })
-    // }
-
     /// 打印帮助信息
     fn print_help() {
         println!("Calm Database - Multi-Protocol Database Server");
@@ -688,5 +488,19 @@ impl Config {
         println!();
         println!("    # 启动集群模式");
         println!("    calm --seed-nodes 192.168.1.10:7946,192.168.1.11:7946");
+    }
+
+    pub fn init(&mut self) -> CoreResult<()> {
+        if let Some(cluster_cfg) = &mut self.cluster {
+            cluster_cfg.init()?;
+            let host = cluster_cfg.real_ip();
+            self.host = host;
+        } else {
+            self.host = "0.0.0.0".to_string().into();
+        }
+
+        // TODO: other init tasks
+
+        Ok(())
     }
 }

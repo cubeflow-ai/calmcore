@@ -1,23 +1,25 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use futures::StreamExt;
-use tarpc::server::Channel;
+use futures::{lock::Mutex, StreamExt};
+use tarpc::{client::Config, server::Channel};
 use tokio::task::JoinHandle;
 use tokio_serde::formats::Bincode;
 
 use crate::{
     catalog::Catalog,
-    cluster::ClusterManager,
+    cluster::{self, ClusterManager},
     engine::Engine,
     service::{
         ddl::{DDLService, DDLServiceImpl},
         dml::DMLService,
+        job::start_cluster_job,
     },
     utils::error::{CoreError, CoreResult},
 };
 
 pub(crate) mod ddl;
 pub(crate) mod dml;
+mod job;
 
 /// Calm 服务 - 业务协调层
 ///
@@ -41,52 +43,97 @@ pub struct CalmService {
     catalog: Arc<Catalog>,
     cluster_manager: Option<Arc<ClusterManager>>,
     engine: Arc<Engine>,
+
+    handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl CalmService {
-    /// 创建 CalmService
-    ///
-    /// 各个能力独立传入：
-    /// - engine: 本地数据操作
-    /// - catalog: 元数据管理
-    /// - cluster_manager: 集群管理
-    pub fn new(
-        engine: Arc<Engine>,
-        catalog: Arc<Catalog>,
-        cluster_manager: Option<Arc<ClusterManager>>,
-    ) -> Self {
-        Self {
+    pub async fn new(conf: crate::config::Config) -> CoreResult<Arc<Self>> {
+        // 初始化集群
+        let cluster_manager = if conf.cluster.is_some() {
+            Some(Arc::new(ClusterManager::new(&conf).await?))
+        } else {
+            None
+        };
+
+        // 创建 Catalog
+        let catalog = Arc::new(Catalog::new(conf.engine.data_dir.clone()).await?);
+
+        // 创建 Engine
+        let engine = Engine::new(&conf)?;
+
+        let calm_service = Arc::new(Self {
             ddl: DDLServiceImpl::new(engine.clone(), catalog.clone(), cluster_manager.clone()),
             dml: DMLService::new(),
             catalog,
             cluster_manager,
             engine,
-        }
+        });
+
+        calm_service.init().await?;
+
+        Ok(calm_service)
     }
 
     /// 初始化 DDL Service
-    pub async fn init(self: Arc<Self>) -> Result<JoinHandle<()>, CoreError> {
-        //启动内部结点服务
+    pub async fn init(self: Arc<Self>) -> CoreResult<()> {
+        if self.cluster_manager.is_none() {
+            log::info!("Running in standalone mode");
+
+            for table_name in self.catalog.list_tables() {
+                let table_info = self.catalog.get_or_load_table(&table_name).await?;
+                for partition in table_info.partitions.read().unwrap().iter() {
+                    let partition_name = &partition.partition.partition_name;
+                    let partition_dir = self.catalog.partition_dir(&table_name, &partition_name);
+                    self.engine
+                        .load_partition(
+                            &partition.partition.partition_name,
+                            &table_name,
+                            partition_dir,
+                            table_info.table.schema.clone(),
+                        )
+                        .await?;
+                }
+            }
+
+            return Ok(());
+        }
+
+        let cluster_manager = self.cluster_manager.as_ref().unwrap();
+
+        log::info!("Running in cluster mode");
+
         let calm_service = self.clone();
         let handler = tokio::spawn(async move {
             if let Err(e) = calm_service.start_rpc_server().await {
                 panic!("❌ Internal RPC server error: {}", e);
             }
         });
+        self.handle.lock().await.replace(handler);
 
-        // 1. 获取中央结点。
-        if let Some(cm) = &self.cluster_manager {
-            let coor = cm.node_manager.run_election().await?;
-            // 1.如果中央结点是自己，
-            // 2.加载所有tables
-            // 3.加载全部路由
-            // 4.将当前节点状态设置为 Ready
-            cm.set_my_status_ready().await;
-        } else {
-            // 2.加载所有tables
+        // try to find all partitions router
+
+        // 1. 选举并尝试连接中央节点，如果最小节点就是自己，则自己变为中央节点
+
+        for table_name in self.catalog.list_tables() {
+            let table_info = self.catalog.get_or_load_table(&table_name).await?;
+
+            let mut partitions = table_info.partitions.write().unwrap();
+
+            for partition in partitions.iter_mut() {
+                let partition_name = &partition.partition.partition_name;
+                // 加载所有表的路由信息，
+                // 先用初始partition中的onwer信息 ，从cluster 获取， onwer 和 addr 填写回 PartitionInfo
+                // 如果获取不到，则置为 None，等待后续更新
+                cluster_manager
+                    .find_partition_route(&table_name, partition_name)
+                    .await?;
+            }
         }
 
-        Ok(handler)
+        tokio::spawn(start_cluster_job(self.clone()));
+
+        Ok(())
     }
 
     /// 启动 tarpc RPC 服务器
@@ -160,6 +207,11 @@ impl CalmService {
     }
 
     pub async fn stop(&self) -> CoreResult<()> {
+        // stop internal rpc server
+        if let Some(handle) = self.handle.lock().await.take() {
+            handle.abort();
+        }
+
         self.engine.stop().await?;
         //TODO: ANSJ
         Ok(())

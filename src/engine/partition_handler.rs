@@ -1,10 +1,11 @@
 //! 元数据管理模块 - 处理表和分区的元数据操作
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use datafusion::arrow::compute::kernels::partition;
 
-use crate::catalog::{dir, Catalog, PartitionStrategy, TableMeta};
+use crate::catalog::{dir, table_meta, Catalog, PartitionStrategy, TableMeta};
 use crate::partition::Partition;
 use crate::schema::Schema;
 use crate::utils::error::{CoreError, CoreResult};
@@ -14,17 +15,14 @@ use super::Engine;
 impl Engine {
     /// ==============================================================local methods ==================================================
 
-    pub async fn local_load_partition(
+    pub async fn load_partition(
         &self,
-        catalog: &Catalog,
-        table_name: &str,
         partition_name: &str,
+        table_name: &str,
+        partition_dir: PathBuf,
+        schema: Schema,
     ) -> CoreResult<Arc<Partition>> {
         // 从文件系统读取表的元数据
-        let table_meta = catalog.get_table(table_name)?;
-        let schema = table_meta.schema.clone();
-
-        let partition_dir = dir::partition_dir(&self.config.data_dir, table_name, partition_name);
 
         // 从磁盘加载分区
         let partition = Arc::new(Partition::load(
@@ -50,8 +48,8 @@ impl Engine {
         Ok(partition)
     }
 
-    /// 移除 Partition
-    pub async fn local_drop_partition(&self, table_name: &str, partition_name: &str) {
+    /// unload Partition
+    pub async fn unload_partition(&self, table_name: &str, partition_name: &str) {
         let key = (table_name.to_string(), partition_name.to_string());
         let mut partitions = self.partitions.write().await;
         partitions.remove(&key);
@@ -157,91 +155,5 @@ impl Engine {
         } else {
             Vec::new()
         }
-    }
-
-    /// 创建新的 Partition（低级 API，通常不需要直接调用）
-    /// 已废弃：使用带 table_name 的版本
-    #[allow(dead_code)]
-    #[deprecated(note = "需要提供 table_name")]
-    pub async fn create_partition(&self, _id: u64, _schema: Schema) -> Arc<Partition> {
-        panic!("create_partition is deprecated, use create_partition_with_table instead");
-    }
-
-    /// 根据分区策略路由到对应的 partition_name
-    ///
-    /// # 参数
-    /// - `table_name`: 表名
-    /// - `partition_value`: 分区字段的值（字符串格式）
-    ///
-    /// # 返回
-    /// 返回应该使用的 partition_name
-    ///
-    /// # 注意
-    /// 这是一个兼容性方法，新代码应该使用 Router::route_batch
-    pub fn route_partition(&self, table_name: &str, partition_value: &str) -> CoreResult<String> {
-        // let meta = self.catalog.get_table(table_name)?;
-
-        // match &meta.partition_strategy {
-        //     PartitionStrategy::PKHash { num_partitions }
-        //     | PartitionStrategy::Hash { num_partitions, .. } => {
-        //         // Hash 分区：对值进行 hash 然后取模
-        //         use std::collections::hash_map::DefaultHasher;
-        //         use std::hash::{Hash, Hasher};
-
-        //         let mut hasher = DefaultHasher::new();
-        //         partition_value.hash(&mut hasher);
-        //         let hash = hasher.finish();
-
-        //         let index = (hash % (*num_partitions as u64)) as usize;
-        //         Ok(PartitionStrategy::format_partition_id(index as i64))
-        //     }
-
-        //     PartitionStrategy::Range { start, step, .. } => {
-        //         // Range 分区：根据值计算所在的 partition_start
-        //         let value = partition_value.parse::<i64>().map_err(|e| {
-        //             CoreError::Internal(format!(
-        //                 "Failed to parse range value '{}': {}",
-        //                 partition_value, e
-        //             ))
-        //         })?;
-
-        //         let offset = value - start;
-        //         let partition_index = offset / step;
-        //         let partition_start = start + (partition_index * step);
-
-        //         Ok(PartitionStrategy::format_partition_id(partition_start))
-        //     }
-
-        //     PartitionStrategy::DatetimeRange { .. } => {
-        //         // DatetimeRange 分区：期望传入时间戳（毫秒）
-        //         let timestamp_ms = partition_value.parse::<i64>().map_err(|e| {
-        //             CoreError::Internal(format!(
-        //                 "Failed to parse datetime value '{}' as timestamp: {}",
-        //                 partition_value, e
-        //             ))
-        //         })?;
-
-        //         meta.partition_strategy
-        //             .calculate_datetime_partition(timestamp_ms)
-        //             .ok_or_else(|| {
-        //                 CoreError::Internal(format!(
-        //                     "Failed to calculate datetime partition for timestamp {}",
-        //                     timestamp_ms
-        //                 ))
-        //             })
-        //     }
-
-        //     PartitionStrategy::Custom => {
-        //         // Custom 分区：用户自定义，直接使用 partition_value 作为 partition_name
-        //         Ok(partition_value.to_string())
-        //     }
-
-        //     PartitionStrategy::None => {
-        //         // 无分区策略，返回默认 partition
-        //         Ok("partition_000000000000000000".to_string())
-        //     }
-
-        // }
-        todo!()
     }
 }

@@ -1,6 +1,7 @@
 /// Table 元数据定义
-use crate::schema::Schema;
+use crate::{schema::Schema, utils::error::CoreResult};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 /// 表的元数据
@@ -383,13 +384,6 @@ impl PartitionStrategy {
     pub fn generate_partition_dir_name(partition_name: &str) -> String {
         format!("partition_{}", partition_name)
     }
-
-    /// 从 partition 目录名中提取 partition_name
-    ///
-    /// 例如：从 "partition_0000000000000000001" 提取 "0000000000000000001"
-    pub fn extract_partition_from_dir_name(dir_name: &str) -> Option<String> {
-        dir_name.strip_prefix("partition_").map(|s| s.to_string())
-    }
 }
 
 /// Partition 的元数据
@@ -398,17 +392,14 @@ pub struct PartitionMeta {
     /// partition ID
     pub partition_name: String,
 
-    /// 包含的 segment 列表
-    pub segments: Vec<SegmentInfo>,
-
     /// 创建时间
     pub created_at: u64,
 
     /// 最后更新时间
     pub updated_at: u64,
 
-    /// 当前活跃的 segment ID
-    pub active_segment_id: Option<u64>,
+    /// 所有者节点 ID
+    pub owner: Option<String>,
 }
 
 /// Segment 信息
@@ -482,42 +473,9 @@ impl PartitionMeta {
 
         Self {
             partition_name,
-            segments: Vec::new(),
             created_at: now,
             updated_at: now,
-            active_segment_id: None,
-        }
-    }
-
-    /// 添加新的 segment
-    pub fn add_segment(&mut self, segment: SegmentInfo) {
-        self.segments.push(segment);
-        self.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-    }
-
-    /// 更新 segment 状态
-    pub fn update_segment_status(&mut self, start: u64, end: u64, status: SegmentStatus) {
-        if let Some(segment) = self
-            .segments
-            .iter_mut()
-            .find(|s| s.start == start && s.end == end)
-        {
-            segment.status = status;
-            if status == SegmentStatus::Frozen || status == SegmentStatus::Persisted {
-                segment.frozen_at = Some(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
-                );
-            }
-            self.updated_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            owner: None,
         }
     }
 }

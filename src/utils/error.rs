@@ -81,3 +81,15 @@ impl From<tarpc::client::RpcError> for CoreError {
         CoreError::Network(format!("RPC error: {}", err))
     }
 }
+
+impl From<serde_json::Error> for CoreError {
+    fn from(err: serde_json::Error) -> Self {
+        CoreError::DecodeError(format!("Serde JSON error: {}", err), vec![])
+    }
+}
+
+impl From<std::io::Error> for CoreError {
+    fn from(err: std::io::Error) -> Self {
+        CoreError::IOError(format!("IO error: {}", err))
+    }
+}
