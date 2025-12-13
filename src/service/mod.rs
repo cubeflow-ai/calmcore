@@ -125,7 +125,7 @@ impl CalmService {
                 // 加载所有表的路由信息，
                 // 先用初始partition中的onwer信息 ，从cluster 获取， onwer 和 addr 填写回 PartitionInfo
                 // 如果获取不到，则置为 None，等待后续更新
-                cluster_manager
+                cluster_manager.partition_manager
                     .find_partition_route(&table_name, partition_name)
                     .await?;
             }
