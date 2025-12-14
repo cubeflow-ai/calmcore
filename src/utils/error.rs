@@ -43,6 +43,9 @@ pub enum CoreError {
 
     #[error("{0}")]
     ConfigError(String),
+
+    #[error("{0}")]
+    ClusterState(String),
 }
 
 impl CoreError {
@@ -61,6 +64,7 @@ impl CoreError {
             CoreError::Network(_) => 10,
             CoreError::Timeout(_) => 11,
             CoreError::ConfigError(_) => 12,
+            CoreError::ClusterState(_) => 13,
         }
     }
 

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::{lock::Mutex, StreamExt};
 use tarpc::{client::Config, server::Channel};
@@ -70,13 +70,13 @@ impl CalmService {
             engine,
         });
 
-        calm_service.init().await?;
+        calm_service.init(&conf).await?;
 
         Ok(calm_service)
     }
 
     /// 初始化 DDL Service
-    pub async fn init(self: Arc<Self>) -> CoreResult<()> {
+    pub async fn init(self: Arc<Self>, conf: &crate::config::Config) -> CoreResult<()> {
         if self.cluster_manager.is_none() {
             log::info!("Running in standalone mode");
 
@@ -103,29 +103,69 @@ impl CalmService {
 
         log::info!("Running in cluster mode");
 
-        let calm_service = self.clone();
-        let handler = tokio::spawn(async move {
-            if let Err(e) = calm_service.start_rpc_server().await {
-                panic!("❌ Internal RPC server error: {}", e);
+        let internal_addr = format!(
+            "{}:{}",
+            conf.host.unwrap(),
+            conf.cluster.as_ref().unwrap().internal_port
+        );
+
+        {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let calm_service = self.clone();
+            let addr_str = internal_addr.clone();
+            let handler = tokio::spawn(async move {
+                //publish internal addr to cluster
+                // start rpc server
+                match calm_service.start_rpc_server(addr_str, tx).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        panic!("❌ Internal RPC server error: {}", e);
+                    }
+                }
+            });
+            self.handle.lock().await.replace(handler);
+
+            // 等待 RPC 服务器启动成功
+            rx.await
+                .map_err(|_| CoreError::Internal("RPC server failed to start".to_string()))?;
+            log::info!("✅ Internal RPC server started successfully");
+        }
+
+        cluster_manager.set_internal_addr(&internal_addr).await;
+        cluster_manager.set_my_status_ready().await;
+
+        // 1. 选举并尝试连接中央节点，如果最小节点就是自己，则自己变为中央节点
+        loop {
+            log::info!("begin to find coordinator node");
+            match cluster_manager.find_coord_node().await {
+                Ok(coord) => {
+                    if let Err(e) = cluster_manager.node_manager.set_coord_node(&coord).await {
+                        log::warn!("Failed to set coordinator node: {}. Retrying...", e);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("Failed to find coordinator node: {}. Retrying...", e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
-        });
-        self.handle.lock().await.replace(handler);
+        }
 
         // try to find all partitions router
 
-        // 1. 选举并尝试连接中央节点，如果最小节点就是自己，则自己变为中央节点
+        let routers: Vec<PartionRouter> = cluster_manager.find_partition_routes().await?;
 
         for table_name in self.catalog.list_tables() {
             let table_info = self.catalog.get_or_load_table(&table_name).await?;
-
             let mut partitions = table_info.partitions.write().unwrap();
-
             for partition in partitions.iter_mut() {
                 let partition_name = &partition.partition.partition_name;
                 // 加载所有表的路由信息，
                 // 先用初始partition中的onwer信息 ，从cluster 获取， onwer 和 addr 填写回 PartitionInfo
                 // 如果获取不到，则置为 None，等待后续更新
-                cluster_manager.partition_manager
+                cluster_manager
                     .find_partition_route(&table_name, partition_name)
                     .await?;
             }
@@ -139,61 +179,53 @@ impl CalmService {
     /// 启动 tarpc RPC 服务器
     ///
     /// 监听 rpc_addr，处理集群内部的 RPC 请求
-    pub async fn start_rpc_server(self: Arc<Self>) -> Result<JoinHandle<()>, std::io::Error> {
-        if let Some(cm) = self.cluster_manager.as_ref() {
-            let config = cm.config();
-            let realip = config.real_ip().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Real IP must be set in cluster mode",
-                )
-            })?;
+    pub async fn start_rpc_server(
+        self: Arc<Self>,
+        addr_str: String,
+        startup_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> CoreResult<JoinHandle<()>> {
+        let internal_listen_addr = addr_str
+            .parse::<SocketAddr>()
+            .map_err(|e| CoreError::ConfigError(format!("Invalid RPC listen address: {}", e)))?;
 
-            let addr_str = format!("{}:{}", realip, config.internal_port);
+        let listener =
+            tarpc::serde_transport::tcp::listen(internal_listen_addr, Bincode::default).await?;
 
-            let internal_listen_addr = addr_str.parse::<SocketAddr>().map_err(|e| {
-                CoreError::ConfigError(format!("Invalid RPC listen address: {}", e))
-            })?;
+        log::info!(
+            "🚀 CalmService RPC server listening on {}",
+            internal_listen_addr
+        );
 
-            let listener =
-                tarpc::serde_transport::tcp::listen(internal_listen_addr, Bincode::default).await?;
+        // 通知服务已启动
+        let _ = startup_tx.send(());
 
-            log::info!(
-                "🚀 CalmService RPC server listening on {}",
-                internal_listen_addr
-            );
-
-            let handle = tokio::spawn(async move {
-                listener
-                    .filter_map(|r| async move {
-                        match r {
-                            Ok(transport) => Some(transport),
-                            Err(e) => {
-                                log::warn!("❌ Failed to accept connection: {}", e);
-                                None
-                            }
+        let handle = tokio::spawn(async move {
+            listener
+                .filter_map(|r| async move {
+                    match r {
+                        Ok(transport) => Some(transport),
+                        Err(e) => {
+                            log::warn!("❌ Failed to accept connection: {}", e);
+                            None
                         }
-                    })
-                    // 为每个连接创建一个 channel
-                    .for_each_concurrent(None, move |transport| {
-                        let ddl_service = self.ddl.clone();
-                        async move {
-                            let server = tarpc::server::BaseChannel::with_defaults(transport);
-                            server
-                                .execute(ddl_service.serve())
-                                .for_each(|response| async move {
-                                    tokio::spawn(response);
-                                })
-                                .await;
-                        }
-                    })
-                    .await;
-            });
-            cm.node_manager.set_internal_addr(&addr_str).await;
-            Ok(handle)
-        } else {
-            Ok(tokio::spawn(async {}))
-        }
+                    }
+                })
+                // 为每个连接创建一个 channel
+                .for_each_concurrent(None, move |transport| {
+                    let ddl_service = self.ddl.clone();
+                    async move {
+                        let server = tarpc::server::BaseChannel::with_defaults(transport);
+                        server
+                            .execute(ddl_service.serve())
+                            .for_each(|response| async move {
+                                tokio::spawn(response);
+                            })
+                            .await;
+                    }
+                })
+                .await;
+        });
+        Ok(handle)
     }
 
     /// 获取 DDL Service（用于本地调用）

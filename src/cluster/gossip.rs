@@ -10,7 +10,7 @@
 //! - **State Propagation**: Key-value state propagation across all nodes
 //! - **Event Broadcasting**: Cluster events via tokio broadcast channels
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,18 +21,19 @@ use chitchat::{
 };
 use tokio::sync::Mutex;
 
-use super::ClusterConfig;
 use crate::cluster::node_manager::NodeManager;
-use crate::cluster::{self, gossip, PartitionManager};
+use crate::cluster::PartitionManager;
+use crate::config::cluster::ClusterSettings;
 use crate::config::Config;
 use crate::utils::error::{CoreError, CoreResult};
 
 use crate::cluster::keys::*;
 
-enum NodeStatus {
-    Healthy,
-    Suspect,
-    Dead,
+pub struct PartitionRouter {
+    pub table_name: String,
+    pub partition_name: String,
+    pub owner_node_id: String,
+    pub internal_addr: String,
 }
 
 /// Cluster Manager with Chitchat integration
@@ -45,8 +46,6 @@ pub struct ClusterManager {
 
     /// Chitchat instance (cloneable Arc for background tasks)
     pub chitchat: Arc<Mutex<Chitchat>>,
-
-    pub partition_manager: Arc<PartitionManager>,
 
     pub node_manager: Arc<NodeManager>,
 
@@ -83,7 +82,7 @@ impl ClusterManager {
 
         // Initialize Chitchat
         let chitchat_handle =
-            Self::init_chitchat(node_id.clone(), config, gossip_listen_addr).await?;
+            Self::init_chitchat(node_id.clone(), cluster_config, gossip_listen_addr).await?;
         let chitchat = chitchat_handle.chitchat().clone();
 
         let manager = Self {
@@ -91,7 +90,6 @@ impl ClusterManager {
             chitchat: chitchat.clone(),
             node_id: node_id.clone(),
             node_manager: Arc::new(NodeManager::new(chitchat.clone()).await),
-            partition_manager: Arc::new(PartitionManager::new(node_id.clone(), chitchat.clone())),
         };
 
         manager.set_my_status_preparing().await;
@@ -109,7 +107,7 @@ impl ClusterManager {
     /// - Requirements 1.4: Fail if cannot contact any seed node
     async fn init_chitchat(
         node_id: String,
-        config: &ClusterConfig,
+        config: &ClusterSettings,
         listen_addr: SocketAddr,
     ) -> CoreResult<ChitchatHandle> {
         // Create Chitchat ID
@@ -122,7 +120,7 @@ impl ClusterManager {
         // Configure failure detector
         let failure_detector_config = FailureDetectorConfig {
             phi_threshold: 8.0,
-            initial_interval: config.gossip_interval,
+            initial_interval: config.gossip_interval_ms,
             ..Default::default()
         };
 
@@ -130,7 +128,7 @@ impl ClusterManager {
         let chitchat_config = ChitchatConfig {
             chitchat_id,
             cluster_id: config.cluster_id.clone(),
-            gossip_interval: config.gossip_interval,
+            gossip_interval: config.gossip_interval_ms,
             listen_addr,
             seed_nodes: config.seed_nodes.clone(),
             failure_detector_config,
@@ -196,6 +194,56 @@ impl ClusterManager {
         }
 
         Ok(chitchat_handle)
+    }
+
+    pub async fn run_election(&self) -> CoreResult<ChitchatId> {
+        let mut live_nodes: Vec<ChitchatId> =
+            self.chitchat.lock().await.live_nodes().cloned().collect();
+
+        live_nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+
+        let coord_node = live_nodes
+            .first()
+            .cloned()
+            .ok_or_else(|| CoreError::Internal("No live nodes found for election".to_string()))?;
+
+        if self.get_node_status(&coord_node).await? == NodeStatus::Ready {
+            return Err(CoreError::Internal(format!(
+                "Elected coord node {} is dead",
+                coord_node.node_id
+            )));
+        }
+
+        Ok(coord_node)
+    }
+
+    pub async fn find_partition_routes(&self) -> CoreResult<Vec<PartitionRouter>> {
+        let mut routers = Vec::new();
+
+        let guard = self.chitchat.lock().await;
+
+        for (node_id, state) in guard.node_states() {
+            for (key, value) in state.key_values() {
+                if key.starts_with("partition:") {
+                    let parts: Vec<&str> = key.split(':').collect();
+                    if parts.len() == 3 {
+                        let table_name = parts[1].to_string();
+                        let partition_name = parts[2].to_string();
+                        let owner_node_id = node_id.node_id.clone();
+                        let internal_addr = value.to_string();
+
+                        routers.push(PartitionRouter {
+                            table_name,
+                            partition_name,
+                            owner_node_id,
+                            internal_addr,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(routers)
     }
 
     fn partition_key(table_name: &str, partition_name: &str) -> String {
@@ -367,5 +415,81 @@ impl ClusterManager {
             load,
             memory_usage_bytes
         );
+    }
+
+    pub async fn find_coord_node(&self) -> CoreResult<String> {
+        let chitchat = self.chitchat.lock().await;
+
+        // 从 live_nodes 和他们的 state 里面的 KEY_NODE_STATUS 中寻找最小的 node_id
+        // 要求状态为 READY，如果最小节点是 PREPARING 或没有 state 则返回 None
+        // 如果是 DECOMMISSIONING 则跳过，找下一个最小的
+
+        // 1. 收集所有已知节点：包括 live_nodes 和从 state 中 CENTER_NODE_KEY 声明的节点
+        let mut all_known_nodes = HashSet::new();
+
+        // 添加所有 live nodes
+        for node in chitchat.live_nodes() {
+            all_known_nodes.insert(node.node_id.clone());
+        }
+
+        // 添加从各个节点 state 中发现的 CENTER_NODE_KEY 声明的协调节点
+        for (_node_id, state) in chitchat.node_states() {
+            if let Some(coord_node) = state.get(CENTER_NODE_KEY) {
+                all_known_nodes.insert(coord_node.to_string());
+            }
+        }
+
+        // 2. 将所有已知节点按 node_id 排序
+        let mut sorted_nodes: Vec<String> = all_known_nodes.into_iter().collect();
+        sorted_nodes.sort();
+
+        // 3. 按从小到大的顺序检查每个节点的状态
+        for node_id in sorted_nodes {
+            // 查找该节点的状态
+            let node_status = chitchat
+                .live_nodes()
+                .find(|n| n.node_id == node_id)
+                .and_then(|n| chitchat.node_state(n))
+                .and_then(|state| state.get(KEY_NODE_STATUS));
+
+            match node_status {
+                Some(status) => match status {
+                    VALUE_NODE_STATUS_READY => {
+                        // 找到第一个 READY 的节点，返回
+                        return Ok(node_id);
+                    }
+                    VALUE_NODE_STATUS_DECOMMISSIONING => {
+                        // 跳过正在退役的节点，继续找下一个
+                        continue;
+                    }
+                    VALUE_NODE_STATUS_PREPARING => {
+                        // 当前最小可用节点还在准备中，返回 None 等待
+                        return Err(CoreError::ClusterState(format!(
+                            "Node:{} is preparing",
+                            node_id
+                        )));
+                    }
+                    _ => {
+                        // 未知状态，返回 None 等待
+                        return Err(CoreError::ClusterState(format!(
+                            "Node:{} has unknown status",
+                            node_id
+                        )));
+                    }
+                },
+                None => {
+                    // 当前最小可用节点没有状态信息，返回 None 等待
+                    return Err(CoreError::ClusterState(format!(
+                        "Node:{} has no status",
+                        node_id
+                    )));
+                }
+            }
+        }
+
+        // 至少能找到自己所以这里不会发生
+        Err(CoreError::ClusterState(
+            "No suitable coordinator node found".to_string(),
+        ))
     }
 }
