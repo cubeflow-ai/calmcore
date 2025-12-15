@@ -1,9 +1,12 @@
 pub mod cluster;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
-use crate::{config::cluster::ClusterSettings, utils::error::CoreResult};
+use crate::{
+    config::cluster::ClusterSettings,
+    utils::error::{CoreError, CoreResult},
+};
 
 /// 服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -492,7 +495,6 @@ impl Config {
 
     pub fn init(&mut self) -> CoreResult<()> {
         if let Some(cluster_cfg) = &mut self.cluster {
-            cluster_cfg.init()?;
             let host = cluster_cfg.real_ip();
             self.host = host;
         } else {
@@ -502,5 +504,47 @@ impl Config {
         // TODO: other init tasks
 
         Ok(())
+    }
+
+    pub fn validate(&self) -> CoreResult<()> {
+        if let Some(cluster_cfg) = &self.cluster {
+            cluster_cfg.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn internal_addr(&self) -> CoreResult<String> {
+        let host = self
+            .host
+            .as_ref()
+            .ok_or_else(|| CoreError::ConfigError("Host not configured".to_string()))?;
+        if let Some(cluster_cfg) = &self.cluster {
+            Ok(format!("{}:{}", host, cluster_cfg.internal_port))
+        } else {
+            Err(CoreError::ConfigError("Cluster config missing".to_string()))
+        }
+    }
+
+    pub fn internal_socket_addr(&self) -> CoreResult<SocketAddr> {
+        let addr_str = self.internal_addr()?;
+        addr_str.parse().map_err(|e| {
+            CoreError::ConfigError(format!("Invalid internal address '{}': {}", addr_str, e))
+        })
+    }
+
+    pub fn gossip_addr(&self) -> CoreResult<SocketAddr> {
+        let host = self
+            .host
+            .as_ref()
+            .ok_or_else(|| CoreError::ConfigError("Host not configured".to_string()))?;
+        if let Some(cluster_cfg) = &self.cluster {
+            format!("{}:{}", host, cluster_cfg.gossip_port)
+                .parse::<SocketAddr>()
+                .map_err(|e| {
+                    CoreError::ConfigError(format!("Invalid gossip listen address: {}", e))
+                })
+        } else {
+            Err(CoreError::ConfigError("Cluster config missing".to_string()))
+        }
     }
 }
