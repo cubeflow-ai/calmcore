@@ -68,9 +68,10 @@ impl CalmService {
             catalog,
             cluster_manager,
             engine,
+            handle: Mutex::default(),
         });
 
-        calm_service.init(&conf).await?;
+        calm_service.clone().init(&conf).await?;
 
         Ok(calm_service)
     }
@@ -80,7 +81,7 @@ impl CalmService {
         if self.cluster_manager.is_none() {
             log::info!("Running in standalone mode");
 
-            for table_name in self.catalog.list_tables() {
+            for table_name in self.catalog.list_tables().await {
                 let table_info = self.catalog.get_or_load_table(&table_name).await?;
                 for partition in table_info.partitions.read().unwrap().iter() {
                     let partition_name = &partition.partition.partition_name;
@@ -131,7 +132,6 @@ impl CalmService {
             log::info!("✅ Internal RPC server started successfully");
         }
 
-        cluster_manager.set_internal_addr(&internal_addr).await;
         cluster_manager.set_my_status_ready().await;
 
         // 1. 选举并尝试连接中央节点，如果最小节点就是自己，则自己变为中央节点
@@ -139,7 +139,7 @@ impl CalmService {
             log::info!("begin to find coordinator node");
             match cluster_manager.find_coord_node().await {
                 Ok(coord) => {
-                    if let Err(e) = cluster_manager.node_manager.set_coord_node(&coord).await {
+                    if let Err(e) = cluster_manager.set_coord_node(&coord).await {
                         log::warn!("Failed to set coordinator node: {}. Retrying...", e);
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         continue;
@@ -154,20 +154,25 @@ impl CalmService {
         }
 
         // try to find all partitions router
-
-        let routers: Vec<PartionRouter> = cluster_manager.find_partition_routes().await?;
-
-        for table_name in self.catalog.list_tables() {
+        let routers = cluster_manager.find_partition_routes().await;
+        for table_name in self.catalog.list_tables().await {
             let table_info = self.catalog.get_or_load_table(&table_name).await?;
             let mut partitions = table_info.partitions.write().unwrap();
             for partition in partitions.iter_mut() {
-                let partition_name = &partition.partition.partition_name;
-                // 加载所有表的路由信息，
-                // 先用初始partition中的onwer信息 ，从cluster 获取， onwer 和 addr 填写回 PartitionInfo
-                // 如果获取不到，则置为 None，等待后续更新
-                cluster_manager
-                    .find_partition_route(&table_name, partition_name)
-                    .await?;
+                let partition_name = partition.partition_name.clone();
+                if let Some((n, v)) = routers.get(&(table_name, partition_name)) {
+                    if partition.owner.is_none() || partition.updated_at < *v {
+                        log::info!(
+                            "Update partition route: table={}, partition={}, node_id={}, version={}",
+                            table_name,
+                            partition.partition_name,
+                            n,
+                            v
+                        );
+                        partition.owner = Some(n.clone());
+                        partition.updated_at = *v;
+                    }
+                }
             }
         }
 

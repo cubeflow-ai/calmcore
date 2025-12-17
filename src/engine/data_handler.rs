@@ -10,7 +10,6 @@ use crate::catalog::{PartitionStrategy, TableMeta};
 use crate::partition::Partition;
 use crate::utils::error::{CoreError, CoreResult};
 
-use super::domain::InsertStats;
 use super::Engine;
 
 impl Engine {
@@ -33,7 +32,7 @@ impl Engine {
         table_name: &str,
         batch: datafusion::arrow::record_batch::RecordBatch,
         partition_name: Option<String>,
-    ) -> CoreResult<InsertStats> {
+    ) -> CoreResult<()> {
         todo!()
         // use crate::router::Router;
 

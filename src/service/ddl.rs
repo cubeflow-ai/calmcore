@@ -2,13 +2,15 @@ use std::sync::Arc;
 
 use base64::engine;
 use datafusion::arrow::json;
+use ddl_macros::coordinator_route;
+use rayon::vec;
 use serde::{Deserialize, Serialize};
 use tarpc::{client, context::Context};
 use tokio_serde::formats::Bincode;
 
 use crate::{
     catalog::{table_meta, Catalog, PartitionStrategy, TableMeta},
-    cluster::{node_manager, ClusterManager},
+    cluster::{keys, ClusterManager},
     engine::Engine,
     schema::Schema,
     utils::error::{CoreError, CoreResult},
@@ -108,7 +110,7 @@ impl DDLServiceImpl {
     fn am_i_coord_node(&self) -> bool {
         self.cluster_manager
             .as_ref()
-            .map(|m| m.node_manager.is_coord())
+            .map(|cm| cm.am_i_coord_node())
             .unwrap_or(true)
     }
 
@@ -134,14 +136,37 @@ impl DDLServiceImpl {
             updated_at: now,
         };
 
-        let table_meta_value = serde_json::to_string(&table_meta).map_err(|e| {
-            CoreError::Internal(format!(
-                "Failed to serialize TableMeta for '{}': {}",
-                table_name, e
-            ))
-        })?;
+        let partitions = self.catalog.create_table(table_meta).await?;
 
-        let partitions = self.catalog.create_table(table_meta)?;
+        match &self.cluster_manager {
+            Some(cm) => {
+                log::info!(
+                    "📋 [CoordNode] Created table '{}' with {} partitions",
+                    table_name,
+                    partitions.len()
+                );
+                // publish table info to cluster
+                cm.put_table(&table_name).await;
+
+                let idle_nodes = cm.idle_nodes().await;
+
+                if idle_nodes.is_empty() {
+                    let msg = format!(
+                        "⚠️  No idle nodes available to assign partitions for table '{}'",
+                        table_name
+                    );
+                    log::error!("{}", msg);
+                    return Err(CoreError::ClusterState(msg));
+                }
+            }
+            None => {
+                log::info!(
+                    "📋 [Standalone] Created table '{}' with {} partitions",
+                    table_name,
+                    partitions.len()
+                );
+            }
+        }
 
         if let Some(cm) = &self.cluster_manager {
             cm.set_key_value(format!("table:{}", table_name), table_meta_value)
@@ -149,6 +174,41 @@ impl DDLServiceImpl {
         }
 
         for partition_name in partitions {
+            match self.cluster_manager.as_ref() {
+                Some(cm) => {
+                    let idle_nodes = cm.node_manager.idle_nodes().await;
+                    if idle_nodes.is_empty() {
+                        log::warn!(
+                            "⚠️  No idle nodes available to assign partition '{}/{}'",
+                            table_name,
+                            partition_name
+                        );
+                        continue;
+                    }
+                    let selected_node = &idle_nodes[0];
+                    self.catalog
+                        .set_partition_owner(&table_name, &partition_name, &selected_node)
+                        .map_err(|e| {
+                            CoreError::Internal(format!(
+                                "Failed to set partition owner for '{}/{}': {}",
+                                table_name, partition_name, e
+                            ))
+                        })?;
+                    log::info!(
+                        "✅ Assigned partition '{}/{}' to node '{}'",
+                        table_name,
+                        partition_name,
+                        selected_node
+                    );
+                }
+                None => {
+                    log::info!(
+                        "ℹ️  Standalone mode, skipping partition assignment for '{}/{}'",
+                        table_name,
+                        partition_name
+                    );
+                }
+            }
             // 选择 最空闲节点，创建partition
             self.cluster_manager
                 .and_then(|cm| cm.node_manager.idle_nodes())
@@ -163,7 +223,7 @@ impl DDLServiceImpl {
         log::info!("🗑️  [CoordNode] Starting drop table '{}'", table_name);
 
         // 1. 获取表的所有分区
-        let partitions = match self.catalog.get_partition_names(table_name) {
+        let partitions = match self.catalog.get_partition_names(table_name).await {
             Ok(parts) => parts,
             Err(e) => {
                 log::warn!(
@@ -187,7 +247,11 @@ impl DDLServiceImpl {
             std::collections::HashMap::new();
 
         for partition_id in &partitions {
-            if let Some(owner) = self.catalog.get_partition_owner(table_name, partition_id) {
+            if let Some(owner) = self
+                .catalog
+                .get_partition_owner(table_name, partition_id)
+                .await
+            {
                 node_partitions
                     .entry(owner)
                     .or_insert_with(Vec::new)
@@ -263,15 +327,9 @@ impl DDLServiceImpl {
         }
 
         // 4. 删除表元数据（从 catalog 和共享存储）
-        if let Err(e) = self.catalog.drop_table(table_name) {
+        if let Err(e) = self.catalog.drop_table(table_name).await {
             log::error!("❌ Failed to drop table metadata: {}", e);
             return Err(e);
-        }
-
-        // 5. 通过 Gossip 广播缓存失效消息（仅集群模式）
-        if let Some(cm) = &self.cluster_manager {
-            cm.gossip_set(&format!("table_invalidate:{}", table_name), "1")
-                .await;
         }
 
         log::info!("✅ [CoordNode] Table '{}' dropped successfully", table_name);
@@ -335,7 +393,7 @@ impl DDLServiceImpl {
         log::info!("💾 [CoordNode] Starting flush table '{}'", table_name);
 
         // 1. 获取表的所有分区
-        let partitions = self.catalog.get_partition_names(table_name)?;
+        let partitions = self.catalog.get_partition_names(table_name).await?;
 
         log::info!(
             "📋 [CoordNode] Table '{}' has {} partitions to flush",
@@ -348,7 +406,11 @@ impl DDLServiceImpl {
             std::collections::HashMap::new();
 
         for partition_id in &partitions {
-            if let Some(owner) = self.catalog.get_partition_owner(table_name, partition_id) {
+            if let Some(owner) = self
+                .catalog
+                .get_partition_owner(table_name, partition_id)
+                .await
+            {
                 node_partitions
                     .entry(owner)
                     .or_insert_with(Vec::new)
@@ -467,7 +529,7 @@ impl DDLServiceImpl {
         table_name: String,
         partition_id: String,
     ) -> CoreResult<()> {
-        let node_addr = self.internal_addr(node_id).await?;
+        let (_, node_addr) = keys::parse_node_id(node_id)?;
 
         log::info!(
             "📤 [CoordNode] Notifying node '{}' ({}) to flush partition '{}/{}'",
@@ -518,6 +580,18 @@ impl DDLServiceImpl {
             .map_err(|e| CoreError::Network(format!("RPC call failed: {}", e)))??;
 
         Ok(())
+    }
+
+    async fn new_client(&self, node: &str) -> CoreResult<DDLServiceClient> {
+        let (_, addr) = keys::parse_node_id(node)?;
+
+        log::info!("📤 [Node] New client to node {} at {}", node, addr);
+
+        let transport = tarpc::serde_transport::tcp::connect(addr, Bincode::default)
+            .await
+            .map_err(|e| CoreError::Network(format!("Failed to connect to node: {}", e)))?;
+
+        Ok(DDLServiceClient::new(tarpc::client::Config::default(), transport).spawn())
     }
 
     /// 转发到中央节点执行 drop_table
@@ -640,7 +714,7 @@ impl DDLServiceImpl {
             "📋 [CoordNode] Listing partitions for table '{}'",
             table_name
         );
-        self.catalog.get_partition_names(table_name)
+        self.catalog.get_partition_names(table_name).await
     }
 
     /// 转发到中央节点执行 get_table_meta
@@ -717,6 +791,7 @@ impl DDLServiceImpl {
         let owner_node_id = self
             .catalog
             .get_partition_owner(table_name, partition_id)
+            .await
             .ok_or_else(|| {
                 CoreError::Internal(format!(
                     "Partition '{}' in table '{}' has no owner",
@@ -791,44 +866,150 @@ impl DDLServiceImpl {
             .await
             .map_err(|e| CoreError::Network(format!("RPC call failed: {}", e)))?
     }
-
-    async fn internal_addr(&self, node_id: &str) -> CoreResult<String> {
-        let cm = self
-            .cluster_manager
-            .as_ref()
-            .ok_or_else(|| CoreError::Internal("Not in cluster mode".to_string()))?;
-        cm.node_manager
-            .get_node_internal_addr(node_id)
-            .await
-            .ok_or_else(|| {
-                CoreError::Internal(format!(
-                    "internal_addr node:[{}] address not found",
-                    node_id
-                ))
-            })
-    }
 }
 
 /// tarpc service 实现
 impl DDLService for DDLServiceImpl {
+    #[coordinator_route]
     async fn create_table(
         self,
         _ctx: Context,
         schema: Schema,
         partition_strategy: PartitionStrategy,
     ) -> Result<(), CoreError> {
-        if self.am_i_coord_node() {
-            log::info!("📋 [CoordNode] Creating table '{}'", schema.name);
-            self.create_table_as_coordinator(schema, partition_strategy)
-                .await
-        } else {
-            log::info!(
-                "📤 [Node] Forwarding create_table '{}' to coordinator",
-                schema.name
-            );
-            self.forward_create_table_to_coordinator(schema, partition_strategy)
-                .await
+        let table_name = schema.name.clone();
+
+        // 1. 构建 TableMeta
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let table_meta = TableMeta {
+            table_name: table_name.clone(),
+            schema: schema.clone(),
+            partition_strategy: partition_strategy.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let table_info = self.catalog.create_table(table_meta).await?;
+
+        let partitions = table_info
+            .table
+            .partition_strategy
+            .generate_partitions()
+            .unwrap_or_else(Vec::new);
+
+        let idle_nodes = match self.cluster_manager.as_ref() {
+            Some(cm) => cm.idle_nodes().await,
+            None => vec![keys::SINGLE_NODE_CLUSTER_ID.to_string()],
+        };
+
+        let mut start = 0;
+
+        for partition_name in &partitions {
+            // 创建 partition 目录和元数据
+
+            let node = idle_nodes.get(start % idle_nodes.len()).unwrap();
+
+            self.new_client(node)
+                .await?
+                .create_partition(
+                    tarpc::context::current(),
+                    table_name.clone(),
+                    partition_name.clone(),
+                )
+                .await?;
         }
+
+        // // 添加到缓存
+        // {
+        //     let mut partitions_map: HashMap<String, PartitionMeta> = HashMap::new();
+        //     for name in &partitions {
+        //         let partition_meta = match self.load_partition_meta(&table_name, name).await {
+        //             Ok(meta) => meta,
+        //             Err(_) => PartitionMeta::new(name.clone()),
+        //         };
+        //         partitions_map.insert(name.clone(), partition_meta);
+        //     }
+
+        //     let table_info = TableInfo {
+        //         table: meta,
+        //         partitions: RwLock::new(partitions_map),
+        //     };
+        //     let mut tables = self.tables.write().await;
+        //     tables.insert(table_name.clone(), Arc::new(table_info));
+        // }
+
+        match &self.cluster_manager {
+            Some(cm) => {
+                log::info!(
+                    "📋 [CoordNode] Created table '{}' with {} partitions",
+                    table_name,
+                    partitions.len()
+                );
+
+                let idle_nodes = cm.idle_nodes().await;
+
+                if idle_nodes.is_empty() {
+                    let msg = format!(
+                        "⚠️  No idle nodes available to assign partitions for table '{}'",
+                        table_name
+                    );
+                    log::error!("{}", msg);
+                    return Err(CoreError::ClusterState(msg));
+                }
+            }
+            None => {
+                log::info!(
+                    "📋 [Standalone] Created table '{}' with {} partitions",
+                    table_name,
+                    partitions.len()
+                );
+            }
+        }
+
+        for partition_name in partitions {
+            match self.cluster_manager.as_ref() {
+                Some(cm) => {
+                    let idle_nodes = cm.idle_nodes().await;
+                    if idle_nodes.is_empty() {
+                        log::warn!(
+                            "⚠️  No idle nodes available to assign partition '{}/{}'",
+                            table_name,
+                            partition_name
+                        );
+                        continue;
+                    }
+                    let selected_node = &idle_nodes[0];
+                    self.catalog
+                        .set_partition_owner(&table_name, &partition_name, &selected_node)
+                        .map_err(|e| {
+                            CoreError::Internal(format!(
+                                "Failed to set partition owner for '{}/{}': {}",
+                                table_name, partition_name, e
+                            ))
+                        })?;
+                    log::info!(
+                        "✅ Assigned partition '{}/{}' to node '{}'",
+                        table_name,
+                        partition_name,
+                        selected_node
+                    );
+                }
+                None => {
+                    log::info!(
+                        "ℹ️  Standalone mode, skipping partition assignment for '{}/{}'",
+                        table_name,
+                        partition_name
+                    );
+                }
+            }
+        }
+
+        log::info!("✅ Table '{}' created successfully", table_name);
+        Ok(())
     }
 
     async fn drop_table(self, _ctx: Context, table_name: String) -> Result<(), CoreError> {

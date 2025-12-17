@@ -7,9 +7,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::engine::PersistRequest;
 use crate::utils::error::CoreResult;
 
-use super::domain::PersistRequest;
 use super::Engine;
 
 impl Engine {
@@ -64,33 +64,31 @@ impl Engine {
     /// 持久化整个表的所有 partition
     ///
     /// 这是一个同步操作：调用后，该表的所有 partition 的所有 segment 保证已持久化完毕
-    pub async fn flush_table(
-        &self,
-        catalog: &crate::catalog::Catalog,
-        table_name: &str,
-    ) -> CoreResult<()> {
+    pub async fn flush_table(&self, table_name: &str) -> CoreResult<()> {
         log::info!("🔄 Flushing table '{}'...", table_name);
 
         // 1. 获取表的元数据以确定有多少个 partition
-        let meta = catalog.get_table(table_name)?;
-        let num_partitions = meta.num_partitions().unwrap_or(1);
+
+        let partition_names = self
+            .partitions
+            .read()
+            .await
+            .keys()
+            .filter(|(t, _)| t == table_name)
+            .map(|(_, p)| p.to_string())
+            .collect_vec();
 
         log::info!(
             "🔍 Table '{}' has {} partitions",
             table_name,
-            num_partitions
+            partition_names.len()
         );
 
         // 2. 持久化所有 partition
         let mut success_count = 0;
         let mut error_count = 0;
 
-        let partition_names = match meta.partition_strategy.generate_partitions() {
-            Some(names) => names,
-            None => vec!["partition_000000000000000000".to_string()],
-        };
-
-        for partition_name in partition_names {
+        for partition_name in &partition_names {
             match self.persist_partition(table_name, &partition_name).await {
                 Ok(_) => {
                     success_count += 1;
@@ -115,7 +113,9 @@ impl Engine {
         if error_count > 0 {
             Err(crate::utils::error::CoreError::Internal(format!(
                 "Failed to flush {} out of {} partitions for table '{}'",
-                error_count, num_partitions, table_name
+                error_count,
+                partition_names.len(),
+                table_name
             )))
         } else {
             log::info!(

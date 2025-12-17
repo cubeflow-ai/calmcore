@@ -21,19 +21,11 @@ use chitchat::{
 };
 use tokio::sync::Mutex;
 
-use crate::cluster::node_manager::NodeManager;
-use crate::cluster::PartitionManager;
 use crate::config::cluster::ClusterSettings;
 use crate::config::Config;
 use crate::utils::error::{CoreError, CoreResult};
 
 use crate::cluster::keys::*;
-
-pub struct PartitionRouter {
-    pub table_name: String,
-    pub partition_name: String,
-    pub owner_node_id: String,
-}
 
 pub struct GossipManager {
     chitchat_handle: ChitchatHandle,
@@ -169,6 +161,22 @@ impl GossipManager {
         values
     }
 
+    pub async fn find_all_by_prefix(&self, prefix: &str) -> HashMap<String, String> {
+        let chitchat = self.chitchat();
+        let guard = chitchat.lock().await;
+        let mut result = HashMap::new();
+
+        // Check all nodes' states
+        for (_chitchat_id, node_state) in guard.node_states() {
+            for (key, value) in node_state.key_values() {
+                if key.starts_with(prefix) {
+                    result.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+        result
+    }
+
     /// Set key-value in Gossip state
     ///
     /// # Requirements
@@ -198,5 +206,19 @@ impl GossipManager {
         guard.self_node_state().delete(key);
         log::debug!("🗑️  [Gossip] Deleted key: {}", key);
         Ok(())
+    }
+
+    pub async fn find_local_by_prefix(&self, prefix: &str) -> HashMap<String, String> {
+        let chitchat = self.chitchat();
+        let guard = chitchat.lock().await;
+        let mut result = HashMap::new();
+
+        for (key, value) in guard.self_node_state().key_values() {
+            if key.starts_with(prefix) {
+                result.insert(key.to_string(), value.to_string());
+            }
+        }
+
+        result
     }
 }

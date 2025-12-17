@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/ddl_macros"]
+
 [package]
 name = "calm"
 version = "0.1.0"
@@ -5,6 +8,7 @@ edition = "2021"
 default-run = "calm"
 
 [dependencies]
+ddl_macros = { path = "crates/ddl_macros" }
 version_macro = "0.1.0"
 futures = "0.3"
 log = "0.4.16"
