@@ -469,15 +469,10 @@ impl SegmentScanner {
             .map_err(|e| CoreError::Internal(format!("Failed to filter batch: {}", e)))
     }
 
-    /// 获取指定范围内的有效文档（未删除）
     fn get_valid_docs_in_range(&self, start: u32, end: u32) -> RoaringBitmap {
-        let mut valid = RoaringBitmap::new();
-        for doc_id in start..end {
-            if self.valid_docs.contains(doc_id) {
-                valid.insert(doc_id);
-            }
-        }
-        valid
+        let mut range_bitmap = RoaringBitmap::new();
+        range_bitmap.insert_range(start..end);
+        &self.valid_docs & &range_bitmap
     }
 
     /// 根据 bitmap 过滤 RecordBatch

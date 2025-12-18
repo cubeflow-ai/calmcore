@@ -10,7 +10,7 @@ echo "Creating table 'r2api' at $GRAPHQL_URL..."
 curl -X POST "$GRAPHQL_URL" \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "mutation { createTable(input: { name: \"r2api\", partitionCount: 3, fields: [ { name: \"trace_id\", fieldType: KEYWORD, indexed: true, caseSensitive: true }, { name: \"data_path\", fieldType: KEYWORD, indexed: true, caseSensitive: true }, { name: \"app_name\", fieldType: KEYWORD, indexed: true, caseSensitive: true }, { name: \"data\", fieldType: KEYWORD, indexed: false, caseSensitive: false } ], partitionStrategy: { strategyType: CUSTOM } }) { name partitionCount primaryKey fields { name fieldType indexed } } }"
+    "query": "mutation { createTable(input: { name: \"r2api\", fields: [ { name: \"trace_id\", fieldType: KEYWORD, indexed: true, caseSensitive: true }, { name: \"data_path\", fieldType: KEYWORD, indexed: true, caseSensitive: true }, { name: \"app_name\", fieldType: KEYWORD, indexed: true, caseSensitive: true }, { name: \"data\", fieldType: KEYWORD, indexed: false, caseSensitive: false } ] }) { name partitionCount primaryKey fields { name fieldType indexed } } }"
   }' | python3 -m json.tool
 
 echo ""
