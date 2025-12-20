@@ -143,10 +143,8 @@ impl DDLServiceImpl {
                 log::info!(
                     "📋 [CoordNode] Created table '{}' with {} partitions",
                     table_name,
-                    partitions.len()
+                    partitions.partitions.read().await.len()
                 );
-                // publish table info to cluster
-                cm.put_table(&table_name).await;
 
                 let idle_nodes = cm.idle_nodes().await;
 

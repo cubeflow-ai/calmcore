@@ -91,9 +91,31 @@ pub async fn start_coord_job(
             }
 
             // 监听 partition key 变化
-            Some(envent) = rx.recv() => {
-                log::info!("🔑 [Cluster] Partition key changed: {}={} on {:?}", key, value, node);
+            Some(event) = rx.recv() => {
+                log::info!("🔑 [Cluster] gossip event: {:?}", event);
                 // 处理 partition 变化
+                match event {
+                    ClusterEvent::PartitionChanged { key, value, node } => {
+                        log::info!("🔑 [Cluster] Partition key changed: {}={} on {:?}", key, value, node);
+                        match keys::parse_partition_key(&key){
+                            Ok((table, partition, version)) => {
+                                if let Err(e) = service.ddl.change_partition_route(&table, &partition, &node, version).await {
+                                    log::warn!("⚠️  Failed to change partition route: table={}, partition={}, node={}, version={}, err={}", table, partition, node, version, e);
+                                }
+                            },
+                            Err(e) => {
+                                log::warn!("⚠️  Failed to parse partition key: {} err:{}", key,e);
+                            }
+                        }
+
+                    }
+                    ClusterEvent::CoordNodeChanged { value, node } => {
+                        log::info!("🔑 [Cluster] Coord node changed: {} on {:?}", value, node);
+                        if let Err(e) = cm.change_coord_node(&value).await {
+                            log::warn!("⚠️  Failed to set coord node: {}. Retrying...", e);
+                        }
+                    }
+                }
             }
 
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {
