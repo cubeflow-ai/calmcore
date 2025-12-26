@@ -311,17 +311,6 @@ impl Config {
                         return Err("Missing value for --gossip-port".into());
                     }
                 }
-                "--internal-port" => {
-                    if i + 1 < args.len() {
-                        config
-                            .cluster
-                            .get_or_insert_with(ClusterSettings::default)
-                            .internal_port = args[i + 1].parse()?;
-                        i += 2;
-                    } else {
-                        return Err("Missing value for --internal-port".into());
-                    }
-                }
                 "--seed-nodes" => {
                     if i + 1 < args.len() {
                         config
@@ -395,7 +384,7 @@ impl Config {
             config
                 .cluster
                 .get_or_insert_with(ClusterSettings::default)
-                .internal_port = val.parse()?;
+                .gossip_port = val.parse()?;
         }
         if let Ok(val) = std::env::var("CALM_SEED_NODES") {
             config
@@ -473,7 +462,7 @@ impl Config {
         println!("    CALM_NODE_ID                   节点 ID");
         println!("    CALM_CLUSTER_ID                集群 ID");
         println!("    CALM_GOSSIP_PORT               Gossip 监听端口");
-        println!("    CALM_INTERNAL_PORT             内部 RPC 服务端口");
+        println!("    CALM_SEED_NODES                种子节点列表（逗号分隔）");
         println!("    CALM_SEED_NODES                种子节点列表 (逗号分隔)");
         println!();
         println!("EXAMPLES:");
@@ -513,23 +502,11 @@ impl Config {
         Ok(())
     }
 
-    pub fn internal_addr(&self) -> CoreResult<String> {
-        let host = self
-            .host
-            .as_ref()
-            .ok_or_else(|| CoreError::ConfigError("Host not configured".to_string()))?;
-        if let Some(cluster_cfg) = &self.cluster {
-            Ok(format!("{}:{}", host, cluster_cfg.internal_port))
-        } else {
-            Err(CoreError::ConfigError("Cluster config missing".to_string()))
-        }
-    }
-
     pub fn internal_socket_addr(&self) -> CoreResult<SocketAddr> {
-        let addr_str = self.internal_addr()?;
-        addr_str.parse().map_err(|e| {
-            CoreError::ConfigError(format!("Invalid internal address '{}': {}", addr_str, e))
-        })
+        // 不再需要，直接返回错误
+        Err(CoreError::ConfigError(
+            "internal_socket_addr deprecated, use gRPC port".to_string(),
+        ))
     }
 
     pub fn gossip_addr(&self) -> CoreResult<SocketAddr> {

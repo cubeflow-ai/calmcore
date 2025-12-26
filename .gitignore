@@ -32,3 +32,4 @@ test_data
 logs/*
 test_suite/logs
 test_suite/logs/*
+deploy/cluster/calm

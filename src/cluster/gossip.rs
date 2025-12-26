@@ -88,10 +88,7 @@ impl GossipManager {
 
         if is_seed {
             // Seed nodes start immediately without waiting
-            log::info!("🌱 [Cluster] Starting as SEED node (will not wait for other seeds)");
             log::info!("🔗 [Cluster] Will accept connections from other nodes...");
-
-            tokio::time::sleep(Duration::from_secs(15)).await; // Give time to start
         } else {
             // Regular nodes must wait for seed nodes
             log::info!("🔗 [Cluster] Starting as WORKER node, connecting to seed nodes...");
@@ -190,8 +187,7 @@ impl GossipManager {
 
     pub async fn get(&self, key: &str) -> Option<String> {
         let chitchat = self.chitchat();
-        let guard = chitchat.lock().await;
-
+        let mut guard = chitchat.lock().await;
         // First check local state
         if let Some(value) = guard.self_node_state().get(key) {
             return Some(value.to_string());
@@ -210,7 +206,7 @@ impl GossipManager {
 
     pub async fn find_local_by_prefix(&self, prefix: &str) -> HashMap<String, String> {
         let chitchat = self.chitchat();
-        let guard = chitchat.lock().await;
+        let mut guard = chitchat.lock().await;
         let mut result = HashMap::new();
 
         for (key, value) in guard.self_node_state().key_values() {

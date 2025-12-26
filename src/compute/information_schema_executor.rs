@@ -12,16 +12,28 @@ use datafusion::prelude::*;
 use futures::stream;
 use std::sync::Arc;
 
+use crate::catalog::Catalog;
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
 pub struct InformationSchemaExecutor {
     engine: Arc<Engine>,
+    catalog: Option<Arc<Catalog>>,
 }
 
 impl InformationSchemaExecutor {
-    pub fn new(engine: Arc<Engine>) -> Self {
-        Self { engine }
+    pub fn new(engine: Arc<Engine>, catalog: Arc<Catalog>) -> Self {
+        Self {
+            engine,
+            catalog: Some(catalog),
+        }
+    }
+
+    pub fn new_simple(engine: Arc<Engine>) -> Self {
+        Self {
+            engine,
+            catalog: None,
+        }
     }
 
     /// 执行 INFORMATION_SCHEMA 查询（流式）
@@ -83,7 +95,7 @@ impl InformationSchemaExecutor {
         let ctx = SessionContext::new_with_config(config);
 
         // 注册虚拟表
-        self.register_tables(&ctx, &db_name)?;
+        self.register_tables(&ctx, &db_name).await?;
 
         // SQL 重写
         let rewritten_sql = self.rewrite_sql(sql);
@@ -106,7 +118,7 @@ impl InformationSchemaExecutor {
     }
 
     /// 注册虚拟表
-    fn register_tables(&self, ctx: &SessionContext, db_name: &str) -> CoreResult<()> {
+    async fn register_tables(&self, ctx: &SessionContext, db_name: &str) -> CoreResult<()> {
         let tables_schema = Arc::new(Schema::new(vec![
             Field::new("table_catalog", DataType::Utf8, true),
             Field::new("table_schema", DataType::Utf8, false),
@@ -143,7 +155,12 @@ impl InformationSchemaExecutor {
             Field::new("table_comment", DataType::Utf8, true),
         ]));
 
-        let table_names = self.engine.list_tables();
+        // 使用 catalog 的 list_tables 方法
+        let table_names = if let Some(catalog) = &self.catalog {
+            catalog.list_tables().await
+        } else {
+            vec![]
+        };
         let row_count = table_names.len();
 
         let tables_batch = RecordBatch::try_new(
@@ -281,7 +298,11 @@ impl InformationSchemaExecutor {
         log::info!("🎯 [JDBC getTables] Schema: {}", db_name);
 
         // 获取所有表名
-        let table_names = self.engine.list_tables();
+        let table_names = if let Some(catalog) = &self.catalog {
+            catalog.list_tables().await
+        } else {
+            vec![] // fallback
+        };
 
         // 过滤：只返回匹配 schema 的表
         // 注意：这里假设 table_name 本身就是 schema 名（taxi_trips）
@@ -353,8 +374,12 @@ impl InformationSchemaExecutor {
     async fn execute_jdbc_get_columns_empty(&self) -> CoreResult<RecordBatch> {
         log::info!("🎯 [JDBC getColumns] Fetching column information");
 
-        // 从 Engine 获取所有表的 schema
-        let tables = self.engine.list_tables();
+        // 从 Catalog 获取所有表的 schema
+        let tables = if let Some(catalog) = &self.catalog {
+            catalog.list_tables().await
+        } else {
+            vec![]
+        };
 
         // 准备结果数据
         let mut table_cats: Vec<Option<String>> = Vec::new();
@@ -387,15 +412,19 @@ impl InformationSchemaExecutor {
         // 遍历所有表并获取列信息
         for table_name in &tables {
             // 获取表的 schema
-            let table = match self.engine.get_table_meta(table_name).await {
-                Ok(table) => table,
-                Err(_) => continue, // 跳过无法获取 schema 的表
+            let table = if let Some(catalog) = &self.catalog {
+                match catalog.get_or_load_table(table_name).await {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                }
+            } else {
+                continue;
             };
 
-            let schema = &table.schema;
+            let schema = &table.table.schema;
 
             // 遍历所有字段
-            for (ordinal, field) in table_schema.fields.iter().enumerate() {
+            for (ordinal, field) in schema.fields.iter().enumerate() {
                 // 使用表名作为数据库名（CalmCore 是单数据库系统）
                 let db_name = table_name.to_string();
 

@@ -736,13 +736,10 @@ impl Partition {
         let partition_path = base_dir_str;
         if !std::path::Path::new(&partition_path).exists() {
             // No persisted data, create new partition
-            return Ok(Self::new(
-                id,
-                table_name,
-                base_dir,
-                schema.as_ref().clone(),
-                persist_notify,
-            ));
+            return Err(CoreError::NotExisted(format!(
+                "Partition path does not exist: {}",
+                partition_path
+            )));
         }
 
         // 1.5. Crash recovery: Clean up incomplete persists and complete file replacements

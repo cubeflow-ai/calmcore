@@ -1,17 +1,14 @@
 use calm::{
-    catalog::Catalog,
-    cluster::{ClusterManager, PartitionManager},
+    calm::CalmService,
     config::Config,
-    engine::Engine,
     protocol::graphql::{self, GraphQLServer},
-    service::CalmService, // protocol::{elasticsearch::ElasticsearchServer, graphql::GraphQLServer, mysql::MysqlServer},
 };
 use std::io::Write;
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::from_args()?;
+    let mut config = Config::from_args()?;
 
     init_logger(&config)?;
 
@@ -26,20 +23,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔨 Build time: {}", version_macro::build_time!());
     println!();
     println!("📁 Data directory: {:?}", config.engine.data_dir);
-    println!("🌐 Host: {}", config.host);
+    println!("🌐 Host: {:?}", config.host);
     println!();
 
     let (graphql_port, mysql_port, es_port) =
         (config.graphql_port, config.mysql_port, config.es_port);
 
-    let calm_service = Arc::new(CalmService::new(config));
+    let calm_service = CalmService::new(config.clone()).await?;
 
     // 存储服务器任务句柄
     let mut handles = Vec::new();
 
     // 启动 GraphQL 服务
     if let Some(port) = graphql_port {
-        let addr = format!("{}:{}", config.host, port);
+        let addr = format!(
+            "{}:{}",
+            config.host.as_ref().unwrap_or(&"0.0.0.0".to_string()),
+            port
+        );
         println!("🚀 Starting GraphQL server on {}", addr);
         println!("   GraphQL Playground: http://{}", addr);
         let service = calm_service.clone();

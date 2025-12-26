@@ -31,9 +31,9 @@ check_after_flush = true
 [cluster]
 node_id = "node2"
 cluster_id = "calm-test-cluster"
-gossip_port = 7948
-internal_port = 7949
-seed_nodes = ["127.0.0.1:7946"]  # 连接到节点1的gossip端口
+internal_port = 7951
+gossip_port = 7947
+seed_nodes = ["127.0.0.1:7946"]
 gossip_interval_ms = 500
 failure_timeout_secs = 10
 suspect_timeout_secs = 10
@@ -42,9 +42,9 @@ min_cluster_size = 2
 
 # 分布式查询配置
 [cluster.distributed]
+grpc_port = 52002
 query_timeout_ms = 30000
 shuffle_buffer_size = 10000
 max_concurrent_queries = 100
-rpc_port = 7949
 connect_timeout_ms = 5000
 request_timeout_ms = 30000

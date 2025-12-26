@@ -19,30 +19,26 @@ max_files = 10
 
 # 引擎配置
 [engine]
-data_dir = "./data/node2"
+data_dir = "./data/"
 persist_check_interval_secs = 60
 max_concurrent_persists = 4
 check_after_flush = true
 
 # 集群配置
 [cluster]
-node_id = "node-2"
 cluster_id = "calmcore-cluster"
-listen_addr = "0.0.0.0:7947"
-seed_nodes = [
-    "127.0.0.1:7946", # Node 1 (种子节点)
-]
+gossip_port = 7947
+internal_port = 7951
+seed_nodes = ["127.0.0.1:7946"]
 gossip_interval_ms = 500
 failure_timeout_secs = 10
 suspect_timeout_secs = 10
-vote_timeout_secs = 10
-min_cluster_size = 2
 
 # 分布式查询配置
 [cluster.distributed]
+grpc_port = 52002
 query_timeout_ms = 30000
 shuffle_buffer_size = 10000
 max_concurrent_queries = 100
-rpc_port = 7951
 connect_timeout_ms = 5000
 request_timeout_ms = 30000

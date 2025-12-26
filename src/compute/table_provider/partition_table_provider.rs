@@ -416,7 +416,7 @@ pub fn create_multi_segment_exec(
 }
 
 impl MultiSegmentExec {
-    fn new(
+    pub fn new(
         schema: SchemaRef,
         segment_scanners: Vec<SegmentScanner>,
         filters: Vec<Expr>,
@@ -449,6 +449,23 @@ impl MultiSegmentExec {
             limit,
             properties,
         }
+    }
+
+    /// Get number of segments
+    pub fn num_segments(&self) -> usize {
+        self.segment_scanners.len()
+    }
+
+    /// Get projection
+    pub fn projection(&self) -> Vec<usize> {
+        self.projection.clone().unwrap_or_else(|| {
+            (0..self.schema.fields().len()).collect()
+        })
+    }
+
+    /// Get limit
+    pub fn limit(&self) -> Option<usize> {
+        self.limit
     }
 }
 

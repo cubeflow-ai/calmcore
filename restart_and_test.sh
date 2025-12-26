@@ -11,7 +11,7 @@ sleep 1
 # 启动新服务
 cd /Users/sunjian11/rustworkspace/calmcore
 echo "🚀 启动服务..."
-./target/release/calm mysql --port 3307 > /tmp/calm_mysql.log 2>&1 &
+./target/release/calm --mysql-port 3307 --no-graphql --no-es > /tmp/calm_mysql.log 2>&1 &
 
 sleep 2
 

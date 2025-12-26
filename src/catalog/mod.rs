@@ -119,11 +119,7 @@ impl Catalog {
     }
 
     pub fn partition_dir(&self, table_name: &str, partition_name: &str) -> PathBuf {
-        self.work_dir
-            .join("tables")
-            .join(table_name)
-            .join("partitions")
-            .join(partition_name)
+        dir::partition_dir(&self.work_dir, table_name, partition_name)
     }
 
     pub async fn load_partitions(&self, table_name: &str) -> CoreResult<Vec<PartitionMeta>> {
@@ -246,7 +242,12 @@ impl Catalog {
     /// =========================================== partiton operations ===========================================
 
     /// 创建 partition 目录和元数据
-    pub async fn create_partition(&self, table_name: &str, partition_name: &str) -> CoreResult<()> {
+    pub async fn create_partition(
+        &self,
+        table_name: &str,
+        partition_name: &str,
+        owner: &str,
+    ) -> CoreResult<()> {
         // partition 目录直接在 table_dir 下，不需要额外的 segments 子目录
         let partition_dir = dir::partition_dir(&self.work_dir, table_name, partition_name);
 
@@ -260,7 +261,7 @@ impl Catalog {
         })?;
 
         // 创建 partition 元数据
-        let partition_meta = PartitionMeta::new(partition_name.to_string());
+        let partition_meta = PartitionMeta::new(partition_name.to_string(), owner.to_string());
         let meta_path = partition_dir.join("meta.json");
         let content = serde_json::to_string_pretty(&partition_meta).map_err(|e| {
             CoreError::IOError(format!("Failed to serialize partition meta: {}", e))
@@ -273,6 +274,13 @@ impl Catalog {
                 e
             ))
         })?;
+
+        // 更新内存中的 table_info.partitions
+        let table_info = self.get_or_load_table(table_name).await?;
+        table_info.partitions.write().await.insert(
+            partition_name.to_string(),
+            partition_meta.clone(),
+        );
 
         log::info!(
             "Created partition directory: {} (name: {})",
@@ -390,7 +398,7 @@ impl Catalog {
             node_id,
             version
         );
-        partition.owner = Some(node_id.to_string());
+        partition.owner = node_id.to_string();
         partition.updated_at = version;
 
         Ok(())
@@ -425,12 +433,20 @@ impl Catalog {
         node_id: &str,
     ) -> CoreResult<()> {
         let tables = self.tables.read().await;
-        if let Some(table_info) = tables.get(table_name) {
-            let mut partitions = table_info.partitions.write().await;
-            if let Some(partition) = partitions.get_mut(partition_name) {
-                partition.owner = Some(node_id.to_string());
-            }
-        }
+        let table_info = tables
+            .get(table_name)
+            .ok_or_else(|| CoreError::NotExisted(format!("Table '{}' not found", table_name)))?;
+
+        let mut partitions = table_info.partitions.write().await;
+        let partition = partitions.get_mut(partition_name).ok_or_else(|| {
+            CoreError::NotExisted(format!(
+                "Partition '{}' not found in table '{}'",
+                partition_name, table_name
+            ))
+        })?;
+
+        partition.owner = node_id.to_string();
+
         log::debug!(
             "📍 Partition route set: {}:{} -> {}",
             table_name,
@@ -441,20 +457,25 @@ impl Catalog {
     }
 
     /// 获取分区所属节点
-    ///
-    /// 返回 None 表示分区尚未分配节点
     pub async fn get_partition_owner(
         &self,
         table_name: &str,
         partition_name: &str,
-    ) -> Option<String> {
+    ) -> CoreResult<String> {
         let tables = self.tables.read().await;
-        if let Some(table_info) = tables.get(table_name) {
-            let partitions = table_info.partitions.read().await;
-            partitions.get(partition_name).and_then(|p| p.owner.clone())
-        } else {
-            None
-        }
+        let table_info = tables
+            .get(table_name)
+            .ok_or_else(|| CoreError::NotExisted(format!("Table '{}' not found", table_name)))?;
+
+        let partitions = table_info.partitions.read().await;
+        let partition = partitions.get(partition_name).ok_or_else(|| {
+            CoreError::NotExisted(format!(
+                "Partition '{}' not found in table '{}'",
+                partition_name, table_name
+            ))
+        })?;
+
+        Ok(partition.owner.clone())
     }
 
     /// 获取表的所有分区名称
@@ -467,6 +488,17 @@ impl Catalog {
             Ok(partitions.keys().cloned().collect())
         } else {
             Ok(Vec::new())
+        }
+    }
+
+    pub async fn get_table_info(&self, table_name: &str) -> CoreResult<Arc<TableInfo>> {
+        let tables = self.tables.read().await;
+        match tables.get(table_name) {
+            Some(info) => Ok(info.clone()),
+            None => Err(CoreError::NotExisted(format!(
+                "table '{}' not found",
+                table_name
+            ))),
         }
     }
 }

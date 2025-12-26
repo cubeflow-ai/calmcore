@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
-use async_graphql::{Context, EmptySubscription, Object, Result, Schema, SimpleObject};
+use async_graphql::{Context, EmptySubscription, Json, Object, Result, Schema, SimpleObject};
 use poem::{
     get, handler, listener::TcpListener, middleware::Cors, post, EndpointExt, Route, Server,
 };
 use serde_json::Value as JsonValue;
 
 use crate::{
+    calm::{CalmRpcService, CalmService, TableDetail},
     catalog::PartitionStrategy,
     schema::{field::FieldOption, PersistPolicy, Schema as CalmSchema},
-    service::{ddl::DDLService, CalmService},
-    utils::arrow_utils,
 };
 
 /// GraphQL Schema for database operations
@@ -949,61 +948,6 @@ pub struct SegmentInfo {
     pub external_data_path: Option<String>,
 }
 
-/// 表详细信息(返回)
-///
-/// `tableDetail(name: String)` 查询的返回类型,包含表的完整结构和所有分区/段信息。
-///
-/// # MCP 提示
-///
-/// **字段说明:**
-/// - `name`: 表名
-/// - `partition_count`: 分区数量
-/// - `total_segments`: 所有分区的段总数
-/// - `total_documents`: 所有分区的有效文档总数 (doc_count - deleted_count)
-/// - `fields`: 字段列表
-/// - `primary_key`: 主键字段
-/// - `partitions`: 所有分区的详细信息
-///
-/// **使用场景:**
-/// - 诊断表的整体健康状况
-/// - 查看数据分布和持久化状态
-/// - 计算存储空间使用
-///
-/// **查询示例:**
-/// ```graphql
-/// query {
-///   tableDetail(name: "users") {
-///     name
-///     total_documents
-///     partitions {
-///       partition_id
-///       segments {
-///         segment_id
-///         doc_count
-///         is_persisted
-///       }
-///     }
-///   }
-/// }
-/// ```
-#[derive(SimpleObject)]
-pub struct TableDetail {
-    /// 表名
-    pub name: String,
-    /// 分区数
-    pub partition_count: usize,
-    /// 段总数
-    pub total_segments: usize,
-    /// 有效文档总数
-    pub total_documents: u64,
-    /// 字段列表
-    pub fields: Vec<Field>,
-    /// 主键字段
-    pub primary_key: Option<String>,
-    /// 分区详情
-    pub partitions: Vec<PartitionInfo>,
-}
-
 #[derive(async_graphql::InputObject)]
 pub struct InsertDataInput {
     /// 表名
@@ -1115,161 +1059,10 @@ impl QueryRoot {
     /// ```
     async fn tables(&self, ctx: &Context<'_>) -> Result<Vec<String>> {
         let service = ctx.data::<Arc<CalmService>>()?.clone();
-        Ok(service
-            .ddl_service()
-            .clone()
-            .list_tables(tarpc::context::current())
-            .await?)
-    }
-
-    /// 获取表的基本信息
-    ///
-    /// 根据表名查询表的基本结构,包括字段列表、分区数等。
-    ///
-    /// # MCP 提示
-    ///
-    /// **参数:** `name` - 表名
-    /// **返回:** `Table` 对象或 `null`(表不存在)
-    ///
-    /// **示例:**
-    /// ```graphql
-    /// query {
-    ///   table(name: "users") {
-    ///     name
-    ///     partition_count
-    ///     primary_key
-    ///     fields {
-    ///       name
-    ///       field_type
-    ///       indexed
-    ///     }
-    ///   }
-    /// }
-    /// ```
-    async fn table(&self, ctx: &Context<'_>, name: String) -> Result<Option<Table>> {
-        let service = ctx.data::<Arc<CalmService>>()?;
-
-        let meta = match service
-            .ddl_service()
-            .clone()
-            .get_table_meta(tarpc::context::current(), name.clone())
-            .await
-        {
-            Ok(meta) => meta,
-            Err(_) => return Ok(None),
-        };
-
-        let fields = meta
-            .schema
-            .fields
-            .iter()
-            .map(|f| {
-                let field_type = match f {
-                    FieldOption::Keyword { .. } => "keyword",
-                    FieldOption::I64 { .. } => "i64",
-                    FieldOption::F64 { .. } => "f64",
-                    FieldOption::Boolean { .. } => "boolean",
-                    FieldOption::I32 { .. } => "i32",
-                    FieldOption::F32 { .. } => "f32",
-                    FieldOption::Timestamp { .. } => "timestamp",
-                    _ => "unknown",
-                };
-
-                Field {
-                    name: f.name().to_string(),
-                    field_type: field_type.to_string(),
-                    indexed: f.is_index(),
-                }
-            })
-            .collect();
-
-        Ok(Some(Table {
-            name: meta.schema.name.clone(),
-            partition_count: meta.num_partitions().unwrap_or(1) as u64,
-            fields,
-            primary_key: meta.schema.primary_key.clone(),
-        }))
-    }
-
-    /// 获取表的所有分区信息
-    ///
-    /// 查询表的所有分区及其段的详细状态。
-    ///
-    /// # MCP 提示
-    ///
-    /// **参数:** `table` - 表名
-    /// **返回:** 分区信息数组
-    ///
-    /// **用途:** 诊断数据分布、查看持久化状态
-    ///
-    /// **示例:**
-    /// ```graphql
-    /// query {
-    ///   partitions(table: "users") {
-    ///     partition_id
-    ///     segment_count
-    ///     segments {
-    ///       segment_id
-    ///       doc_count
-    ///       is_persisted
-    ///     }
-    ///   }
-    /// }
-    /// ```
-    async fn partitions(&self, ctx: &Context<'_>, table: String) -> Result<Vec<PartitionInfo>> {
-        let service = ctx.data::<Arc<CalmService>>()?;
-
-        // 获取表的所有分区 ID
-        let partition_ids = service
-            .ddl_service()
-            .clone()
-            .list_partitions(tarpc::context::current(), table.clone())
-            .await?;
-
-        let mut partition_infos = Vec::new();
-
-        for partition_id in partition_ids {
-            // 通过 DDLService RPC 获取分区详情（会自动路由到正确的节点）
-            match service
-                .ddl_service()
-                .clone()
-                .get_partition_detail(
-                    tarpc::context::current(),
-                    table.clone(),
-                    partition_id.clone(),
-                )
-                .await
-            {
-                Ok(detail) => {
-                    let segments = detail
-                        .segments
-                        .into_iter()
-                        .map(|s| SegmentInfo {
-                            segment_id: s.segment_id,
-                            doc_count: s.doc_count,
-                            deleted_count: s.deleted_count,
-                            is_persisted: s.is_persisted,
-                            base_path: s.base_path,
-                            is_external_reference: s.is_external_reference,
-                            external_data_path: s.external_data_path,
-                        })
-                        .collect::<Vec<_>>();
-
-                    partition_infos.push(PartitionInfo {
-                        partition_id,
-                        segment_count: segments.len(),
-                        segments,
-                    });
-                }
-                Err(e) => {
-                    log::error!("Failed to get partition detail: {}", e);
-                    // 跳过失败的分区
-                    continue;
-                }
-            }
-        }
-
-        Ok(partition_infos)
+        Ok(
+            CalmRpcService::list_tables(Arc::as_ref(&service).clone(), tarpc::context::current())
+                .await?,
+        )
     }
 
     /// 获取表的完整详情(包括分区和段)
@@ -1302,108 +1095,24 @@ impl QueryRoot {
     ///   }
     /// }
     /// ```
-    async fn table_detail(&self, ctx: &Context<'_>, name: String) -> Result<Option<TableDetail>> {
+    async fn table_detail(
+        &self,
+        ctx: &Context<'_>,
+        name: String,
+    ) -> Result<Option<Json<TableDetail>>> {
         let service = ctx.data::<Arc<CalmService>>()?;
 
-        let meta = match service
-            .ddl_service()
-            .clone()
-            .get_table_meta(tarpc::context::current(), name.clone())
-            .await
+        let table_detail = match CalmRpcService::get_table_detail(
+            Arc::as_ref(&service).clone(),
+            tarpc::context::current(),
+            name.clone(),
+        )
+        .await
         {
             Ok(meta) => meta,
             Err(_) => return Ok(None),
         };
-
-        let fields = meta
-            .schema
-            .fields
-            .iter()
-            .map(|f| {
-                let field_type = match f {
-                    FieldOption::Keyword { .. } => "keyword",
-                    FieldOption::I64 { .. } => "i64",
-                    FieldOption::F64 { .. } => "f64",
-                    FieldOption::Boolean { .. } => "boolean",
-                    FieldOption::I32 { .. } => "i32",
-                    FieldOption::F32 { .. } => "f32",
-                    FieldOption::Timestamp { .. } => "timestamp",
-                    _ => "unknown",
-                };
-
-                Field {
-                    name: f.name().to_string(),
-                    field_type: field_type.to_string(),
-                    indexed: f.is_index(),
-                }
-            })
-            .collect();
-
-        let partition_ids = service
-            .ddl_service()
-            .clone()
-            .list_partitions(tarpc::context::current(), name.clone())
-            .await?;
-        let mut partition_infos = Vec::new();
-        let mut total_segments = 0;
-        let mut total_documents = 0u64;
-
-        for partition_id in partition_ids {
-            // 通过 DDLService RPC 获取分区详情（会自动路由到正确的节点）
-            match service
-                .ddl_service()
-                .clone()
-                .get_partition_detail(
-                    tarpc::context::current(),
-                    name.clone(),
-                    partition_id.clone(),
-                )
-                .await
-            {
-                Ok(detail) => {
-                    let segments = detail
-                        .segments
-                        .iter()
-                        .map(|s| SegmentInfo {
-                            segment_id: s.segment_id,
-                            doc_count: s.doc_count,
-                            deleted_count: s.deleted_count,
-                            is_persisted: s.is_persisted,
-                            base_path: s.base_path.clone(),
-                            is_external_reference: s.is_external_reference,
-                            external_data_path: s.external_data_path.clone(),
-                        })
-                        .collect::<Vec<_>>();
-
-                    // 统计文档数
-                    for seg in &segments {
-                        total_documents += (seg.doc_count as u64).saturating_sub(seg.deleted_count);
-                    }
-
-                    total_segments += segments.len();
-
-                    partition_infos.push(PartitionInfo {
-                        partition_id,
-                        segment_count: segments.len(),
-                        segments,
-                    });
-                }
-                Err(e) => {
-                    log::error!("Failed to get partition detail: {}", e);
-                    continue;
-                }
-            }
-        }
-
-        Ok(Some(TableDetail {
-            name: meta.schema.name.clone(),
-            partition_count: partition_infos.len(),
-            total_segments,
-            total_documents,
-            fields,
-            primary_key: meta.schema.primary_key.clone(),
-            partitions: partition_infos,
-        }))
+        Ok(Some(Json(table_detail)))
     }
 
     /// 执行 SQL 查询
@@ -1437,70 +1146,82 @@ impl QueryRoot {
     /// }
     /// ```
     async fn query(&self, ctx: &Context<'_>, sql: String) -> Result<QueryResult> {
-        todo!()
-        // let engine = ctx.data::<Arc<Engine>>()?;
+        use crate::utils::arrow_utils;
+        use futures::StreamExt;
 
-        // // 使用 Engine 的 execute_sql_stream 方法
-        // use futures::StreamExt;
-        // let mut stream = engine
-        //     .execute_sql_stream(&sql)
-        //     .await
-        //     .map_err(|e| async_graphql::Error::new(format!("Query failed: {}", e)))?;
+        log::info!("📊 [GraphQL Query] SQL: {}", sql);
 
-        // // Collect stream
-        // let mut batches = Vec::new();
-        // while let Some(batch_result) = stream.next().await {
-        //     let batch = batch_result
-        //         .map_err(|e| async_graphql::Error::new(format!("Stream error: {}", e)))?;
-        //     batches.push(batch);
-        // }
+        // 获取 CalmService
+        let service = ctx.data::<Arc<CalmService>>()?;
 
-        // if batches.is_empty() {
-        //     return Ok(QueryResult {
-        //         columns: vec![],
-        //         rows: vec![],
-        //         total_rows: 0,
-        //     });
-        // }
+        // 使用分布式查询执行器
+        let mut stream = service
+            .execute_query_stream(&sql)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Query failed: {}", e)))?;
 
-        // // 合并 batches
-        // let result = if batches.len() == 1 {
-        //     batches.into_iter().next().unwrap()
-        // } else {
-        //     use datafusion::arrow::compute::concat_batches;
-        //     let schema = batches[0].schema();
-        //     concat_batches(&schema, &batches).map_err(|e| {
-        //         async_graphql::Error::new(format!("Failed to concat batches: {}", e))
-        //     })?
-        // };
+        // 收集所有 RecordBatch
+        let mut batches = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result
+                .map_err(|e| async_graphql::Error::new(format!("Stream error: {}", e)))?;
+            batches.push(batch);
+        }
 
-        // if result.num_rows() == 0 {
-        //     return Ok(QueryResult {
-        //         columns: vec![],
-        //         rows: vec![],
-        //         total_rows: 0,
-        //     });
-        // }
+        if batches.is_empty() {
+            log::info!("✅ [GraphQL Query] No results");
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                total_rows: 0,
+            });
+        }
 
-        // // 获取列名
-        // let columns: Vec<String> = result
-        //     .schema()
-        //     .fields()
-        //     .iter()
-        //     .map(|f| f.name().clone())
-        //     .collect();
+        // 合并 batches
+        let result = if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            use datafusion::arrow::compute::concat_batches;
+            let schema = batches[0].schema();
+            concat_batches(&schema, &batches).map_err(|e| {
+                async_graphql::Error::new(format!("Failed to concat batches: {}", e))
+            })?
+        };
 
-        // // 转换为 JSON
-        // let rows = arrow_utils::record_batch_to_json(&result)
-        //     .map_err(|e| async_graphql::Error::new(format!("Failed to convert to JSON: {}", e)))?;
+        if result.num_rows() == 0 {
+            log::info!("✅ [GraphQL Query] Empty result set");
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                total_rows: 0,
+            });
+        }
 
-        // let total_rows = rows.len();
+        // 获取列名
+        let columns: Vec<String> = result
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
 
-        // Ok(QueryResult {
-        //     columns,
-        //     rows,
-        //     total_rows,
-        // })
+        // 转换为 JSON
+        let rows = arrow_utils::record_batch_to_json(&result)
+            .map_err(|e| async_graphql::Error::new(format!("Failed to convert to JSON: {}", e)))?;
+
+        let total_rows = rows.len();
+
+        log::info!(
+            "✅ [GraphQL Query] Returned {} rows, {} columns",
+            total_rows,
+            columns.len()
+        );
+
+        Ok(QueryResult {
+            columns,
+            rows,
+            total_rows,
+        })
     }
 }
 
@@ -1765,12 +1486,15 @@ impl MutationRoot {
                 (PartitionStrategy::None, 1)
             };
 
-        service
-            .ddl_service()
-            .clone()
-            .create_table(tarpc::context::current(), schema, partition_strategy)
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to create table: {}", e)))?;
+        // 直接调用 CalmService 的 create_table 方法
+        CalmRpcService::create_table(
+            Arc::as_ref(&service).clone(),
+            tarpc::context::current(),
+            schema,
+            partition_strategy,
+        )
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("Failed to create table: {}", e)))?;
 
         // 返回创建的表信息
         let field_info: Vec<Field> = fields
@@ -1822,12 +1546,13 @@ impl MutationRoot {
     /// ```
     async fn drop_table(&self, ctx: &Context<'_>, name: String) -> Result<bool> {
         let service = ctx.data::<Arc<CalmService>>()?;
-        service
-            .ddl_service()
-            .clone()
-            .drop_table(tarpc::context::current(), name)
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to drop table: {}", e)))?;
+        CalmRpcService::drop_table(
+            Arc::as_ref(service).clone(),
+            tarpc::context::current(),
+            name,
+        )
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("Failed to drop table: {}", e)))?;
         Ok(true)
     }
 
@@ -1854,12 +1579,13 @@ impl MutationRoot {
     async fn flush_table(&self, ctx: &Context<'_>, name: String) -> Result<bool> {
         let service = ctx.data::<Arc<CalmService>>()?;
 
-        service
-            .ddl_service()
-            .clone()
-            .flush_table(tarpc::context::current(), name)
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to flush table: {}", e)))?;
+        CalmRpcService::flush_table(
+            Arc::as_ref(service).clone(),
+            tarpc::context::current(),
+            name,
+        )
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("Failed to flush table: {}", e)))?;
 
         Ok(true)
     }
@@ -1914,113 +1640,65 @@ impl MutationRoot {
     /// }
     /// ```
     async fn insert_data(&self, ctx: &Context<'_>, input: InsertDataInput) -> Result<InsertResult> {
-        todo!()
-        // let engine = ctx.data::<Arc<Engine>>()?;
+        log::info!(
+            "📝 [GraphQL Insert] Table: {}, Rows: {}",
+            input.table,
+            input.data.len()
+        );
 
-        // // 获取表的元数据
-        // let meta = engine
-        //     .get_table_meta(&input.table)
-        //     .map_err(|e| async_graphql::Error::new(format!("Table not found: {}", e)))?;
+        // 获取 CalmService
+        let service = ctx.data::<Arc<CalmService>>()?;
 
-        // // 情况 1: 用户指定了 partition,直接插入到该分区（Custom 分区策略）
-        // if let Some(partition_name) = &input.partition {
-        //     // 尝试获取分区,如果不存在则创建
-        //     let partition = match engine.get_partition(&input.table, partition_name).await {
-        //         Some(p) => p,
-        //         None => {
-        //             // 分区不存在,自动创建新分区
-        //             log::info!(
-        //                 "Partition '{}' not found for table '{}', creating new partition",
-        //                 partition_name,
-        //                 input.table
-        //             );
+        // 1. 获取表元数据以获取 Arrow Schema
+        let table_info = service.catalog.get_or_load_table(&input.table)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Failed to load table: {}", e)))?;
 
-        //             // 使用 load_partition 创建新分区
-        //             engine
-        //                 .load_partition(&input.table, partition_name.clone(), meta.schema.clone())
-        //                 .await
-        //                 .map_err(|e| {
-        //                     async_graphql::Error::new(format!(
-        //                         "Failed to create partition '{}': {}",
-        //                         partition_name, e
-        //                     ))
-        //                 })?
-        //         }
-        //     };
+        // 2. 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
+        let normalized_data: Vec<serde_json::Value> = input
+            .data
+            .iter()
+            .map(|value| {
+                if let serde_json::Value::Object(map) = value {
+                    let mut new_map = serde_json::Map::new();
+                    for (key, val) in map {
+                        new_map.insert(key.to_lowercase(), val.clone());
+                    }
+                    serde_json::Value::Object(new_map)
+                } else {
+                    value.clone()
+                }
+            })
+            .collect();
 
-        //     // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
-        //     let normalized_data: Vec<serde_json::Value> = input
-        //         .data
-        //         .iter()
-        //         .map(|value| {
-        //             if let serde_json::Value::Object(map) = value {
-        //                 let mut new_map = serde_json::Map::new();
-        //                 for (key, val) in map {
-        //                     new_map.insert(key.to_lowercase(), val.clone());
-        //                 }
-        //                 serde_json::Value::Object(new_map)
-        //             } else {
-        //                 value.clone()
-        //             }
-        //         })
-        //         .collect();
+        // 3. 将 JSON 数据转换为 RecordBatch
+        use crate::utils::arrow_utils;
+        let batch = arrow_utils::json_to_record_batch(
+            &normalized_data,
+            table_info.table.schema.to_arrow_schema()
+        )
+        .map_err(|e| async_graphql::Error::new(format!("Failed to convert JSON to RecordBatch: {}", e)))?;
 
-        //     // 批量插入所有数据到指定分区
-        //     partition
-        //         .upsert_json(&normalized_data)
-        //         .map_err(|e| async_graphql::Error::new(format!("Insert failed: {}", e)))?;
+        // 4. 调用 CalmService 插入数据（内部使用 Router 路由）
+        let rows_inserted = service
+            .insert_data(&input.table, batch)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Insert failed: {}", e)))?;
 
-        //     let total_inserted = normalized_data.len();
+        log::info!(
+            "✅ [GraphQL Insert] Successfully inserted {} rows to table '{}'",
+            rows_inserted,
+            input.table
+        );
 
-        //     return Ok(InsertResult {
-        //         success: true,
-        //         rows_inserted: total_inserted,
-        //         message: format!(
-        //             "Successfully inserted {} rows to partition '{}'",
-        //             total_inserted, partition_name
-        //         ),
-        //     });
-        // }
-
-        // // 情况 2: 未指定 partition,使用统一路由接口
-        // // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
-        // let normalized_data: Vec<serde_json::Value> = input
-        //     .data
-        //     .iter()
-        //     .map(|value| {
-        //         if let serde_json::Value::Object(map) = value {
-        //             let mut new_map = serde_json::Map::new();
-        //             for (key, val) in map {
-        //                 new_map.insert(key.to_lowercase(), val.clone());
-        //             }
-        //             serde_json::Value::Object(new_map)
-        //         } else {
-        //             value.clone()
-        //         }
-        //     })
-        //     .collect();
-
-        // // 将标准化后的 JSON 数据转换为 RecordBatch
-        // let batch = crate::utils::arrow_utils::json_to_record_batch(
-        //     &normalized_data,
-        //     meta.schema.to_arrow_schema(),
-        // )
-        // .map_err(|e| async_graphql::Error::new(format!("Failed to convert data: {}", e)))?;
-
-        // // 使用 Engine::insert_batch 统一路由和插入
-        // let stats = engine
-        //     .insert_batch(&input.table, batch, None)
-        //     .await
-        //     .map_err(|e| async_graphql::Error::new(format!("Insert failed: {}", e)))?;
-
-        // Ok(InsertResult {
-        //     success: true,
-        //     rows_inserted: stats.rows_inserted,
-        //     message: format!(
-        //         "Successfully inserted {} rows to {} partitions",
-        //         stats.rows_inserted, stats.partitions_affected
-        //     ),
-        // })
+        Ok(InsertResult {
+            success: true,
+            rows_inserted,
+            message: format!(
+                "Successfully inserted {} rows to table '{}'",
+                rows_inserted, input.table
+            ),
+        })
     }
 
     /// 加载外部文件到 segment

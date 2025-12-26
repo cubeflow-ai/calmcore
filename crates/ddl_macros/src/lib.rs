@@ -70,14 +70,15 @@ fn generate_coordinator_route(input_fn: ItemFn) -> TokenStream {
     let inputs = &sig.inputs;
     let output = &sig.output;
 
-    // 提取参数（跳过 self 和 _ctx）用于转发
+    // 提取参数（跳过 self 和 _ctx/ctx）用于转发
     let params: Vec<_> = inputs
         .iter()
         .filter_map(|arg| {
             if let FnArg::Typed(pat_type) = arg {
                 if let Pat::Ident(pat_ident) = &*pat_type.pat {
                     let ident = &pat_ident.ident;
-                    if ident != "_ctx" {
+                    let ident_str = ident.to_string();
+                    if ident_str != "_ctx" && ident_str != "ctx" && ident_str != "_" {
                         return Some(ident);
                     }
                 }
@@ -85,6 +86,34 @@ fn generate_coordinator_route(input_fn: ItemFn) -> TokenStream {
             None
         })
         .collect();
+
+    // 提取 context 参数（ctx, _ctx, 或如果是 _ 则使用 current()）
+    let ctx_param_expr: proc_macro2::TokenStream = inputs
+        .iter()
+        .find_map(|arg| {
+            if let FnArg::Typed(pat_type) = arg {
+                // 检查参数名
+                if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                    let ident = &pat_ident.ident;
+                    let ident_str = ident.to_string();
+                    if ident_str == "ctx" || ident_str == "_ctx" {
+                        return Some(quote!(#ident));
+                    }
+                }
+                // 检查是否是 Context 类型且参数名是 _
+                if let Pat::Wild(_) = &*pat_type.pat {
+                    if let syn::Type::Path(type_path) = &*pat_type.ty {
+                        if let Some(segment) = type_path.path.segments.last() {
+                            if segment.ident == "Context" {
+                                return Some(quote!(tarpc::context::current()));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| quote!(_ctx));
 
     // 提取参数用于日志
     let log_params = extract_log_params(inputs);
@@ -102,7 +131,7 @@ fn generate_coordinator_route(input_fn: ItemFn) -> TokenStream {
                 // 非协调者通过 RPC 转发
                 self.coord_client()
                     .await?
-                    .#fn_name(tarpc::context::current(), #(#params),*)
+                    .#fn_name(#ctx_param_expr, #(#params),*)
                     .await
                     .map_err(|e| CoreError::Network(format!("RPC call failed: {}", e)))?
             }

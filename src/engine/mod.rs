@@ -19,12 +19,6 @@ pub mod data_handler;
 pub mod partition_handler;
 pub mod persist_handler;
 
-// 重新导出常用类型
-pub use domain::{EngineConfig, EngineStats, InsertStats};
-
-// 内部使用的类型
-use domain::PersistRequest;
-
 /// 核心存储引擎
 ///
 /// **职责**：只管本地数据操作

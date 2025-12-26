@@ -15,7 +15,7 @@ pub struct ClusterSettings {
     #[serde(default = "default_gossip_port")]
     pub gossip_port: u16,
 
-    /// 内部 RPC 服务端口 (TCP)
+    /// 内部 RPC 端口（tarpc 控制面）
     #[serde(default = "default_internal_port")]
     pub internal_port: u16,
 
@@ -49,7 +49,7 @@ fn default_gossip_port() -> u16 {
 }
 
 fn default_internal_port() -> u16 {
-    7947
+    7950
 }
 
 fn default_gossip_interval_ms() -> u64 {
@@ -126,15 +126,20 @@ impl ClusterSettings {
             return true;
         }
 
+        log::info!(
+            "Checking if my: {} is a seed node... seeds:{:?}",
+            my_addr,
+            self.seed_nodes
+        );
+
         // Check if our IP appears in any seed node address
         let found_self = self.seed_nodes.iter().any(|seed| {
             seed.parse::<SocketAddr>()
-                .map(|addr| addr.ip() == my_addr.ip())
+                .map(|addr| addr.ip() == my_addr.ip() && addr.port() == my_addr.port())
                 .unwrap_or(false)
         });
 
-        // If we're NOT in the seed list, we're a seed node
-        !found_self
+        found_self
     }
 
     /// Validate configuration
@@ -178,6 +183,10 @@ pub struct DistributedSettings {
     /// 请求超时时间（毫秒）
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
+
+    /// gRPC 服务端口（用于分布式查询和 RPC，None 表示自动分配）
+    #[serde(default)]
+    pub grpc_port: Option<u16>,
 }
 
 fn default_query_timeout_ms() -> u64 {
@@ -213,6 +222,7 @@ impl Default for DistributedSettings {
             rpc_port: default_rpc_port(),
             connect_timeout_ms: default_connect_timeout_ms(),
             request_timeout_ms: default_request_timeout_ms(),
+            grpc_port: None,
         }
     }
 }

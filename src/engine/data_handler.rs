@@ -15,107 +15,57 @@ use super::Engine;
 impl Engine {
     /// 插入批量数据（统一路由接口）
     ///
+    /// 插入 RecordBatch 到指定 partition
+    ///
     /// # 参数
     /// - `table_name`: 表名
+    /// - `partition_name`: 目标 partition 名称（必须指定）
     /// - `batch`: 要插入的 RecordBatch
     ///
-    /// # 返回
-    /// 返回插入统计信息
-    ///
     /// # 说明
-    /// 这是新的统一插入接口，会自动根据分区策略路由数据到对应分区
-    /// - 使用 Router 进行数据路由
-    /// - 按需创建分区（如果分区不存在）
-    /// - 并发插入到多个分区
+    /// 直接插入到指定的 partition，不做路由。
+    /// Partition 必须已经在 Engine 中存在。
     pub async fn insert_batch(
         self: &Arc<Self>,
         table_name: &str,
+        partition_name: &str,
         batch: datafusion::arrow::record_batch::RecordBatch,
-        partition_name: Option<String>,
     ) -> CoreResult<()> {
-        todo!()
-        // use crate::router::Router;
+        log::debug!(
+            "📝 [Engine] Inserting {} rows to partition '{}' of table '{}'",
+            batch.num_rows(),
+            partition_name,
+            table_name
+        );
 
-        // // 1. 获取表元数据
-        // let meta = self.catalog.get_table(table_name)?;
+        // 获取 partition
+        let partition = self
+            .get_partition(table_name, partition_name)
+            .await
+            .ok_or_else(|| {
+                CoreError::Internal(format!(
+                    "Partition '{}' not found for table '{}'. Ensure partition is created before inserting.",
+                    partition_name, table_name
+                ))
+            })?;
 
-        // // 2. 如果指定了 partition_name,直接插入;否则使用 Router 路由
-        // let routed_batches: HashMap<String, RecordBatch> = if let Some(partition) = partition_name {
-        //     // 手动指定分区,不需要路由
-        //     let mut map = HashMap::new();
-        //     map.insert(partition, batch);
-        //     map
-        // } else {
-        //     // 使用 Router 路由数据
-        //     Router::route_batch(batch, &meta)?
-        // };
+        // 转换 RecordBatch 为 JSON（临时方案，后续可以优化为直接插入 Arrow）
+        use crate::utils::arrow_utils;
+        let json_data = arrow_utils::record_batch_to_json(&batch)
+            .map_err(|e| CoreError::Internal(format!("Failed to convert batch to JSON: {}", e)))?;
 
-        // if routed_batches.is_empty() {
-        //     return Ok(InsertStats {
-        //         rows_inserted: 0,
-        //         partitions_affected: 0,
-        //     });
-        // }
+        // 插入到 partition
+        partition
+            .upsert_json(&json_data)
+            .map_err(|e| CoreError::Internal(format!("Failed to insert to partition: {}", e)))?;
 
-        // // 3. 并发插入到各个分区
-        // let mut tasks = Vec::new();
+        log::debug!(
+            "✅ [Engine] Successfully inserted {} rows to partition '{}'",
+            batch.num_rows(),
+            partition_name
+        );
 
-        // for (partition_name, partition_batch) in routed_batches {
-        //     let table_name = table_name.to_string();
-        //     let partition_name_clone = partition_name.clone();
-        //     let self_clone = Arc::clone(self);
-        //     let meta_clone = meta.clone();
-
-        //     let task = tokio::spawn(async move {
-        //         // 确保分区存在
-        //         self_clone
-        //             .ensure_partition_exists(&table_name, &partition_name_clone, &meta_clone)
-        //             .await?;
-
-        //         // 插入数据
-        //         let rows = partition_batch.num_rows();
-        //         self_clone
-        //             .insert_to_partition(&table_name, &partition_name_clone, partition_batch)
-        //             .await?;
-
-        //         Ok::<_, CoreError>((partition_name_clone, rows))
-        //     });
-
-        //     tasks.push(task);
-        // }
-
-        // // 4. 等待所有插入完成
-        // let mut total_rows = 0;
-        // let mut partitions_affected = 0;
-
-        // for task in tasks {
-        //     match task.await {
-        //         Ok(Ok((partition_name, rows))) => {
-        //             total_rows += rows;
-        //             partitions_affected += 1;
-        //             log::debug!(
-        //                 "Inserted {} rows to partition {} of table '{}'",
-        //                 rows,
-        //                 partition_name,
-        //                 table_name
-        //             );
-        //         }
-        //         Ok(Err(e)) => {
-        //             return Err(CoreError::Internal(format!(
-        //                 "Failed to insert to partition: {}",
-        //                 e
-        //             )));
-        //         }
-        //         Err(e) => {
-        //             return Err(CoreError::Internal(format!("Task join error: {}", e)));
-        //         }
-        //     }
-        // }
-
-        // Ok(InsertStats {
-        //     rows_inserted: total_rows,
-        //     partitions_affected,
-        // })
+        Ok(())
     }
 
     /// 确保分区存在（按需创建）

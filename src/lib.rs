@@ -1,13 +1,14 @@
 pub mod catalog;
 pub mod cluster;
-// pub mod compute;
+pub mod compute;
 pub mod engine;
-pub mod service;
+// pub mod service;
 #[macro_use]
 pub mod utils;
 // pub mod analyzer;  // Temporarily disabled due to missing dependencies
 pub mod protocol;
 
+pub mod calm; // 改为 pub,让 protocol 可以访问
 pub mod config;
 pub(crate) mod storage;
 

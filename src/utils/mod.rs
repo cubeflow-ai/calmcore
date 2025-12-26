@@ -3,6 +3,7 @@ pub mod datetime_utils;
 pub mod error;
 pub mod json;
 pub mod net;
+pub mod port_allocator;
 pub mod timestamp;
 pub mod tracing;
 

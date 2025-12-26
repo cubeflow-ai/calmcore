@@ -16,12 +16,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
-use datafusion::error::Result as DataFusionResult;
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
+use futures::StreamExt;
 
+use crate::engine::Engine;
 use crate::partition::Partition;
 use crate::utils::error::CoreResult;
 
@@ -37,6 +41,15 @@ pub struct UnionTableProvider {
 
     /// 所有 partition
     partitions: Vec<Arc<Partition>>,
+
+    /// 表名 (用于 LazyPartitionExec)
+    table_name: String,
+
+    /// Engine 引用 (用于 LazyPartitionExec)
+    engine: Arc<Engine>,
+
+    /// Partition owners 映射 (partition_name -> owner_node_id)
+    partition_owners: std::collections::HashMap<String, String>,
 }
 
 impl UnionTableProvider {
@@ -44,10 +57,17 @@ impl UnionTableProvider {
     ///
     /// # 参数
     /// - `partitions`: 所有 partition
+    /// - `table_name`: 表名
+    /// - `engine`: Engine 引用
     ///
     /// # 错误
     /// 如果 partitions 为空或 schema 不一致,返回错误
-    pub fn new(partitions: Vec<Arc<Partition>>) -> CoreResult<Self> {
+    pub fn new(
+        partitions: Vec<Arc<Partition>>,
+        table_name: String,
+        engine: Arc<Engine>,
+        partition_owners: std::collections::HashMap<String, String>,
+    ) -> CoreResult<Self> {
         if partitions.is_empty() {
             return Err(crate::utils::error::CoreError::Internal(
                 "UnionTableProvider requires at least one partition".to_string(),
@@ -68,7 +88,13 @@ impl UnionTableProvider {
             }
         }
 
-        Ok(Self { schema, partitions })
+        Ok(Self {
+            schema,
+            partitions,
+            table_name,
+            engine,
+            partition_owners,
+        })
     }
 }
 
@@ -118,64 +144,48 @@ impl TableProvider for UnionTableProvider {
             limit
         );
 
-        // 🚀 新策略: 扁平化所有partition的所有segment
-        // 让它们都成为DataFusion的独立partition,实现真正的全局并行!
-        use crate::compute::table_provider::segment_scanner::SegmentScanner;
+        // 🎯 分布式方案：返回 LazyPartitionExec（只包含元数据）
+        // LazyPartitionExec 可以被序列化并发送到远程节点
+        // 远程节点执行时会从本地 Engine 加载数据
 
-        let mut all_segment_scanners = Vec::new();
+        use crate::compute::LazyPartitionExec;
 
-        for (part_idx, partition) in self.partitions.iter().enumerate() {
-            log::info!("📍 [UnionTableProvider] Processing partition {}", part_idx);
-
-            // Add current segment (only if non-empty)
-            {
-                let current_segment = partition.get_current_segment();
-                if current_segment.doc_count() > 0 {
-                    let scanner = SegmentScanner::new(
-                        self.schema.clone(),
-                        current_segment.get_row_data(),
-                        current_segment.get_index_readers(),
-                        current_segment.doc_count(),
-                        current_segment.get_deleted(),
-                    );
-                    all_segment_scanners.push(scanner);
-                }
-            }
-
-            // Add frozen segments
-            {
-                let frozen_segments = partition.get_frozen_segments();
-                for (_seg_id, segment) in frozen_segments.iter() {
-                    let scanner = SegmentScanner::new(
-                        self.schema.clone(),
-                        segment.get_row_data(),
-                        segment.get_index_readers(),
-                        segment.doc_count(),
-                        segment.get_deleted(),
-                    );
-                    all_segment_scanners.push(scanner);
-                }
-            }
-        }
+        // 🔑 关键：在分布式模式下，partition_names 应该包含所有 partition（不仅仅是本地的）
+        // 这样当 plan 被发送到其他节点时，每个节点可以根据 partition_owners 判断哪些是自己的
+        let partition_names: Vec<String> = if self.partition_owners.is_empty() {
+            // 单机模式或没有 owner 信息：只用本地 partitions
+            self.partitions
+                .iter()
+                .map(|p| p.name().to_string())
+                .collect()
+        } else {
+            // 分布式模式：使用 partition_owners 的所有 keys（包含所有节点的 partition）
+            self.partition_owners.keys().cloned().collect()
+        };
 
         log::info!(
-            "✅ [UnionTableProvider] Total {} segments across {} partitions, creating parallel MultiSegmentExec",
-            all_segment_scanners.len(),
-            self.partitions.len()
+            "✅ [UnionTableProvider] Creating LazyPartitionExec with {} partitions: {:?}",
+            partition_names.len(),
+            partition_names
         );
 
-        // 创建一个大的MultiSegmentExec,所有segment都是独立的DataFusion partition
-        // DataFusion会自动并行调度它们!
-        use crate::compute::table_provider::partition_table_provider::create_multi_segment_exec;
+        log::info!(
+            "🗺️  [UnionTableProvider] Partition owners map: {:?}",
+            self.partition_owners
+        );
 
-        let exec = create_multi_segment_exec(
+        // 创建 LazyPartitionExec（类似 ParquetExec，只包含元数据）
+        let lazy_exec = LazyPartitionExec::new(
+            self.table_name.clone(),
+            partition_names,
+            self.partition_owners.clone(),
             self.schema.clone(),
-            all_segment_scanners,
             filters.to_vec(),
             projection.cloned(),
             limit,
+            self.engine.clone(),
         );
 
-        Ok(Arc::new(exec))
+        Ok(Arc::new(lazy_exec))
     }
 }

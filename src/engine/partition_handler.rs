@@ -17,8 +17,8 @@ impl Engine {
 
     pub async fn load_partition(
         &self,
-        partition_name: &str,
         table_name: &str,
+        partition_name: &str,
         partition_dir: PathBuf,
         schema: Schema,
     ) -> CoreResult<Arc<Partition>> {
@@ -81,6 +81,11 @@ impl Engine {
             .filter(|k| k.0 == table_name)
             .map(|k| k.1.clone())
             .collect()
+    }
+
+    pub async fn list_all_spartitions(&self) -> Vec<(String, String)> {
+        let partitions = self.partitions.read().await;
+        partitions.keys().cloned().collect()
     }
 
     /// 移除分区（用于删除表时清理本地数据）

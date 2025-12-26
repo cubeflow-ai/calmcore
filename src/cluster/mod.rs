@@ -50,23 +50,88 @@ pub mod keys {
         )))
     }
 
-    pub fn make_node_id(internal_addr: &str) -> String {
+    /// 生成 node_id
+    ///
+    /// ## 格式说明
+    /// node_id 格式: `timestamp_host_tarpc_port_flight_port`
+    ///
+    /// 例如: `20231225120530123_127.0.0.1_52000_52001`
+    ///
+    /// ## 设计原理
+    /// - timestamp: 节点启动时间，用于区分同一地址的不同实例
+    /// - host: IP 地址
+    /// - tarpc_port: tarpc RPC 服务端口（控制平面：DDL、元数据操作）
+    /// - flight_port: Arrow Flight 服务端口（数据平面：insert、query）
+    ///
+    /// ## 重要技巧
+    /// node_id 直接包含了节点的两个服务地址，无需额外存储：
+    /// - 使用 `parse_tarpc_address_from_node_id()` 提取 tarpc 地址
+    /// - 使用 `parse_flight_address_from_node_id()` 提取 Flight 地址
+    pub fn make_node_id(host: &str, tarpc_port: u16, flight_port: u16) -> String {
         format!(
-            "{}_{}",
+            "{}_{}_{}_{}", 
             chrono::Utc::now().format("%Y%m%d%H%M%S%3f"),
-            internal_addr
+            host,
+            tarpc_port,
+            flight_port
         )
     }
 
-    pub fn parse_node_id(node_id: &str) -> CoreResult<(String, String)> {
-        let parts: Vec<&str> = node_id.splitn(2, '_').collect();
-        if parts.len() == 2 {
-            return Ok((parts[0].to_string(), parts[1].to_string()));
+    /// Parse node ID into (timestamp, host, tarpc_port, flight_port)
+    pub fn parse_node_id(node_id: &str) -> CoreResult<(String, String, String, String)> {
+        let parts: Vec<&str> = node_id.split('_').collect();
+        if parts.len() == 4 {
+            return Ok((
+                parts[0].to_string(),
+                parts[1].to_string(),
+                parts[2].to_string(),
+                parts[3].to_string(),
+            ));
         }
         Err(CoreError::InvalidParam(format!(
-            "Invalid node ID: {}",
+            "Invalid node ID format: {}",
             node_id
         )))
+    }
+
+    /// 从 node_id 解析出 tarpc RPC 服务地址（控制平面）
+    ///
+    /// ## 示例
+    /// ```rust
+    /// let node_id = "20231225120530123_127.0.0.1_52000_52001";
+    /// let addr = parse_tarpc_address_from_node_id(node_id);
+    /// assert_eq!(addr, Some("127.0.0.1:52000".parse().unwrap()));
+    /// ```
+    pub fn parse_tarpc_address_from_node_id(node_id: &str) -> Option<std::net::SocketAddr> {
+        let parts: Vec<&str> = node_id.split('_').collect();
+        if parts.len() == 4 {
+            let addr_str = format!("{}:{}", parts[1], parts[2]);
+            addr_str.parse().ok()
+        } else {
+            None
+        }
+    }
+
+    /// 从 node_id 解析出 Arrow Flight 服务地址（数据平面）
+    ///
+    /// ## 示例
+    /// ```rust
+    /// let node_id = "20231225120530123_127.0.0.1_52000_52001";
+    /// let addr = parse_flight_address_from_node_id(node_id);
+    /// assert_eq!(addr, Some("127.0.0.1:52001".parse().unwrap()));
+    /// ```
+    ///
+    /// ## 使用场景
+    /// - 路由数据到远程分区时，获取目标节点的 Flight 地址
+    /// - 建立 Flight 客户端连接进行 do_put/do_get
+    pub fn parse_flight_address_from_node_id(node_id: &str) -> Option<std::net::SocketAddr> {
+        let parts: Vec<&str> = node_id.split('_').collect();
+        if parts.len() == 4 {
+            let addr_str = format!("{}:{}", parts[1], parts[3]);
+            addr_str.parse().ok()
+        } else {
+            None
+        }
     }
 }
 
@@ -83,7 +148,8 @@ pub struct ClusterManager {
     /// Local node ID (UUID, immutable for node lifetime)
     node_id: String,
 
-    internal_addr: String,
+    /// tarpc RPC address (host:port) for this node
+    tarpc_addr: String,
 
     pub coord_node: RwLock<Option<String>>,
 }
@@ -101,15 +167,42 @@ impl ClusterManager {
 
         let gossip_listen_addr = config.gossip_addr()?;
 
-        // nodeid format is millsecods timstamp yyyyMMddHHssmmMMM  since unix epoch + "_"+ host
-        let internal_addr = config.internal_addr()?;
-        let node_id = keys::make_node_id(&internal_addr);
+        // 从配置获取两个端口
+        // internal_port: tarpc 控制面端口
+        // grpc_port: Flight 数据面基础端口
+        //   - grpc_port: 自定义 Flight（do_put + SQL）
+        //   - grpc_port+1: datafusion-distributed Flight（分布式查询）
+        let tarpc_port = cluster_config.internal_port;
+        let custom_flight_port = cluster_config
+            .distributed
+            .grpc_port
+            .ok_or_else(|| {
+                CoreError::ConfigError(
+                    "grpc_port must be configured in cluster.distributed".to_string(),
+                )
+            })?;
+        
+        // node_id 中的 flight_port 指向 custom Flight（用于 do_put 和 SQL）
+        // ChannelResolver 会自动 +1 连接到 distributed Flight
+
+        // node_id format: timestamp_host_tarpc_port_flight_port
+        let host = config
+            .host
+            .as_ref()
+            .ok_or_else(|| CoreError::ConfigError("Host not configured".to_string()))?;
+        
+        let node_id = keys::make_node_id(host, tarpc_port, custom_flight_port);
 
         log::info!("🚀 [Cluster] Starting node {}", node_id);
         log::info!(
-            "📡 [Cluster] gossip Listen address: {} internal address:{}",
-            gossip_listen_addr,
-            internal_addr
+            "📡 [Cluster] Gossip listen address: {}",
+            gossip_listen_addr
+        );
+        log::info!(
+            "🔌 [Cluster] tarpc RPC port: {}, Flight ports: {} (custom), {} (distributed)",
+            tarpc_port,
+            custom_flight_port,
+            custom_flight_port + 1
         );
         log::info!(
             "🌐 [Cluster] Running in CLUSTER mode with {} seed nodes",
@@ -121,12 +214,14 @@ impl ClusterManager {
 
         let chitchat = gossip.chitchat();
 
+        let tarpc_addr = format!("{}:{}", host, tarpc_port);
+        
         let manager = Self {
             gossip,
             chitchat,
             node_id,
             coord_node: RwLock::new(None),
-            internal_addr,
+            tarpc_addr,
         };
 
         manager.set_my_status_preparing().await;
@@ -172,6 +267,16 @@ impl ClusterManager {
     }
 
     /// =========================================== nodes operations ===========================================
+
+    /// 获取所有在线节点
+    pub async fn live_nodes(&self) -> Vec<String> {
+        let chitchat = self.chitchat.lock().await;
+        chitchat
+            .live_nodes()
+            .map(|node| node.node_id.clone())
+            .collect()
+    }
+
     pub async fn idle_nodes(&self) -> Vec<String> {
         let chitchat = self.chitchat.lock().await;
         let mut idle_nodes = Vec::new();
@@ -181,11 +286,15 @@ impl ClusterManager {
                 .node_state(node)
                 .and_then(|state| state.get(KEY_NODE_STATUS))
             {
-                if status == VALUE_NODE_STATUS_READY && node.node_id != self.node_id {
+                if status == VALUE_NODE_STATUS_READY {
                     idle_nodes.push(node.node_id.clone());
                 }
             }
         }
+
+        //TODO 先洗牌，后续再考虑状态更复杂的负载均衡算法
+        use rand::seq::SliceRandom;
+        idle_nodes.shuffle(&mut rand::rng());
 
         idle_nodes
     }
@@ -285,13 +394,14 @@ impl ClusterManager {
     pub async fn reset_coord(&self) -> CoreResult<()> {
         let mut coord_node = self.coord_node.write().unwrap();
         *coord_node = None;
-        self.gossip.delete(CENTER_NODE_KEY).await;
-        Ok(())
+        self.gossip.delete(CENTER_NODE_KEY).await
     }
 
     pub async fn set_coord_node(&self, node_id: &str) -> CoreResult<()> {
-        let mut coord_node = self.coord_node.write().unwrap();
-        *coord_node = Some(node_id.to_string());
+        {
+            let mut coord_node = self.coord_node.write().unwrap();
+            *coord_node = Some(node_id.to_string());
+        } // 锁在这里释放
         self.gossip.set(CENTER_NODE_KEY, node_id).await;
         Ok(())
     }

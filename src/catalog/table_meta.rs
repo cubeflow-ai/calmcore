@@ -399,7 +399,7 @@ pub struct PartitionMeta {
     pub updated_at: u64,
 
     /// 所有者节点 ID
-    pub owner: Option<String>,
+    pub owner: String,
 }
 
 /// Segment 信息
@@ -465,7 +465,7 @@ impl TableMeta {
 
 impl PartitionMeta {
     /// 创建新的 partition 元数据
-    pub fn new(partition_name: String) -> Self {
+    pub fn new(partition_name: String, owner: String) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -475,7 +475,7 @@ impl PartitionMeta {
             partition_name,
             created_at: now,
             updated_at: now,
-            owner: None,
+            owner,
         }
     }
 }
