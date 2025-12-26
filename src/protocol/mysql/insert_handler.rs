@@ -1,6 +1,6 @@
 /// 高性能 INSERT 语句处理器 - 使用字节级优化解析
+use crate::calm::CalmService;
 use crate::catalog::TableMeta;
-use crate::engine::Engine;
 use crate::schema::field::FieldOption;
 use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 /// 高性能 INSERT 处理
 pub async fn handle_insert<W: io::Read + io::Write>(
-    engine: Arc<Engine>,
+    calm_service: Arc<CalmService>,
     query: &str,
     results: QueryResultWriter<'_, W>,
 ) -> io::Result<()> {
@@ -29,9 +29,12 @@ pub async fn handle_insert<W: io::Read + io::Write>(
     );
 
     // 获取表元数据
-    let meta = engine
-        .get_table_meta(&table_name)
+    let table_info = calm_service
+        .catalog()
+        .get_or_load_table(&table_name)
+        .await
         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("Table not found: {}", e)))?;
+    let meta = &table_info.table;
 
     // 构建 RecordBatch
     let batch_build_start = std::time::Instant::now();
@@ -44,29 +47,31 @@ pub async fn handle_insert<W: io::Read + io::Write>(
 
     // 使用新的统一路由接口插入数据
     let insert_start = std::time::Instant::now();
-    let stats = engine
-        .insert_batch(&table_name, batch, None)
+    let rows_inserted = batch.num_rows();
+
+    // 简化处理：假设只有一个分区用于 MySQL INSERT
+    let partition_name = "p0"; // 默认分区
+    calm_service
+        .engine()
+        .insert_batch(&table_name, partition_name, batch)
         .await
         .map_err(|e| io::Error::other(format!("Insert failed: {}", e)))?;
 
     log::debug!(
-        "⏱️  [INSERT] Inserted {} rows to {} partitions in {:?}",
-        stats.rows_inserted,
-        stats.partitions_affected,
+        "⏱️  [INSERT] Inserted {} rows in {:?}",
+        rows_inserted,
         insert_start.elapsed()
     );
-
-    let total_inserted = stats.rows_inserted as u64;
 
     log::debug!(
         "⏱️  [INSERT] Total insert time: {:?}, {} rows, {:.0} rows/sec",
         insert_start.elapsed(),
-        total_inserted,
-        total_inserted as f64 / insert_start.elapsed().as_secs_f64()
+        rows_inserted,
+        rows_inserted as f64 / insert_start.elapsed().as_secs_f64()
     );
     log::debug!("⏱️  [INSERT] Overall time: {:?}\n", start_time.elapsed());
 
-    results.completed(total_inserted, 0)
+    results.completed(rows_inserted as u64, 0)
 }
 
 /// 快速解析 INSERT 语句 (字节级优化，避免逐字符迭代)

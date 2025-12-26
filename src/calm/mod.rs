@@ -85,6 +85,24 @@ impl CalmService {
         Ok(calm_service)
     }
 
+    /// 获取 Engine 引用
+    pub fn engine(&self) -> &Arc<Engine> {
+        &self.engine
+    }
+
+    /// 获取 Catalog 引用
+    pub fn catalog(&self) -> &Arc<Catalog> {
+        &self.catalog
+    }
+
+    /// 获取 ClusterManager 引用
+    pub async fn cluster_manager(&self) -> CoreResult<Arc<ClusterManager>> {
+        self.cluster_manager
+            .0
+            .clone()
+            .ok_or_else(|| CoreError::Internal("No cluster manager in standalone mode".to_string()))
+    }
+
     /// 初始化 DDL Service
     pub async fn init(self: Arc<Self>, conf: &crate::config::Config) -> CoreResult<()> {
         if self.cluster_manager.is_standalone() {

@@ -1,10 +1,9 @@
 use calm::{
     calm::CalmService,
     config::Config,
-    protocol::graphql::{self, GraphQLServer},
+    protocol::{elasticsearch::ElasticsearchServer, graphql::GraphQLServer, mysql::MysqlServer},
 };
 use std::io::Write;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,49 +51,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handles.push(handle);
     }
 
-    // // 启动 Elasticsearch 服务
-    // if let Some(port) = config.es_port {
-    //     let addr = format!("{}:{}", config.host, port);
-    //     println!("🚀 Starting Elasticsearch server on {}", addr);
-    //     println!("   Health check: http://{}/_cluster/health", addr);
+    // 启动 Elasticsearch 服务
+    if let Some(port) = es_port {
+        let addr = format!(
+            "{}:{}",
+            config.host.as_ref().unwrap_or(&"0.0.0.0".to_string()),
+            port
+        );
+        println!("🚀 Starting Elasticsearch server on {}", addr);
+        println!("   Health check: http://{}/_cluster/health", addr);
 
-    //     let engine_clone = engine.clone();
-    //     let handle = tokio::spawn(async move {
-    //         let server = ElasticsearchServer::new(engine_clone);
-    //         if let Err(e) = server.start(&addr).await {
-    //             eprintln!("❌ Elasticsearch server error: {}", e);
-    //         }
-    //     });
-    //     handles.push(handle);
-    // }
-    // // 启动 MySQL 服务
-    // if let Some(port) = config.mysql_port {
-    //     let addr = format!("{}:{}", config.host, port);
-    //     println!("🚀 Starting MySQL server on {}", addr);
-    //     println!(
-    //         "   Connect: mysql -h {} -P {} -u {} {}",
-    //         config.host,
-    //         port,
-    //         config.user,
-    //         if config.password.is_empty() { "" } else { "-p" }
-    //     );
+        let service_clone = calm_service.clone();
+        let handle = tokio::spawn(async move {
+            let server = ElasticsearchServer::new(service_clone);
+            if let Err(e) = server.start(&addr).await {
+                eprintln!("❌ Elasticsearch server error: {}", e);
+            }
+        });
+        handles.push(handle);
+    }
 
-    //     let engine_clone = engine.clone();
-    //     let user = config.user.clone();
-    //     let password = config.password.clone();
-    //     let handle = tokio::spawn(async move {
-    //         let server = MysqlServer::new(engine_clone, user, password);
-    //         if let Err(e) = server.start(&addr).await {
-    //             eprintln!("❌ MySQL server error: {}", e);
-    //         }
-    //     });
-    //     handles.push(handle);
-    // }
+    // 启动 MySQL 服务
+    if let Some(port) = mysql_port {
+        let addr = format!(
+            "{}:{}",
+            config.host.as_ref().unwrap_or(&"0.0.0.0".to_string()),
+            port
+        );
+        println!("🚀 Starting MySQL server on {}", addr);
+        println!(
+            "   Connect: mysql -h {} -P {} -u {} {}",
+            config.host.as_ref().unwrap_or(&"127.0.0.1".to_string()),
+            port,
+            config.user,
+            if config.password.is_empty() { "" } else { "-p" }
+        );
 
-    // if handles.is_empty() {
-    //     eprintln!("❌ No servers enabled. Use --help for usage information.");
-    //     return Err("No servers enabled".into());
-    // }
+        let service_clone = calm_service.clone();
+        let user = config.user.clone();
+        let password = config.password.clone();
+        let handle = tokio::spawn(async move {
+            let server = MysqlServer::new(service_clone, user, password);
+            if let Err(e) = server.start(&addr).await {
+                eprintln!("❌ MySQL server error: {}", e);
+            }
+        });
+        handles.push(handle);
+    }
+
+    if handles.is_empty() {
+        eprintln!("❌ No servers enabled. Use --help for usage information.");
+        return Err("No servers enabled".into());
+    }
 
     println!();
     println!("✓ All servers started");
