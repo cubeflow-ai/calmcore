@@ -43,8 +43,11 @@ pub struct LazyPartitionExec {
     /// Key: partition_name, Value: owner_node_id
     partition_owners: std::collections::HashMap<String, String>,
 
-    /// Schema
-    schema: SchemaRef,
+    /// 基础 Schema（原始完整表 schema，用于创建 PartitionTableProvider）
+    base_schema: SchemaRef,
+
+    /// 输出 Schema（应用 projection 后的 schema，返回给 DataFusion）
+    output_schema: SchemaRef,
 
     /// Filter 表达式（下推）
     filters: Vec<Expr>,
@@ -77,7 +80,9 @@ impl LazyPartitionExec {
     ) -> Self {
         let num_partitions = partition_names.len();
 
-        // 应用 projection 到 schema
+        // 🎯 关键区分：
+        // - base_schema: 原始完整 schema，用于创建 PartitionTableProvider
+        // - output_schema: 应用 projection 后的 schema，返回给 DataFusion
         let output_schema = if let Some(ref proj) = projection {
             let fields: Vec<_> = proj.iter().map(|i| schema.field(*i).clone()).collect();
             Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
@@ -96,7 +101,8 @@ impl LazyPartitionExec {
             table_name,
             partition_names,
             partition_owners,
-            schema: output_schema,
+            base_schema: schema, // 原始完整 schema
+            output_schema,       // projection 后的 schema
             filters,
             projection,
             limit,
@@ -117,6 +123,7 @@ impl LazyPartitionExec {
     ) -> Self {
         let num_partitions = partition_names.len();
 
+        // 与 new() 保持一致：区分 base_schema 和 output_schema
         let output_schema = if let Some(ref proj) = projection {
             let fields: Vec<_> = proj.iter().map(|i| schema.field(*i).clone()).collect();
             Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
@@ -135,7 +142,8 @@ impl LazyPartitionExec {
             table_name,
             partition_names,
             partition_owners,
-            schema: output_schema,
+            base_schema: schema, // 原始完整 schema
+            output_schema,       // projection 后的 schema
             filters,
             projection,
             limit,
@@ -248,14 +256,14 @@ impl LazyPartitionExec {
                     my_node_id
                 );
 
-                // 返回空流
+                // 返回空流（使用 output_schema，因为这是 ExecutionPlan 的输出）
                 use datafusion::arrow::record_batch::RecordBatch;
                 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
                 use futures::stream;
 
-                let empty_batch = RecordBatch::new_empty(self.schema.clone());
+                let empty_batch = RecordBatch::new_empty(self.output_schema.clone());
                 let stream = stream::once(async move { Ok(empty_batch) });
-                let adapter = RecordBatchStreamAdapter::new(self.schema.clone(), stream);
+                let adapter = RecordBatchStreamAdapter::new(self.output_schema.clone(), stream);
                 return Ok(Box::pin(adapter));
             }
 
@@ -290,6 +298,8 @@ impl LazyPartitionExec {
         let state = SessionStateBuilder::new().build();
 
         // 调用 scan，应用 filters、projection、limit
+        // 注意：self.schema 已经应用了 projection，所以这里需要传递原始 projection
+        // 而不是 None，让 PartitionTableProvider 自己处理
         let exec = provider
             .scan(&state, self.projection.as_ref(), &self.filters, self.limit)
             .await
@@ -346,7 +356,8 @@ impl ExecutionPlan for LazyPartitionExec {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        // 返回 output_schema（应用 projection 后的 schema）
+        self.output_schema.clone()
     }
 
     fn properties(&self) -> &PlanProperties {
@@ -384,18 +395,23 @@ impl ExecutionPlan for LazyPartitionExec {
                 .map_err(|e| DataFusionError::Internal(format!("Failed to get Engine: {}", e)))?
         };
 
-        // 创建异步任务来加载和执行
+        // 直接调用 load_and_execute（这是同步调用异步方法）
+        // 使用 tokio runtime 来执行
         let exec = self.clone();
-        let schema = self.schema.clone();
         let context_clone = _context.clone();
+        
+        // 创建一个 future 并立即执行
+        use tokio::runtime::Handle;
+        let handle = Handle::current();
+        
+        let stream_future = async move {
+            exec.load_and_execute(partition, engine, &context_clone).await
+        };
+        
+        // 阻塞执行（因为 execute 本身不是 async）
+        let stream = handle.block_on(stream_future)
+            .map_err(|e| DataFusionError::Internal(e.to_string()))?;
 
-        let stream = stream::once(async move {
-            exec.load_and_execute(partition, engine, &context_clone)
-                .await
-                .map_err(|e| DataFusionError::Internal(format!("Load failed: {}", e)))
-        })
-        .try_flatten();
-
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        Ok(stream)
     }
 }

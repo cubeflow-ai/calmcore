@@ -49,14 +49,9 @@ impl Engine {
                 ))
             })?;
 
-        // 转换 RecordBatch 为 JSON（临时方案，后续可以优化为直接插入 Arrow）
-        use crate::utils::arrow_utils;
-        let json_data = arrow_utils::record_batch_to_json(&batch)
-            .map_err(|e| CoreError::Internal(format!("Failed to convert batch to JSON: {}", e)))?;
-
-        // 插入到 partition
+        // 直接插入 RecordBatch 到 partition
         partition
-            .upsert_json(&json_data)
+            .upsert(batch.clone())
             .map_err(|e| CoreError::Internal(format!("Failed to insert to partition: {}", e)))?;
 
         log::debug!(

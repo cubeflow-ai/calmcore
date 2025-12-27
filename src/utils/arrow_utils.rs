@@ -69,15 +69,32 @@ pub fn json_to_record_arrow(
 
     // 使用 Arrow JSON Reader 解析
     let cursor = Cursor::new(buffer);
-    let mut reader = ReaderBuilder::new(arrow_schema)
+    let mut reader = ReaderBuilder::new(arrow_schema.clone())
         .build(cursor)
         .map_err(|e| CoreError::Internal(format!("Failed to create JSON reader: {}", e)))?;
 
-    // 读取 RecordBatch
-    reader
-        .next()
-        .ok_or_else(|| CoreError::Internal("No data in JSON reader".to_string()))?
-        .map_err(|e| CoreError::Internal(format!("Failed to read RecordBatch: {}", e)))
+    // 读取所有 RecordBatch 并合并
+    let mut batches = Vec::new();
+    for batch_result in reader {
+        let batch = batch_result
+            .map_err(|e| CoreError::Internal(format!("Failed to read RecordBatch: {}", e)))?;
+        batches.push(batch);
+    }
+
+    if batches.is_empty() {
+        return Err(CoreError::Internal("No data in JSON reader".to_string()));
+    }
+
+    // 如果只有一个 batch，直接返回
+    if batches.len() == 1 {
+        return Ok(batches.into_iter().next().unwrap());
+    }
+
+    // 合并多个 batch
+    let merged = arrow::compute::concat_batches(&arrow_schema, &batches)
+        .map_err(|e| CoreError::Internal(format!("Failed to merge batches: {}", e)))?;
+
+    Ok(merged)
 }
 
 /// 将 RecordBatch 转换为 JSON 数组

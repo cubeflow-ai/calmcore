@@ -60,18 +60,18 @@ impl CalmFlightService {
             }
 
             FlightAction::ListPartitions { table_name } => {
-                let partitions = self.calm_service.catalog
+                let partitions = self
+                    .calm_service
+                    .catalog
                     .get_partition_names(&table_name)
                     .await?;
                 Ok(FlightActionResponse::PartitionList(partitions))
             }
 
             // 其他操作需要 coordinator 路由，暂时返回错误提示
-            _ => {
-                Err(CoreError::Internal(
-                    "This action requires coordinator routing. Use tarpc RPC for now.".to_string()
-                ))
-            }
+            _ => Err(CoreError::Internal(
+                "This action requires coordinator routing. Use tarpc RPC for now.".to_string(),
+            )),
         }
     }
 }
@@ -136,13 +136,13 @@ impl ArrowFlightService for CalmFlightService {
         // 我们需要同时支持：
         // 1. datafusion-distributed 的分布式查询协议（bytes 以特定格式开始）
         // 2. 简单的 SQL 字符串（向后兼容）
-        
+
         // 尝试判断是否是分布式查询请求
         // datafusion-distributed 的 DoGet 是 protobuf 编码
         // 如果以 0x08 或 0x0a 开始（protobuf field tag），可能是分布式计划
-        let is_distributed = !ticket.ticket.is_empty() 
+        let is_distributed = !ticket.ticket.is_empty()
             && (ticket.ticket[0] == 0x08 || ticket.ticket[0] == 0x0a || ticket.ticket[0] == 0x10);
-        
+
         if is_distributed {
             log::info!("🛩️  [Flight Service] Detected distributed query request (protobuf)");
             // 这里我们需要手动处理分布式请求
@@ -153,10 +153,10 @@ impl ArrowFlightService for CalmFlightService {
             // 但这需要访问私有 API，暂时返回 unimplemented
             return Err(Status::unimplemented(
                 "Distributed query via Flight do_get not yet fully integrated. \
-                 datafusion-distributed needs its own ArrowFlightEndpoint."
+                 datafusion-distributed needs its own ArrowFlightEndpoint.",
             ));
         }
-        
+
         // Fallback: 简单的 SQL 字符串
         let sql = String::from_utf8(ticket.ticket.to_vec())
             .map_err(|e| Status::invalid_argument(format!("Invalid UTF-8 in ticket: {}", e)))?;
@@ -174,9 +174,7 @@ impl ArrowFlightService for CalmFlightService {
         let schema = stream.schema();
 
         // 将 RecordBatch 流的错误类型从 DataFusionError 转换为 FlightError
-        let stream_with_flight_error = stream.map_err(|e| {
-            FlightError::ExternalError(Box::new(e))
-        });
+        let stream_with_flight_error = stream.map_err(|e| FlightError::ExternalError(Box::new(e)));
 
         // 将 RecordBatch 流转换为 FlightData 流
         let flight_data_stream = FlightDataEncoderBuilder::new()
@@ -195,13 +193,13 @@ impl ArrowFlightService for CalmFlightService {
     ) -> Result<Response<Self::DoPutStream>, Status> {
         use arrow_flight::decode::FlightRecordBatchStream;
         use datafusion::arrow::record_batch::RecordBatch;
-        
+
         log::info!("📥 [Flight] Received do_put request");
 
         let mut stream = request.into_inner();
-        
+
         log::info!("📥 [Flight] Reading first message...");
-        
+
         // 第一个消息包含 FlightDescriptor（表名和分区名）
         let first_message = stream
             .message()
@@ -217,22 +215,23 @@ impl ArrowFlightService for CalmFlightService {
 
         log::info!("📥 [Flight] Parsing FlightDescriptor...");
 
-        // 从 FlightData 中提取 FlightDescriptor  
-        let descriptor_bytes = first_message.flight_descriptor
-            .as_ref()
-            .ok_or_else(|| {
-                log::error!("❌ [Flight] Missing flight descriptor");
-                Status::invalid_argument("Missing flight descriptor")
-            })?;
-        
+        // 从 FlightData 中提取 FlightDescriptor
+        let descriptor_bytes = first_message.flight_descriptor.as_ref().ok_or_else(|| {
+            log::error!("❌ [Flight] Missing flight descriptor");
+            Status::invalid_argument("Missing flight descriptor")
+        })?;
+
         // descriptor.path 格式: ["table_name", "partition_name"]
         if descriptor_bytes.path.len() != 2 {
-            log::error!("❌ [Flight] Invalid path length: {}", descriptor_bytes.path.len());
+            log::error!(
+                "❌ [Flight] Invalid path length: {}",
+                descriptor_bytes.path.len()
+            );
             return Err(Status::invalid_argument(
-                "FlightDescriptor path must contain [table_name, partition_name]"
+                "FlightDescriptor path must contain [table_name, partition_name]",
             ));
         }
-        
+
         let table_name = descriptor_bytes.path[0].clone();
         let partition_name = descriptor_bytes.path[1].clone();
 
@@ -245,7 +244,7 @@ impl ArrowFlightService for CalmFlightService {
         // 将 FlightData 流解码为 RecordBatch 流
         let batch_stream = FlightRecordBatchStream::new_from_flight_data(
             futures::stream::once(async { Ok(first_message) })
-                .chain(stream.map_err(|e| arrow_flight::error::FlightError::Tonic(Box::new(e))))
+                .chain(stream.map_err(|e| arrow_flight::error::FlightError::Tonic(Box::new(e)))),
         );
 
         // 收集所有 RecordBatch
@@ -257,35 +256,34 @@ impl ArrowFlightService for CalmFlightService {
         log::debug!("📥 [Flight] Received {} batches", batches.len());
 
         // 直接插入 RecordBatch 到指定分区（不需要 JSON 转换！）
-        let table_info = self.calm_service.catalog.get_or_load_table(&table_name)
+        let table_info = self
+            .calm_service
+            .catalog
+            .get_or_load_table(&table_name)
             .await
             .map_err(|e| Status::not_found(format!("Table not found: {}", e)))?;
 
         let mut total_rows = 0;
         for batch in batches {
             let rows = batch.num_rows();
-            
-            // 确保分区存在
-            if self.calm_service.engine
+
+            // 检查分区是否存在
+            if self
+                .calm_service
+                .engine
                 .get_partition(&table_name, &partition_name)
                 .await
                 .is_none()
             {
-                let partition_dir = self.calm_service.catalog
-                    .partition_dir(&table_name, &partition_name);
-                self.calm_service.engine
-                    .load_partition(
-                        &table_name,
-                        &partition_name,
-                        partition_dir,
-                        table_info.table.schema.clone(),
-                    )
-                    .await
-                    .map_err(|e| Status::internal(format!("Failed to load partition: {}", e)))?;
+                return Err(Status::not_found(format!(
+                    "Partition '{}/{}' does not exist. Create partition first.",
+                    table_name, partition_name
+                )));
             }
 
             // 直接插入 RecordBatch（无需 JSON 转换）
-            self.calm_service.engine
+            self.calm_service
+                .engine
                 .insert_batch(&table_name, &partition_name, batch)
                 .await
                 .map_err(|e| Status::internal(format!("Insert failed: {}", e)))?;
@@ -299,7 +297,7 @@ impl ArrowFlightService for CalmFlightService {
         let result = PutResult {
             app_metadata: total_rows.to_string().into_bytes().into(),
         };
-        
+
         let stream = futures::stream::once(async { Ok(result) });
         Ok(Response::new(Box::pin(stream)))
     }
@@ -312,7 +310,7 @@ impl ArrowFlightService for CalmFlightService {
         use super::flight_actions::{FlightAction, FlightActionResponse};
 
         let action = request.into_inner();
-        
+
         log::debug!("🎯 [Flight] Received action: type={}", action.r#type);
 
         // 解析 Action
@@ -322,11 +320,14 @@ impl ArrowFlightService for CalmFlightService {
         log::debug!("🎯 [Flight] Parsed action: {:?}", flight_action);
 
         // 执行 Action
-        let response = self.handle_action(flight_action).await
+        let response = self
+            .handle_action(flight_action)
+            .await
             .map_err(|e| Status::internal(format!("Action execution failed: {}", e)))?;
 
         // 序列化响应
-        let result = response.to_flight_result()
+        let result = response
+            .to_flight_result()
             .map_err(|e| Status::internal(format!("Failed to serialize response: {}", e)))?;
 
         // 返回结果流

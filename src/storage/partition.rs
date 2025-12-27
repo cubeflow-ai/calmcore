@@ -34,8 +34,7 @@ pub struct Partition {
     pub arrow_schema: Arc<datafusion::arrow::datatypes::Schema>,
     read_lock: RwLock<()>,
     write_lock: Mutex<()>,
-    persist_lock: Mutex<()>, // 新增：防止并发持久化同一个 partition
-    segment_id_counter: AtomicU64,
+    persist_lock: Mutex<()>, // 防止并发持久化同一个 partition
     persist_notify: PersistNotifyCallback,
 }
 
@@ -59,8 +58,7 @@ impl Partition {
             frozen_segments: RwLock::new(vec![]),
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
-            persist_lock: Mutex::new(()), // 初始化持久化锁
-            segment_id_counter: AtomicU64::new(0),
+            persist_lock: Mutex::new(()),
             persist_notify,
         }
     }
@@ -84,6 +82,7 @@ impl Partition {
 
         // 将 JSON 数据转换为 RecordBatch
         let batch = arrow_utils::json_to_record_batch(&normalized_data, self.arrow_schema.clone())?;
+
         // 调用现有的 upsert 方法
         self.upsert(batch)
     }
@@ -284,7 +283,8 @@ impl Partition {
                 return Ok(0);
             }
 
-            let seg_id = self.segment_id_counter.fetch_add(1, Ordering::SeqCst);
+            // Use segment's start position as its ID
+            let seg_id = current.start;
 
             (seg_id, current.next_doc_id(), current.total_count())
         };
@@ -400,8 +400,8 @@ impl Partition {
 
         println!("  📍 Segment range: {} - {}", start_id, end_id);
 
-        // 3. Allocate segment ID
-        let seg_id = self.segment_id_counter.fetch_add(1, Ordering::SeqCst);
+        // 3. Use start_id as segment ID
+        let seg_id = start_id;
 
         // 4. Only read indexed fields from Parquet to build indexes
         println!("  🔨 Building indexes for segment {}...", seg_id);
@@ -800,10 +800,6 @@ impl Partition {
         // 4. Create new active segment
         let current_segment = Segment::new(next_start, schema.clone());
 
-        // segment_id_counter is deprecated, but keep field for compatibility
-        // It's no longer used since segments are identified by their start_id
-        let deprecated_counter = next_start; // Use start_id as counter for now
-
         let arrow_schema = schema.to_arrow_schema();
         Ok(Partition {
             name: id,
@@ -815,8 +811,7 @@ impl Partition {
             frozen_segments: RwLock::new(frozen_segments),
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
-            persist_lock: Mutex::new(()), // 初始化持久化锁
-            segment_id_counter: AtomicU64::new(deprecated_counter),
+            persist_lock: Mutex::new(()),
             persist_notify,
         })
     }

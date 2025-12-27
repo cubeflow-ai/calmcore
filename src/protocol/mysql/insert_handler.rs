@@ -50,10 +50,8 @@ pub async fn handle_insert<W: io::Read + io::Write>(
     let rows_inserted = batch.num_rows();
 
     // 简化处理：假设只有一个分区用于 MySQL INSERT
-    let partition_name = "p0"; // 默认分区
     calm_service
-        .engine()
-        .insert_batch(&table_name, partition_name, batch)
+        .insert_data(&table_name, batch)
         .await
         .map_err(|e| io::Error::other(format!("Insert failed: {}", e)))?;
 

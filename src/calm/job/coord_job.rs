@@ -60,24 +60,16 @@ pub struct HealthReport {
 
 /// 协调节点任务服务
 pub struct JobService {
-    catalog: Arc<Catalog>,
-    cluster_manager: Arc<ClusterManager>,
-    engine: Arc<Engine>,
+    calm_service: Arc<CalmService>,
 
     /// 节点状态缓存
     node_states: HashMap<String, NodeState>,
 }
 
 impl JobService {
-    pub fn new(
-        catalog: Arc<Catalog>,
-        cluster_manager: Arc<ClusterManager>,
-        engine: Arc<Engine>,
-    ) -> Self {
+    pub fn new(calm_service: Arc<CalmService>) -> Self {
         Self {
-            catalog,
-            cluster_manager,
-            engine,
+            calm_service,
             node_states: HashMap::new(),
         }
     }
@@ -132,8 +124,12 @@ impl JobService {
         let mut result = Vec::new();
 
         // 遍历所有表
-        for table_name in self.catalog.list_tables().await {
-            let table_info = self.catalog.get_table_info(&table_name).await?;
+        for table_name in self.calm_service.catalog().list_tables().await {
+            let table_info = self
+                .calm_service
+                .catalog()
+                .get_table_info(&table_name)
+                .await?;
             let partitions = table_info.partitions.read().await;
 
             for (partition_name, pm) in partitions.iter() {
@@ -148,14 +144,19 @@ impl JobService {
 
     /// 检测孤儿分区：owner 节点已经不存在的分区
     pub async fn detect_orphan_partitions(&self) -> CoreResult<Vec<OrphanPartition>> {
-        let live_nodes = self.cluster_manager.live_nodes().await;
+        let cluster_manager = self.calm_service.cluster_manager().await?;
+        let live_nodes = cluster_manager.live_nodes().await;
         let mut orphans = Vec::new();
 
         log::debug!("🔍 [Coordinator] Detecting orphan partitions...");
 
         // 遍历所有表的所有分区
-        for table_name in self.catalog.list_tables().await {
-            let table_info = self.catalog.get_table_info(&table_name).await?;
+        for table_name in self.calm_service.catalog().list_tables().await {
+            let table_info = self
+                .calm_service
+                .catalog()
+                .get_table_info(&table_name)
+                .await?;
             let partitions = table_info.partitions.read().await;
 
             for (partition_name, pm) in partitions.iter() {
@@ -212,7 +213,8 @@ impl JobService {
             })??;
 
         // 3. 更新 catalog 中的 owner
-        self.catalog
+        self.calm_service
+            .catalog()
             .set_partition_owner(table, partition, &new_node)
             .await?;
 
@@ -233,7 +235,8 @@ impl JobService {
         // 从 gossip 中收集各节点声明的分区
         let mut partition_map: HashMap<(String, String), Vec<(String, u64)>> = HashMap::new();
 
-        let chitchat = self.cluster_manager.chitchat.lock().await;
+        let cluster_manager = self.calm_service.cluster_manager().await?;
+        let chitchat = cluster_manager.chitchat.lock().await;
         for node in chitchat.live_nodes() {
             if let Some(node_state) = chitchat.node_state(node) {
                 for (key, value_str) in node_state.key_values() {
@@ -283,8 +286,12 @@ impl JobService {
 
         // 统计总分区数
         let mut total = 0;
-        for table_name in self.catalog.list_tables().await {
-            let table_info = self.catalog.get_table_info(&table_name).await?;
+        for table_name in self.calm_service.catalog().list_tables().await {
+            let table_info = self
+                .calm_service
+                .catalog()
+                .get_table_info(&table_name)
+                .await?;
             total += table_info.partitions.read().await.len();
         }
 
@@ -314,19 +321,92 @@ impl JobService {
 
     // ==================== 辅助方法 ====================
 
-    /// 选择一个节点来放置分区（简单策略：选择分区数最少的节点）
+    /// 选择一个节点来放置分区（负载均衡策略）
     async fn select_node_for_partition(&self) -> CoreResult<String> {
-        let idle_nodes = self.cluster_manager.idle_nodes().await;
+        let cluster_manager = self.calm_service.cluster_manager().await?;
+        let available_nodes = cluster_manager.idle_nodes().await;
 
-        if idle_nodes.is_empty() {
+        if available_nodes.is_empty() {
+            return Err(CoreError::ClusterState("No available nodes".to_string()));
+        }
+
+        // 如果只有一个节点，直接返回
+        if available_nodes.len() == 1 {
+            return Ok(available_nodes[0].clone());
+        }
+
+        log::debug!(
+            "📊 Selecting node from {} available nodes",
+            available_nodes.len()
+        );
+
+        // 获取每个节点的状态信息
+        let mut node_states: Vec<(String, crate::calm::NodeInfo)> = Vec::new();
+
+        for node_id in available_nodes {
+            match new_data_client(&node_id).await {
+                Ok(client) => match client.node_info(tarpc::context::current()).await {
+                    Ok(Ok(node_info)) => {
+                        log::debug!(
+                            "📊 Node '{}': {} partitions, CPU: {:.1}%, Memory: {:.1}%, Load: {:.2}",
+                            node_id,
+                            node_info.partition_count,
+                            node_info.cpu_usage,
+                            node_info.memory_usage,
+                            node_info.load_avg_1min
+                        );
+                        node_states.push((node_id.clone(), node_info));
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!(
+                            "⚠️  Failed to get node info from '{}': {}, skipping",
+                            node_id,
+                            e
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("⚠️  RPC error from node '{}': {}, skipping", node_id, e);
+                    }
+                },
+                Err(e) => {
+                    log::warn!("⚠️  Cannot connect to node '{}': {}, skipping", node_id, e);
+                }
+            }
+        }
+
+        if node_states.is_empty() {
             return Err(CoreError::ClusterState(
-                "No idle nodes available".to_string(),
+                "No connectable nodes available".to_string(),
             ));
         }
 
-        // TODO: 实现更智能的选择策略（考虑负载、容量等）
-        // 目前简单返回第一个
-        Ok(idle_nodes[0].clone())
+        // 按照负载排序：综合评分 = partition数量*0.4 + CPU*0.3 + 内存*0.2 + 系统负载*10*0.1
+        node_states.sort_by(|(_, a), (_, b)| {
+            let score_a = a.partition_count as f32 * 0.4
+                + a.cpu_usage * 0.3
+                + a.memory_usage * 0.2
+                + a.load_avg_1min * 10.0 * 0.1;
+            let score_b = b.partition_count as f32 * 0.4
+                + b.cpu_usage * 0.3
+                + b.memory_usage * 0.2
+                + b.load_avg_1min * 10.0 * 0.1;
+            score_a
+                .partial_cmp(&score_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // 选择负载最低的节点
+        let (selected_node, node_info) = &node_states[0];
+        log::info!(
+            "✅ Selected node '{}' with {} partitions, CPU: {:.1}%, Memory: {:.1}%, Load: {:.2}",
+            selected_node,
+            node_info.partition_count,
+            node_info.cpu_usage,
+            node_info.memory_usage,
+            node_info.load_avg_1min
+        );
+
+        Ok(selected_node.clone())
     }
 
     /// 更新节点状态缓存
@@ -357,10 +437,7 @@ pub async fn start_coord_job(calm_service: Arc<CalmService>) -> CoreResult<()> {
         .as_ref()
         .ok_or_else(|| CoreError::ClusterState("Cluster manager not available".to_string()))?;
 
-    let catalog = calm_service.catalog.clone();
-    let engine = calm_service.engine.clone();
-
-    let mut job_service = JobService::new(catalog, cm.clone(), engine);
+    let mut job_service = JobService::new(calm_service.clone());
 
     let mut live_nodes_stream = cm.chitchat.lock().await.live_nodes_watch_stream();
     let mut last_live_nodes = cm.live_nodes().await;
@@ -408,7 +485,7 @@ pub async fn start_coord_job(calm_service: Arc<CalmService>) -> CoreResult<()> {
                 match event {
                     CoordClusterEvent::PartitionChanged { key, value, node } => {
                         if let Err(e) = crate::calm::job::handle_partition_changed(
-                            &job_service.catalog,
+                            &job_service.calm_service.catalog(),
                             &key,
                             &value,
                             &node,

@@ -251,6 +251,8 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                 tokio::runtime::Handle::current().block_on(async {
                     use crate::compute::natural_order_executor::NaturalOrderExecutor;
 
+                    //TODO!();
+
                     let executor = NaturalOrderExecutor::new(self.calm_service.engine().clone());
 
                     match executor.execute_natural_cursor(&sql).await {
@@ -460,6 +462,8 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             log::info!("📨 [MySQL] Received query: {}", query_trimmed);
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
+                    use crate::calm::CalmRpcService;
+
                     // 解析表名 (如果有指定)
                     let parts: Vec<&str> = query_trimmed.split_whitespace().collect();
 
@@ -472,7 +476,13 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                         let mut failed_tables = Vec::new();
 
                         for table_name in tables {
-                            match self.calm_service.engine().flush_table(&table_name).await {
+                            match CalmRpcService::flush_table(
+                                Arc::as_ref(&self.calm_service).clone(),
+                                tarpc::context::current(),
+                                table_name.clone(),
+                            )
+                            .await
+                            {
                                 Ok(_) => {
                                     success_count += 1;
                                     log::info!("✅ Flushed table '{}'", table_name);
@@ -513,7 +523,13 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
                         let mut failed_tables = Vec::new();
                         for table_name in &table_names {
-                            match self.calm_service.engine().flush_table(table_name).await {
+                            match CalmRpcService::flush_table(
+                                Arc::as_ref(&self.calm_service).clone(),
+                                tarpc::context::current(),
+                                table_name.clone(),
+                            )
+                            .await
+                            {
                                 Ok(_) => {
                                     log::info!("✅ Flushed table '{}'", table_name);
                                 }
@@ -662,73 +678,100 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                     let mut doc_counts = Vec::new();
 
                     if let Some(table_name) = table_name_opt {
-                        let part_names = self
-                            .calm_service
-                            .engine()
-                            .list_partitions(&table_name)
-                            .await;
-                        for p in part_names {
-                            let seg_infos = self
-                                .calm_service
-                                .engine()
-                                .list_segments(&table_name, &p)
-                                .await;
-                            if seg_infos.is_empty() {
-                                tables.push(table_name.clone());
-                                partitions.push(p.clone());
-                                segments.push(String::from("-"));
-                                segment_types.push(String::from("-"));
-                                created_list.push(String::from("-"));
-                                doc_counts.push(String::from("-"));
-                            } else {
-                                for (seg_id, doc_count, created_ts_ms, is_current) in seg_infos {
-                                    tables.push(table_name.clone());
-                                    partitions.push(p.clone());
-                                    segments.push(seg_id.to_string());
-                                    let seg_type = if is_current { "current" } else { "frozen" };
-                                    segment_types.push(seg_type.to_string());
-                                    // 格式化时间戳为本地时区 2025-11-24 11:24:33.006
-                                    let dt = chrono::DateTime::from_timestamp_millis(
-                                        created_ts_ms as i64,
-                                    )
-                                    .unwrap_or_else(|| {
-                                        chrono::DateTime::from_timestamp(0, 0).unwrap()
-                                    })
-                                    .with_timezone(&chrono::Local);
-                                    let formatted = dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-                                    created_list.push(formatted);
-                                    doc_counts.push(doc_count.to_string());
+                        // 使用 RPC 获取完整的表详情（包括所有节点的分区和段信息）
+                        use crate::calm::CalmRpcService;
+
+                        match CalmRpcService::get_table_detail(
+                            Arc::as_ref(&self.calm_service).clone(),
+                            tarpc::context::current(),
+                            table_name.clone(),
+                        )
+                        .await
+                        {
+                            Ok(table_detail) => {
+                                for (partition_name, partition_detail) in table_detail.partitions {
+                                    if partition_detail.segments.is_empty() {
+                                        tables.push(table_name.clone());
+                                        partitions.push(partition_name.clone());
+                                        segments.push(String::from("-"));
+                                        segment_types.push(String::from("-"));
+                                        created_list.push(String::from("-"));
+                                        doc_counts.push(String::from("-"));
+                                    } else {
+                                        for seg_detail in partition_detail.segments {
+                                            tables.push(table_name.clone());
+                                            partitions.push(partition_name.clone());
+                                            segments.push(seg_detail.segment_id.to_string());
+                                            let seg_type = if seg_detail.is_persisted {
+                                                "frozen"
+                                            } else {
+                                                "current"
+                                            };
+                                            segment_types.push(seg_type.to_string());
+                                            // TableDetail 没有 created_ts，使用默认值
+                                            created_list.push(String::from("-"));
+                                            doc_counts.push(seg_detail.doc_count.to_string());
+                                        }
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                log::error!("❌ Failed to get table detail: {}", e);
+                                return results.error(
+                                    ErrorKind::ER_UNKNOWN_ERROR,
+                                    format!("Failed to get table detail: {}", e).as_bytes(),
+                                );
                             }
                         }
                     } else {
-                        let all_keys = self.calm_service.engine().list_all_partition_keys().await;
-                        for (t, p) in all_keys {
-                            let seg_infos = self.calm_service.engine().list_segments(&t, &p).await;
-                            if seg_infos.is_empty() {
-                                tables.push(t.clone());
-                                partitions.push(p.clone());
-                                segments.push(String::from("-"));
-                                segment_types.push(String::from("-"));
-                                created_list.push(String::from("-"));
-                                doc_counts.push(String::from("-"));
-                            } else {
-                                for (seg_id, doc_count, created_ts_ms, is_current) in seg_infos {
-                                    tables.push(t.clone());
-                                    partitions.push(p.clone());
-                                    segments.push(seg_id.to_string());
-                                    let seg_type = if is_current { "current" } else { "frozen" };
-                                    segment_types.push(seg_type.to_string());
-                                    let dt = chrono::DateTime::from_timestamp_millis(
-                                        created_ts_ms as i64,
-                                    )
-                                    .unwrap_or_else(|| {
-                                        chrono::DateTime::from_timestamp(0, 0).unwrap()
-                                    })
-                                    .with_timezone(&chrono::Local);
-                                    let formatted = dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-                                    created_list.push(formatted);
-                                    doc_counts.push(doc_count.to_string());
+                        // 显示所有表的分区
+                        let all_tables = self.calm_service.catalog().list_tables().await;
+
+                        for table_name in all_tables {
+                            use crate::calm::CalmRpcService;
+
+                            match CalmRpcService::get_table_detail(
+                                Arc::as_ref(&self.calm_service).clone(),
+                                tarpc::context::current(),
+                                table_name.clone(),
+                            )
+                            .await
+                            {
+                                Ok(table_detail) => {
+                                    for (partition_name, partition_detail) in
+                                        table_detail.partitions
+                                    {
+                                        if partition_detail.segments.is_empty() {
+                                            tables.push(table_name.clone());
+                                            partitions.push(partition_name.clone());
+                                            segments.push(String::from("-"));
+                                            segment_types.push(String::from("-"));
+                                            created_list.push(String::from("-"));
+                                            doc_counts.push(String::from("-"));
+                                        } else {
+                                            for seg_detail in partition_detail.segments {
+                                                tables.push(table_name.clone());
+                                                partitions.push(partition_name.clone());
+                                                segments.push(seg_detail.segment_id.to_string());
+                                                let seg_type = if seg_detail.is_persisted {
+                                                    "frozen"
+                                                } else {
+                                                    "current"
+                                                };
+                                                segment_types.push(seg_type.to_string());
+                                                created_list.push(String::from("-"));
+                                                doc_counts.push(seg_detail.doc_count.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "⚠️  Failed to get detail for table {}: {}",
+                                        table_name,
+                                        e
+                                    );
+                                    continue;
                                 }
                             }
                         }
@@ -1387,140 +1430,7 @@ async fn handle_delete<W: io::Read + io::Write>(
 ) -> io::Result<()> {
     // 解析 DELETE 语句
     // 格式: DELETE FROM table WHERE condition;
-
-    let query_clean = query.trim().trim_end_matches(';');
-    let query_lower = query_clean.to_lowercase();
-
-    // 提取表名
-    let from_pos = query_lower
-        .find("from ")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing 'FROM'"))?
-        + 5;
-
-    let where_pos = query_lower.find("where ");
-
-    let table_name = if let Some(where_pos) = where_pos {
-        query_clean[from_pos..where_pos].trim().to_string()
-    } else {
-        return results.error(
-            ErrorKind::ER_PARSE_ERROR,
-            b"DELETE without WHERE is not supported for safety",
-        );
-    };
-
-    // 获取表元数据
-    let table_info = calm_service
-        .catalog()
-        .get_or_load_table(&table_name)
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("Table not found: {}", e)))?;
-    let meta = &table_info.table;
-
-    // 构建 SELECT 查询来找到要删除的记录
-    let where_clause = &query_clean[where_pos.unwrap() + 6..];
-    let select_query = format!("SELECT * FROM {} WHERE {}", table_name, where_clause);
-
-    // 使用流式查询然后 collect
-    use futures::StreamExt;
-    let mut stream = match calm_service.execute_query_stream(&select_query).await {
-        Ok(s) => s,
-        Err(e) => {
-            let msg = format!("Query execution failed: {}", e);
-            return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
-        }
-    };
-
-    let mut batches = Vec::new();
-    while let Some(batch_result) = stream.next().await {
-        let batch = match batch_result {
-            Ok(b) => b,
-            Err(e) => {
-                let msg = format!("Stream error: {}", e);
-                return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
-            }
-        };
-        batches.push(batch);
-    }
-
-    if batches.is_empty() {
-        return results.completed(0, 0);
-    }
-
-    // 合并 batches
-    use datafusion::arrow::compute::concat_batches;
-    let result = if batches.len() == 1 {
-        batches.into_iter().next().unwrap()
-    } else {
-        let schema = batches[0].schema();
-        match concat_batches(&schema, &batches) {
-            Ok(b) => b,
-            Err(e) => {
-                let msg = format!("Failed to concat batches: {}", e);
-                return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
-            }
-        }
-    };
-
-    if result.num_rows() == 0 {
-        return results.completed(0, 0);
-    }
-
-    // 提取主键值
-    let pk_field =
-        meta.schema.primary_key.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Table has no primary key")
-        })?;
-
-    let mut total_deleted = 0u64;
-
-    let batch = result;
-    let pk_array = batch.column_by_name(pk_field).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "Primary key column not found")
-    })?;
-
-    // 对每个主键值进行路由和删除
-    for i in 0..pk_array.len() {
-        let pk_value = format_arrow_value(pk_array, i);
-
-        // 简化：直接使用第一个分区
-        let partition_id = "p0".to_string();
-
-        let partition = calm_service
-            .engine()
-            .get_partition(&table_name, &partition_id)
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Partition not found"))?;
-
-        // 创建单个值的数组用于删除
-        let pk_array_single = match pk_array.data_type() {
-            DataType::Int64 => {
-                let typed = pk_array.as_any().downcast_ref::<Int64Array>().unwrap();
-                Arc::new(Int64Array::from(vec![typed.value(i)])) as ArrayRef
-            }
-            DataType::UInt64 => {
-                let typed = pk_array.as_any().downcast_ref::<UInt64Array>().unwrap();
-                Arc::new(UInt64Array::from(vec![typed.value(i)])) as ArrayRef
-            }
-            DataType::Utf8 => {
-                let typed = pk_array.as_any().downcast_ref::<StringArray>().unwrap();
-                Arc::new(StringArray::from(vec![typed.value(i)])) as ArrayRef
-            }
-            _ => {
-                return results.error(
-                    ErrorKind::ER_NOT_SUPPORTED_YET,
-                    b"Unsupported primary key type for DELETE",
-                );
-            }
-        };
-
-        let deleted = partition
-            .delete_by_pk(&pk_array_single)
-            .map_err(|e| io::Error::other(format!("Delete failed: {}", e)))?;
-
-        total_deleted += deleted;
-    }
-
-    results.completed(total_deleted, 0)
+    todo!()
 }
 
 /// 写入查询结果

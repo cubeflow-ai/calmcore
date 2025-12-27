@@ -52,6 +52,25 @@ pub struct SegmentDetail {
     pub external_data_path: Option<String>,
 }
 
+/// 节点状态信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeInfo {
+    /// 节点ID
+    pub node_id: String,
+    /// Partition 数量
+    pub partition_count: usize,
+    /// CPU 使用率 (0-100)
+    pub cpu_usage: f32,
+    /// 内存使用率 (0-100)
+    pub memory_usage: f32,
+    /// 总内存 (bytes)
+    pub total_memory: u64,
+    /// 已使用内存 (bytes)
+    pub used_memory: u64,
+    /// 系统负载 (1分钟平均负载)
+    pub load_avg_1min: f32,
+}
+
 #[derive(Clone)]
 pub struct CalmService {
     pub(crate) catalog: Arc<Catalog>,
@@ -582,99 +601,102 @@ impl CalmService {
             HashMap::new()
         };
 
-        let my_node_id = self.cluster_manager.node_id();
-        let mut total_inserted = 0;
+        let my_node_id = self.cluster_manager.node_id().map(|s| s.to_string());
 
-        for (partition_name, partition_batch) in routed_batches {
-            let rows = partition_batch.num_rows();
+        // 并发处理所有分区
+        let tasks: Vec<_> = routed_batches
+            .into_iter()
+            .map(|(partition_name, partition_batch)| {
+                let table_name = table_name.to_string();
+                let partition_routes = partition_routes.clone();
+                let my_node_id = my_node_id.clone();
+                let engine = self.engine.clone();
+                let catalog = self.catalog.clone();
+                let meta_schema = meta.schema.clone();
+                
+                // 克隆 self 用于远程调用
+                let calm_service = Arc::new(Self {
+                    catalog: self.catalog.clone(),
+                    cluster_manager: self.cluster_manager.clone(),
+                    engine: self.engine.clone(),
+                });
 
-            // 检查分区归属
-            let owner_node = partition_routes
-                .get(&(table_name.to_string(), partition_name.clone()))
-                .map(|(owner, _version)| owner.as_str());
+                tokio::spawn(async move {
+                    let rows = partition_batch.num_rows();
 
-            // 判断是远程分区还是本地分区
-            let is_remote = match (owner_node, my_node_id) {
-                (Some(owner), Some(me)) => owner != me,
-                _ => false,
-            };
+                    // 检查分区归属
+                    let owner_node = partition_routes
+                        .get(&(table_name.clone(), partition_name.clone()))
+                        .map(|(owner, _version)| owner.clone());
 
-            log::info!(
-                "🔍 [CalmService] Partition '{}': owner={:?}, my_node_id={:?}, is_remote={}",
-                partition_name,
-                owner_node,
-                my_node_id,
-                is_remote
-            );
+                    // 判断是远程分区还是本地分区
+                    let is_remote = match (owner_node.as_deref(), my_node_id.as_deref()) {
+                        (Some(owner), Some(me)) => owner != me,
+                        _ => false,
+                    };
 
-            if is_remote {
-                // 远程分区：通过 Flight do_put 发送 RecordBatch
-                let owner = owner_node.unwrap();
-                log::debug!(
-                    "📡 [CalmService] Forwarding {} rows to remote partition '{}' on node '{}'",
-                    rows,
-                    partition_name,
-                    owner
-                );
-
-                // 通过 Flight do_put 发送 RecordBatch 到远程节点
-                self.flight_do_put(owner, table_name, &partition_name, partition_batch)
-                    .await
-                    .map_err(|e| {
-                        log::error!(
-                            "❌ [CalmService] Failed to send {} rows to remote node '{}': {}",
-                            rows,
-                            owner,
-                            e
-                        );
-                        e
-                    })?;
-
-                log::debug!(
-                    "✅ [CalmService] Successfully sent {} rows to remote partition '{}'",
-                    rows,
-                    partition_name
-                );
-
-                total_inserted += rows;
-            } else {
-                // 本地分区：直接插入 RecordBatch
-                if self
-                    .engine
-                    .get_partition(table_name, &partition_name)
-                    .await
-                    .is_none()
-                {
-                    log::debug!(
-                        "🔧 [CalmService] Creating local partition '{}'",
-                        partition_name
+                    log::info!(
+                        "🔍 [CalmService] Partition '{}': owner={:?}, my_node_id={:?}, is_remote={}",
+                        partition_name,
+                        owner_node,
+                        my_node_id,
+                        is_remote
                     );
-                    let partition_dir = self.catalog.partition_dir(table_name, &partition_name);
-                    self.engine
-                        .load_partition(
-                            table_name,
-                            &partition_name,
-                            partition_dir,
-                            meta.schema.clone(),
-                        )
-                        .await?;
+
+                    if is_remote {
+                        let owner = owner_node.unwrap();
+                        log::debug!(
+                            "📡 [CalmService] Forwarding {} rows to remote partition '{}' on node '{}'",
+                            rows,
+                            partition_name,
+                            owner
+                        );
+
+                        calm_service
+                            .flight_do_put(&owner, &table_name, &partition_name, partition_batch)
+                            .await?;
+
+                        log::debug!(
+                            "✅ [CalmService] Successfully sent {} rows to remote partition '{}'",
+                            rows,
+                            partition_name
+                        );
+                    } else {
+                        // 本地分区：必须已存在
+                        let partition = engine.get_partition(&table_name, &partition_name).await
+                            .ok_or_else(|| CoreError::NotExisted(
+                                format!("Partition '{}/{}' does not exist", table_name, partition_name)
+                            ))?;
+
+                        log::debug!(
+                            "💾 [CalmService] Inserting {} rows to local partition '{}'",
+                            rows,
+                            partition_name
+                        );
+
+                        engine.insert_batch(&table_name, &partition_name, partition_batch).await?;
+                    }
+
+                    Ok::<usize, CoreError>(rows)
+                })
+            })
+            .collect();
+
+        // 等待所有任务完成并统计结果
+        let mut total_inserted = 0;
+        
+        for task in tasks {
+            match task.await {
+                Ok(Ok(rows)) => {
+                    total_inserted += rows;
                 }
-
-                log::debug!(
-                    "💾 [CalmService] Inserting {} rows to local partition '{}'",
-                    rows,
-                    partition_name
-                );
-
-                self.engine
-                    .insert_batch(table_name, &partition_name, partition_batch)
-                    .await
-                    .map_err(|e| {
-                        log::error!("❌ [CalmService] Failed to insert {} rows: {}", rows, e);
-                        e
-                    })?;
-
-                total_inserted += rows;
+                Ok(Err(e)) => {
+                    log::error!("❌ [CalmService] Partition insert failed: {}", e);
+                    return Err(e);
+                }
+                Err(e) => {
+                    return Err(CoreError::Internal(format!("Task panicked: {}", e)));
+                }
             }
         }
 

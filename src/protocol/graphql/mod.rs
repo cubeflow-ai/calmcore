@@ -1223,6 +1223,110 @@ impl QueryRoot {
             total_rows,
         })
     }
+
+    /// 获取当前节点的状态信息
+    ///
+    /// 返回当前节点的系统资源使用情况和分区负载信息。
+    ///
+    /// # MCP 提示
+    ///
+    /// **返回:** JSON 对象(包含 CPU、内存、负载等信息)
+    ///
+    /// **字段说明:**
+    /// - `node_id`: 节点唯一标识符
+    /// - `partition_count`: 当前节点上的分区数量
+    /// - `cpu_usage`: CPU 使用率 (0-100)
+    /// - `memory_usage`: 内存使用率 (0-100)
+    /// - `total_memory`: 总内存 (bytes)
+    /// - `used_memory`: 已使用内存 (bytes)
+    /// - `load_avg_1min`: 系统 1 分钟平均负载
+    ///
+    /// **用途:**
+    /// - 监控节点健康状态
+    /// - 查看分区分布
+    /// - 诊断性能问题
+    ///
+    /// **示例:**
+    /// ```graphql
+    /// query {
+    ///   nodeInfo
+    /// }
+    /// # 返回示例:
+    /// # {
+    /// #   "node_id": "20231225120530123_127.0.0.1_52000_52001",
+    /// #   "partition_count": 16,
+    /// #   "cpu_usage": 45.3,
+    /// #   "memory_usage": 62.1,
+    /// #   "total_memory": 17179869184,
+    /// #   "used_memory": 10672529408,
+    /// #   "load_avg_1min": 2.5
+    /// # }
+    /// ```
+    async fn node_info(&self, ctx: &Context<'_>) -> Result<Json<crate::calm::NodeInfo>> {
+        let service = ctx.data::<Arc<CalmService>>()?;
+
+        let node_info =
+            CalmRpcService::node_info(Arc::as_ref(&service).clone(), tarpc::context::current())
+                .await
+                .map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to get node info: {}", e))
+                })?;
+
+        Ok(Json(node_info))
+    }
+
+    /// 获取所有存活节点的状态信息（仅协调节点）
+    ///
+    /// 返回集群中所有存活节点的系统资源使用情况和分区负载信息。
+    ///
+    /// # MCP 提示
+    ///
+    /// **返回:** JSON 数组，每个元素包含一个节点的状态信息
+    ///
+    /// **用途:**
+    /// - 集群整体健康监控
+    /// - 负载均衡决策
+    /// - 容量规划
+    ///
+    /// **示例:**
+    /// ```graphql
+    /// query {
+    ///   listNode
+    /// }
+    /// # 返回示例:
+    /// # [
+    /// #   {
+    /// #     "node_id": "20231225120530123_127.0.0.1_52000_52001",
+    /// #     "partition_count": 16,
+    /// #     "cpu_usage": 45.3,
+    /// #     "memory_usage": 62.1,
+    /// #     "total_memory": 17179869184,
+    /// #     "used_memory": 10672529408,
+    /// #     "load_avg_1min": 2.5
+    /// #   },
+    /// #   {
+    /// #     "node_id": "20231225120530124_127.0.0.1_52100_52101",
+    /// #     "partition_count": 12,
+    /// #     "cpu_usage": 38.7,
+    /// #     "memory_usage": 55.2,
+    /// #     "total_memory": 17179869184,
+    /// #     "used_memory": 9486323712,
+    /// #     "load_avg_1min": 1.8
+    /// #   }
+    /// # ]
+    /// ```
+    async fn list_node(&self, ctx: &Context<'_>) -> Result<Json<Vec<crate::calm::NodeInfo>>> {
+        let service = ctx.data::<Arc<CalmService>>()?;
+
+        let node_infos =
+            CalmRpcService::list_node(Arc::as_ref(&service).clone(), tarpc::context::current())
+                .await
+                .map_err(|e| {
+                    async_graphql::Error::new(format!("Failed to get node list: {}", e))
+                })?;
+
+        Ok(Json(node_infos))
+    }
 }
 
 // ===== Mutation Root =====
@@ -1650,7 +1754,9 @@ impl MutationRoot {
         let service = ctx.data::<Arc<CalmService>>()?;
 
         // 1. 获取表元数据以获取 Arrow Schema
-        let table_info = service.catalog.get_or_load_table(&input.table)
+        let table_info = service
+            .catalog
+            .get_or_load_table(&input.table)
             .await
             .map_err(|e| async_graphql::Error::new(format!("Failed to load table: {}", e)))?;
 
@@ -1675,9 +1781,11 @@ impl MutationRoot {
         use crate::utils::arrow_utils;
         let batch = arrow_utils::json_to_record_batch(
             &normalized_data,
-            table_info.table.schema.to_arrow_schema()
+            table_info.table.schema.to_arrow_schema(),
         )
-        .map_err(|e| async_graphql::Error::new(format!("Failed to convert JSON to RecordBatch: {}", e)))?;
+        .map_err(|e| {
+            async_graphql::Error::new(format!("Failed to convert JSON to RecordBatch: {}", e))
+        })?;
 
         // 4. 调用 CalmService 插入数据（内部使用 Router 路由）
         let rows_inserted = service
