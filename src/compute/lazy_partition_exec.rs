@@ -399,17 +399,19 @@ impl ExecutionPlan for LazyPartitionExec {
         // 使用 tokio runtime 来执行
         let exec = self.clone();
         let context_clone = _context.clone();
-        
+
         // 创建一个 future 并立即执行
         use tokio::runtime::Handle;
         let handle = Handle::current();
-        
+
         let stream_future = async move {
-            exec.load_and_execute(partition, engine, &context_clone).await
+            exec.load_and_execute(partition, engine, &context_clone)
+                .await
         };
-        
+
         // 阻塞执行（因为 execute 本身不是 async）
-        let stream = handle.block_on(stream_future)
+        let stream = handle
+            .block_on(stream_future)
             .map_err(|e| DataFusionError::Internal(e.to_string()))?;
 
         Ok(stream)
