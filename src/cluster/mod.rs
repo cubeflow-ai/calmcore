@@ -69,7 +69,7 @@ pub mod keys {
     /// - 使用 `parse_flight_address_from_node_id()` 提取 Flight 地址
     pub fn make_node_id(host: &str, tarpc_port: u16, flight_port: u16) -> String {
         format!(
-            "{}_{}_{}_{}", 
+            "{}_{}_{}_{}",
             chrono::Utc::now().format("%Y%m%d%H%M%S%3f"),
             host,
             tarpc_port,
@@ -173,15 +173,12 @@ impl ClusterManager {
         //   - grpc_port: 自定义 Flight（do_put + SQL）
         //   - grpc_port+1: datafusion-distributed Flight（分布式查询）
         let tarpc_port = cluster_config.internal_port;
-        let custom_flight_port = cluster_config
-            .distributed
-            .grpc_port
-            .ok_or_else(|| {
-                CoreError::ConfigError(
-                    "grpc_port must be configured in cluster.distributed".to_string(),
-                )
-            })?;
-        
+        let custom_flight_port = cluster_config.distributed.grpc_port.ok_or_else(|| {
+            CoreError::ConfigError(
+                "grpc_port must be configured in cluster.distributed".to_string(),
+            )
+        })?;
+
         // node_id 中的 flight_port 指向 custom Flight（用于 do_put 和 SQL）
         // ChannelResolver 会自动 +1 连接到 distributed Flight
 
@@ -190,14 +187,11 @@ impl ClusterManager {
             .host
             .as_ref()
             .ok_or_else(|| CoreError::ConfigError("Host not configured".to_string()))?;
-        
+
         let node_id = keys::make_node_id(host, tarpc_port, custom_flight_port);
 
         log::info!("🚀 [Cluster] Starting node {}", node_id);
-        log::info!(
-            "📡 [Cluster] Gossip listen address: {}",
-            gossip_listen_addr
-        );
+        log::info!("📡 [Cluster] Gossip listen address: {}", gossip_listen_addr);
         log::info!(
             "🔌 [Cluster] tarpc RPC port: {}, Flight ports: {} (custom), {} (distributed)",
             tarpc_port,
@@ -215,7 +209,7 @@ impl ClusterManager {
         let chitchat = gossip.chitchat();
 
         let tarpc_addr = format!("{}:{}", host, tarpc_port);
-        
+
         let manager = Self {
             gossip,
             chitchat,
@@ -430,12 +424,12 @@ impl ClusterManager {
             all_known_nodes.insert(node.node_id.clone());
         }
 
-        // 添加从各个节点 state 中发现的 CENTER_NODE_KEY 声明的协调节点
-        for (_node_id, state) in chitchat.node_states() {
-            if let Some(coord_node) = state.get(CENTER_NODE_KEY) {
-                all_known_nodes.insert(coord_node.to_string());
-            }
-        }
+        // 添加从各个节点 state 中发现的 CENTER_NODE_KEY 声明的协调节点，除了自己, 存在一个最小节点的污染导致选举无法继续
+        // for (_node_id, state) in chitchat.node_states() {
+        //     if let Some(coord_node) = state.get(CENTER_NODE_KEY) {
+        //         all_known_nodes.insert(coord_node.to_string());
+        //     }
+        // }
 
         // 2. 将所有已知节点按 node_id 排序
         let mut sorted_nodes: Vec<String> = all_known_nodes.into_iter().collect();
