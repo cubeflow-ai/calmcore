@@ -48,6 +48,17 @@ impl Partition {
     ) -> Self {
         let schema = Arc::new(schema);
         let arrow_schema = schema.to_arrow_schema();
+
+        log::info!(
+            "🆕 [Partition::new] Created partition {} for table {}. Schema fields: {}",
+            id,
+            table_name,
+            arrow_schema.fields().len()
+        );
+        for (i, field) in arrow_schema.fields().iter().enumerate() {
+            log::debug!("  Field {}: {}", i, field.name());
+        }
+
         Partition {
             name: id,
             table_name,
@@ -801,6 +812,17 @@ impl Partition {
         let current_segment = Segment::new(next_start, schema.clone());
 
         let arrow_schema = schema.to_arrow_schema();
+
+        log::info!(
+            "📂 [Partition::load] Loaded partition {} for table {}. Schema fields: {}",
+            id,
+            table_name,
+            arrow_schema.fields().len()
+        );
+        for (i, field) in arrow_schema.fields().iter().enumerate() {
+            log::debug!("  Field {}: {}", i, field.name());
+        }
+
         Ok(Partition {
             name: id,
             table_name,

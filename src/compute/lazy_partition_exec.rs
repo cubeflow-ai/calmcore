@@ -19,7 +19,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
 use futures::stream;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 
 use crate::engine::Engine;
 use crate::utils::error::CoreResult;
@@ -207,7 +207,7 @@ impl LazyPartitionExec {
         &self,
         partition_idx: usize,
         engine: Arc<Engine>,
-        context: &TaskContext,
+        context: Arc<TaskContext>,
     ) -> CoreResult<SendableRecordBatchStream> {
         use crate::compute::table_provider::partition_table_provider::PartitionTableProvider;
         use datafusion::datasource::TableProvider;
@@ -290,20 +290,22 @@ impl LazyPartitionExec {
                 ))
             })?;
 
+        log::info!(
+            "🔍 [LazyPartitionExec] Loaded partition '{}'. Schema fields: {}",
+            partition_name,
+            partition.arrow_schema.fields().len()
+        );
+        if let Some(ref proj) = self.projection {
+            log::info!("🔍 [LazyPartitionExec] Projection: {:?}", proj);
+        }
+
         // 创建 PartitionTableProvider
         let provider = PartitionTableProvider::new(partition);
 
-        // 创建一个临时的 SessionState（用于调用 scan）
-        use datafusion::execution::SessionStateBuilder;
-        let state = SessionStateBuilder::new().build();
-
-        // 调用 scan，应用 filters、projection、limit
+        // 直接调用 scan_partition，避免创建 SessionState (可能导致 runtime 嵌套问题)
         // 注意：self.schema 已经应用了 projection，所以这里需要传递原始 projection
         // 而不是 None，让 PartitionTableProvider 自己处理
-        let exec = provider
-            .scan(&state, self.projection.as_ref(), &self.filters, self.limit)
-            .await
-            .map_err(|e| crate::utils::error::CoreError::Internal(format!("Scan failed: {}", e)))?;
+        let exec = provider.scan_partition(self.projection.as_ref(), &self.filters, self.limit);
 
         log::info!(
             "✅ [LazyPartitionExec] Partition '{}' loaded, executing scan",
@@ -311,8 +313,8 @@ impl LazyPartitionExec {
         );
 
         // 执行计划（这里会创建 MultiSegmentExec 并执行，但只在本地）
-        let ctx = Arc::new(TaskContext::default());
-        let stream = exec.execute(0, ctx).map_err(|e| {
+        // 使用传入的 context，避免创建新的 RuntimeEnv
+        let stream = exec.execute(0, context.clone()).map_err(|e| {
             crate::utils::error::CoreError::Internal(format!("Execute failed: {}", e))
         })?;
 
@@ -395,25 +397,34 @@ impl ExecutionPlan for LazyPartitionExec {
                 .map_err(|e| DataFusionError::Internal(format!("Failed to get Engine: {}", e)))?
         };
 
-        // 直接调用 load_and_execute（这是同步调用异步方法）
-        // 使用 tokio runtime 来执行
+        // 异步执行 load_and_execute，避免在 runtime 中调用 block_on
         let exec = self.clone();
         let context_clone = _context.clone();
+        let schema = self.output_schema.clone();
+        let schema_for_err = schema.clone();
 
-        // 创建一个 future 并立即执行
-        use tokio::runtime::Handle;
-        let handle = Handle::current();
-
-        let stream_future = async move {
-            exec.load_and_execute(partition, engine, &context_clone)
+        let future_stream = async move {
+            match exec
+                .load_and_execute(partition, engine, context_clone)
                 .await
+            {
+                Ok(stream) => stream,
+                Err(e) => {
+                    // 如果加载失败，返回一个包含错误的流
+                    let err = DataFusionError::Internal(e.to_string());
+                    let error_stream = stream::once(async move { Err(err) });
+                    Box::pin(RecordBatchStreamAdapter::new(schema_for_err, error_stream))
+                        as SendableRecordBatchStream
+                }
+            }
         };
 
-        // 阻塞执行（因为 execute 本身不是 async）
-        let stream = handle
-            .block_on(stream_future)
-            .map_err(|e| DataFusionError::Internal(e.to_string()))?;
+        // 将 Future<Stream> 转换为 Stream<Item>
+        let stream = stream::once(future_stream).flatten();
 
-        Ok(stream)
+        // 使用 RecordBatchStreamAdapter 包装
+        let adapter = RecordBatchStreamAdapter::new(schema, stream);
+
+        Ok(Box::pin(adapter))
     }
 }

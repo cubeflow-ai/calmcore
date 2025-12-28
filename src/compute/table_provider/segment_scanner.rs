@@ -1040,10 +1040,24 @@ impl SegmentScanner {
                     );
 
                     let schema = plan.schema();
+
+                    log::debug!(
+                        "🔧 [build_exec_plan] Applying projection after filter. Schema fields: {}, Projection indices: {:?}",
+                        schema.fields().len(),
+                        proj_indices
+                    );
+
                     // 构建投影表达式: (物理表达式, 列名)
                     let projection_exprs: Vec<_> = proj_indices
                         .iter()
                         .map(|&i| {
+                            if i >= schema.fields().len() {
+                                log::error!(
+                                    "❌ [build_exec_plan] Projection index {} out of bounds for schema with {} fields!",
+                                    i,
+                                    schema.fields().len()
+                                );
+                            }
                             use datafusion::physical_expr::expressions::Column;
                             let field = schema.field(i);
                             (

@@ -43,6 +43,30 @@ impl PartitionTableProvider {
         Self { partition, schema }
     }
 
+    pub fn scan_partition(
+        &self,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> Arc<dyn ExecutionPlan> {
+        log::info!(
+            "🔍 [PartitionTableProvider::scan_partition] Starting scan for partition {}, projection={:?}, filters={}, limit={:?}",
+            self.partition.name(),
+            projection,
+            filters.len(),
+            limit
+        );
+
+        // 🚀 Partition 级别: 启动 tokio task，串行处理多个 Segments
+        Arc::new(PartitionExec::new(
+            self.partition.clone(),
+            self.schema.clone(),
+            filters.to_vec(),
+            projection.cloned(),
+            limit,
+        ))
+    }
+
     /// Create SegmentScanner for a segment
     /// Simply extracts the needed data from Segment and constructs SegmentScanner
     #[allow(dead_code)]
@@ -105,22 +129,7 @@ impl TableProvider for PartitionTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        log::info!(
-            "🔍 [PartitionTableProvider::scan] Starting scan for partition {}, projection={:?}, filters={}, limit={:?}",
-            self.partition.name(),
-            projection,
-            filters.len(),
-            limit
-        );
-
-        // 🚀 Partition 级别: 启动 tokio task，串行处理多个 Segments
-        Ok(Arc::new(PartitionExec::new(
-            self.partition.clone(),
-            self.schema.clone(),
-            filters.to_vec(),
-            projection.cloned(),
-            limit,
-        )))
+        Ok(self.scan_partition(projection, filters, limit))
     }
 }
 
@@ -148,6 +157,28 @@ impl PartitionExec {
         projection: Option<Vec<usize>>,
         limit: Option<usize>,
     ) -> Self {
+        // Debug logging for schema and projection
+        if let Some(ref proj) = projection {
+            log::info!(
+                "🔍 [PartitionExec::new] Creating with projection: {:?}, schema fields: {}",
+                proj,
+                schema.fields().len()
+            );
+            for idx in proj {
+                if *idx >= schema.fields().len() {
+                    log::error!(
+                        "❌ [PartitionExec::new] Projection index {} out of bounds for schema with {} fields!",
+                        idx,
+                        schema.fields().len()
+                    );
+                    // Print schema fields for debugging
+                    for (i, field) in schema.fields().iter().enumerate() {
+                        log::error!("  Field {}: {}", i, field.name());
+                    }
+                }
+            }
+        }
+
         // 计算投影后的 schema
         let output_schema = if let Some(ref proj) = projection {
             if proj.is_empty() {
@@ -458,9 +489,9 @@ impl MultiSegmentExec {
 
     /// Get projection
     pub fn projection(&self) -> Vec<usize> {
-        self.projection.clone().unwrap_or_else(|| {
-            (0..self.schema.fields().len()).collect()
-        })
+        self.projection
+            .clone()
+            .unwrap_or_else(|| (0..self.schema.fields().len()).collect())
     }
 
     /// Get limit
