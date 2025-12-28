@@ -165,6 +165,10 @@ impl LazyPartitionExec {
         &self.partition_owners
     }
 
+    pub fn base_schema(&self) -> SchemaRef {
+        self.base_schema.clone()
+    }
+
     pub fn filters(&self) -> &[Expr] {
         &self.filters
     }
@@ -256,14 +260,21 @@ impl LazyPartitionExec {
                     my_node_id
                 );
 
-                // 返回空流（使用 output_schema，因为这是 ExecutionPlan 的输出）
-                use datafusion::arrow::record_batch::RecordBatch;
+                // 🔧 FIX: 返回真正的空流（不包含任何 batch），而不是包含一个空 batch
+                // 这样 DataFusion 在合并多个节点的流时不会因为 schema 不匹配而出错
                 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
                 use futures::stream;
 
-                let empty_batch = RecordBatch::new_empty(self.output_schema.clone());
-                let stream = stream::once(async move { Ok(empty_batch) });
-                let adapter = RecordBatchStreamAdapter::new(self.output_schema.clone(), stream);
+                log::info!(
+                    "⚠️  [LazyPartitionExec] Returning empty stream for partition '{}'. Output schema fields: {}, names: {:?}",
+                    partition_name,
+                    self.output_schema.fields().len(),
+                    self.output_schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+                );
+
+                let empty_stream = stream::empty();
+                let adapter =
+                    RecordBatchStreamAdapter::new(self.output_schema.clone(), empty_stream);
                 return Ok(Box::pin(adapter));
             }
 
@@ -291,12 +302,30 @@ impl LazyPartitionExec {
             })?;
 
         log::info!(
-            "🔍 [LazyPartitionExec] Loaded partition '{}'. Schema fields: {}",
+            "🔍 [LazyPartitionExec] Loaded partition '{}'. Base schema fields: {}, Output schema fields: {}",
             partition_name,
-            partition.arrow_schema.fields().len()
+            partition.arrow_schema.fields().len(),
+            self.output_schema.fields().len()
+        );
+        log::info!(
+            "🔍 [LazyPartitionExec] Base schema: {:?}",
+            partition
+                .arrow_schema
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
+        );
+        log::info!(
+            "🔍 [LazyPartitionExec] Output schema: {:?}",
+            self.output_schema
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
         );
         if let Some(ref proj) = self.projection {
-            log::info!("🔍 [LazyPartitionExec] Projection: {:?}", proj);
+            log::info!("🔍 [LazyPartitionExec] Projection indices: {:?}", proj);
         }
 
         // 创建 PartitionTableProvider
@@ -308,8 +337,17 @@ impl LazyPartitionExec {
         let exec = provider.scan_partition(self.projection.as_ref(), &self.filters, self.limit);
 
         log::info!(
-            "✅ [LazyPartitionExec] Partition '{}' loaded, executing scan",
-            partition_name
+            "✅ [LazyPartitionExec] Partition '{}' loaded, executing scan. Exec schema fields: {}",
+            partition_name,
+            exec.schema().fields().len()
+        );
+        log::info!(
+            "🔍 [LazyPartitionExec] Exec schema: {:?}",
+            exec.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
         );
 
         // 执行计划（这里会创建 MultiSegmentExec 并执行，但只在本地）
@@ -317,6 +355,20 @@ impl LazyPartitionExec {
         let stream = exec.execute(0, context.clone()).map_err(|e| {
             crate::utils::error::CoreError::Internal(format!("Execute failed: {}", e))
         })?;
+
+        log::info!(
+            "🔍 [LazyPartitionExec] Stream schema fields: {}",
+            stream.schema().fields().len()
+        );
+        log::info!(
+            "🔍 [LazyPartitionExec] Stream schema: {:?}",
+            stream
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
+        );
 
         Ok(stream)
     }

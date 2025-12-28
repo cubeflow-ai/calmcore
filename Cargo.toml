@@ -22,7 +22,7 @@ rayon = "1.11"
 sha1 = "0.10"
 # parquet = "54.3.1"
 datafusion = "51.0.0" # 升级以支持 datafusion-distributed
-datafusion-distributed = { git = "https://github.com/datafusion-contrib/datafusion-distributed.git", branch = "main" }
+datafusion-distributed = { git = "https://github.com/datafusion-contrib/datafusion-distributed.git", commit = "b7e5555b0dbbea3c77d1dc47f5d07cdda87517df" } # 用于分布式查询
 datafusion-proto = "51.0.0" # 用于 PhysicalExtensionCodec
 async-trait = "0.1"
 bytes = "1.9"

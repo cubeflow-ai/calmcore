@@ -77,6 +77,13 @@ impl PhysicalExtensionCodec for LazyPartitionCodec {
             .map_err(|e| DataFusionError::Internal(format!("Failed to decode schema: {}", e)))?;
         let schema = reader.schema();
 
+        log::info!(
+            "🔍 [LazyPartitionCodec] Decoded base_schema with {} fields: {:?}, projection: {:?}",
+            schema.fields().len(),
+            schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+            proto.projection
+        );
+
         // 解码 filters（如果有）
         let filters = if proto.filters.is_empty() {
             vec![]
@@ -125,17 +132,29 @@ impl PhysicalExtensionCodec for LazyPartitionCodec {
             lazy_exec.partition_names()
         );
 
-        // 编码 schema
+        // 🔧 FIX: 编码 base_schema（完整的表 schema），而不是 output_schema
+        // 这样远程节点可以正确地重新应用 projection
         use datafusion::arrow::ipc::writer::StreamWriter;
         let mut schema_buf = Vec::new();
         {
-            let mut writer =
-                StreamWriter::try_new(&mut schema_buf, &lazy_exec.schema()).map_err(|e| {
-                    DataFusionError::Internal(format!("Failed to encode schema: {}", e))
-                })?;
+            // 使用 base_schema
+            let base_schema = lazy_exec.base_schema();
+            let mut writer = StreamWriter::try_new(&mut schema_buf, &base_schema).map_err(|e| {
+                DataFusionError::Internal(format!("Failed to encode schema: {}", e))
+            })?;
             writer.finish().map_err(|e| {
                 DataFusionError::Internal(format!("Failed to finish schema encoding: {}", e))
             })?;
+
+            log::info!(
+                "🔍 [LazyPartitionCodec] Encoded base_schema with {} fields: {:?}",
+                base_schema.fields().len(),
+                base_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect::<Vec<_>>()
+            );
         }
 
         // 编码 filters（暂时跳过）
