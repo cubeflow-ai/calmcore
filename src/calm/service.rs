@@ -49,6 +49,20 @@ pub trait CalmRpcService {
     /// 获取当前节点的状态信息（partition数量、CPU、内存、负载等）
     async fn node_info() -> CoreResult<crate::calm::NodeInfo>;
 
+    /// 加载 segment 文件到指定分区（自动路由到分区所在节点）
+    async fn load_segment(
+        table_name: String,
+        partition_name: String,
+        file_path: String,
+    ) -> CoreResult<()>;
+
+    /// 本地加载 segment 文件（仅在分区所在节点执行）
+    async fn load_segment_local(
+        table_name: String,
+        partition_name: String,
+        file_path: String,
+    ) -> CoreResult<()>;
+
     // ==================== MetaService 方法 ======================================
 
     /// 获取所有存活节点的状态信息（仅协调节点）
@@ -662,6 +676,127 @@ impl CalmRpcService for CalmService {
 
         log::info!("✅ Table '{}' created successfully", table_name);
         Ok(())
+    }
+
+    #[doc = " 加载 segment 文件到指定分区"]
+    #[coordinator_route]
+    async fn load_segment(
+        self,
+        _: Context,
+        table_name: String,
+        partition_name: String,
+        file_path: String,
+    ) -> CoreResult<()> {
+        log::info!(
+            "📤 [CoordNode] Starting load_segment for '{}/{}' from file '{}'",
+            table_name,
+            partition_name,
+            file_path
+        );
+
+        // 1. 获取 partition 信息
+        let table_info = self.catalog.get_or_load_table(&table_name).await?;
+        let partitions = table_info.partitions.read().await;
+        let partition_info = partitions.get(&partition_name).ok_or_else(|| {
+            CoreError::NotExisted(format!(
+                "Partition '{}/{}' not found",
+                table_name, partition_name
+            ))
+        })?;
+
+        let owner_node = partition_info.owner.clone();
+        drop(partitions);
+
+        log::info!(
+            "📍 Partition '{}/{}' is owned by node '{}'",
+            table_name,
+            partition_name,
+            owner_node
+        );
+
+        // 2. 连接到 owner 节点并调用本地加载方法
+        let client = new_data_client(&owner_node).await?;
+
+        log::info!(
+            "📤 Requesting node '{}' to load segment from '{}'",
+            owner_node,
+            file_path
+        );
+
+        match client
+            .load_segment_local(
+                tarpc::context::current(),
+                table_name.clone(),
+                partition_name.clone(),
+                file_path.clone(),
+            )
+            .await
+        {
+            Ok(Ok(_)) => {
+                log::info!(
+                    "✅ Segment loaded successfully for '{}/{}' on node '{}'",
+                    table_name,
+                    partition_name,
+                    owner_node
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                log::error!(
+                    "❌ Failed to load segment for '{}/{}' on node '{}': {}",
+                    table_name,
+                    partition_name,
+                    owner_node,
+                    e
+                );
+                Err(e)
+            }
+            Err(e) => {
+                log::error!(
+                    "❌ RPC error loading segment for '{}/{}' on node '{}': {}",
+                    table_name,
+                    partition_name,
+                    owner_node,
+                    e
+                );
+                Err(CoreError::Network(format!("RPC failed: {}", e)))
+            }
+        }
+    }
+
+    #[doc = " 本地加载 segment 文件（仅在分区所在节点执行）"]
+    #[ddl_macros::local_only]
+    async fn load_segment_local(
+        self,
+        _: Context,
+        table_name: String,
+        partition_name: String,
+        file_path: String,
+    ) -> CoreResult<()> {
+        log::info!(
+            "🔧 [Local] Loading segment for '{}/{}' from '{}'",
+            table_name,
+            partition_name,
+            file_path
+        );
+
+        // TODO: 实现本地 segment 加载逻辑
+        // 需要传递正确的参数给 load_segment:
+        // - partition_dir: 分区目录
+        // - file_path: PathBuf
+        // - handler_type: Option<FileHandlerType>
+
+        return Err(CoreError::Notsupport(
+            "load_segment_local implementation pending - needs partition_dir resolution"
+                .to_string(),
+        ));
+
+        // log::info!(
+        //     "✅ [Local] Segment loaded successfully for '{}/{}'",
+        //     table_name,
+        //     partition_name
+        // );
+        // Ok(())
     }
 
     #[doc = " 删除表"]

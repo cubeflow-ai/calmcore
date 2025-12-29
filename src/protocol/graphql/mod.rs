@@ -695,6 +695,64 @@ pub struct PersistPolicyInput {
 ///   }) { name }
 /// }
 /// ```
+/// 加载 Segment 输入参数
+///
+/// 将外部 Parquet 文件加载到指定分区中。
+///
+/// # MCP 提示
+///
+/// **使用场景:**
+/// - 从外部导入 Parquet 数据
+/// - 数据迁移和批量导入
+/// - 加载历史归档数据
+///
+/// **示例:**
+/// ```graphql
+/// mutation {
+///   loadSegment(input: {
+///     table: "events"
+///     partition: "p0"
+///     filePath: "/data/events/events_2024.parquet"
+///   }) {
+///     success
+///     message
+///   }
+/// }
+/// ```
+#[derive(async_graphql::InputObject)]
+pub struct LoadSegmentInput {
+    /// 表名 - 目标表名称
+    pub table: String,
+
+    /// 分区名 - 目标分区名称（如 "p0", "p1"）
+    pub partition: String,
+
+    /// 文件路径 - Parquet 文件的绝对路径
+    pub file_path: String,
+}
+
+/// 加载 Segment 结果
+///
+/// `loadSegment` mutation 的返回类型。
+///
+/// # MCP 提示
+///
+/// **字段说明:**
+/// - `success`: 是否成功加载
+/// - `message`: 详细消息或错误信息
+///
+/// **示例:**
+/// ```graphql
+/// # 返回: { success: true, message: "Segment loaded successfully" }
+/// ```
+#[derive(SimpleObject)]
+pub struct LoadSegmentResult {
+    /// 是否成功
+    pub success: bool,
+    /// 详细消息
+    pub message: String,
+}
+
 #[derive(async_graphql::InputObject)]
 pub struct CreateTableInput {
     /// 表名 - 只能包含小写字母、数字和下划线,建议使用蛇形命名(如 user_orders)
@@ -977,63 +1035,6 @@ impl From<FileHandlerTypeEnum> for crate::segment_loader::FileHandlerType {
             FileHandlerTypeEnum::Copy => crate::segment_loader::FileHandlerType::Copy,
         }
     }
-}
-
-#[derive(async_graphql::InputObject)]
-pub struct LoadSegmentInput {
-    /// 表名
-    pub table: String,
-    /// 分区名称（必须提供，且符合目录名称规范）
-    pub partition_name: String,
-    /// 文件路径（支持 .parquet 和 .jsonl 格式）
-    pub file_path: String,
-    /// 文件处理类型（Parquet 必需：REFERENCE/MOVE/COPY，JSONL 不需要）
-    pub handler_type: Option<FileHandlerTypeEnum>,
-}
-
-/// 加载段结果(返回)
-///
-/// `loadSegment` mutation 的返回类型,指示 Parquet/JSONL 文件加载结果。
-///
-/// # MCP 提示
-///
-/// **字段说明:**
-/// - `success`: 是否成功加载
-/// - `documents_loaded`: 加载的文档数量
-/// - `partition_name`: 目标分区名
-/// - `message`: 详细消息或错误信息
-///
-/// **使用场景:**
-/// - 批量导入 Parquet 文件
-/// - 加载历史数据
-/// - 数据迁移
-///
-/// **示例:**
-/// ```graphql
-/// mutation {
-///   loadSegment(input: {
-///     table: "taxi_trips"
-///     partition_name: "p0"
-///     file_path: "/data/trips_2024.parquet"
-///     handler_type: REFERENCE
-///   }) {
-///     success
-///     documents_loaded
-///     message
-///   }
-/// }
-/// # 返回: { success: true, documents_loaded: 1000000, message: "OK" }
-/// ```
-#[derive(SimpleObject)]
-pub struct LoadSegmentResult {
-    /// 是否成功
-    pub success: bool,
-    /// 加载的文档数
-    pub documents_loaded: usize,
-    /// 分区名称
-    pub partition_name: String,
-    /// 详细消息
-    pub message: String,
 }
 
 // ===== Query Root =====
@@ -1811,21 +1812,12 @@ impl MutationRoot {
 
     /// 加载外部文件到 segment
     ///
-    /// 直接加载 Parquet 或 JSONL 文件到指定分区,无需先创建表再插入。
+    /// 直接加载 Parquet 文件到指定分区,无需先创建表再插入。
     ///
     /// # MCP 提示
     ///
-    /// **参数:** `input: LoadSegmentInput` (table, partition_name, file_path, handler_type)
-    /// **返回:** `LoadSegmentResult` (success, documents_loaded, message)
-    ///
-    /// **文件类型:**
-    /// - `.parquet`: 需要指定 handler_type (REFERENCE/MOVE/COPY)
-    /// - `.jsonl`: 不需要 handler_type,直接导入
-    ///
-    /// **handler_type 说明:**
-    /// - `REFERENCE`: 引用原文件,不复制(推荐,零拷贝)
-    /// - `MOVE`: 移动文件到数据目录
-    /// - `COPY`: 复制文件到数据目录
+    /// **参数:** `input: LoadSegmentInput` (table, partition, file_path)
+    /// **返回:** `LoadSegmentResult` (success, message)
     ///
     /// **使用场景:**
     /// - 批量导入大文件
@@ -1837,12 +1829,10 @@ impl MutationRoot {
     /// mutation {
     ///   loadSegment(input: {
     ///     table: "taxi_trips"
-    ///     partition_name: "p0"
-    ///     file_path: "/data/trips_2024.parquet"
-    ///     handler_type: REFERENCE
+    ///     partition: "p0"
+    ///     filePath: "/data/trips_2024.parquet"
     ///   }) {
     ///     success
-    ///     documents_loaded
     ///     message
     ///   }
     /// }
@@ -1852,41 +1842,29 @@ impl MutationRoot {
         ctx: &Context<'_>,
         input: LoadSegmentInput,
     ) -> Result<LoadSegmentResult> {
-        todo!()
-        // let engine = ctx.data::<Arc<Engine>>()?;
+        let service = ctx.data::<Arc<CalmService>>()?;
 
-        // // 验证文件路径
-        // let file_path = std::path::PathBuf::from(&input.file_path);
-        // if !file_path.exists() {
-        //     return Err(async_graphql::Error::new(format!(
-        //         "File does not exist: {}",
-        //         input.file_path
-        //     )));
-        // }
-
-        // // 转换 handler_type（可选）
-        // let handler_type = input.handler_type.map(|ht| ht.into());
-
-        // // 调用 engine 的 load_segment 方法
-        // let doc_count = engine
-        //     .load_segment(
-        //         &input.table,
-        //         input.partition_name.clone(),
-        //         file_path,
-        //         handler_type,
-        //     )
-        //     .await
-        //     .map_err(|e| async_graphql::Error::new(format!("Load segment failed: {}", e)))?;
-
-        // Ok(LoadSegmentResult {
-        //     success: true,
-        //     documents_loaded: doc_count,
-        //     partition_name: input.partition_name,
-        //     message: format!(
-        //         "Successfully loaded {} documents from {}",
-        //         doc_count, input.file_path
-        //     ),
-        // })
+        match CalmRpcService::load_segment(
+            Arc::as_ref(service).clone(),
+            tarpc::context::current(),
+            input.table.clone(),
+            input.partition.clone(),
+            input.file_path.clone(),
+        )
+        .await
+        {
+            Ok(_) => Ok(LoadSegmentResult {
+                success: true,
+                message: format!(
+                    "Segment loaded successfully for '{}/{}' from '{}'",
+                    input.table, input.partition, input.file_path
+                ),
+            }),
+            Err(e) => Ok(LoadSegmentResult {
+                success: false,
+                message: format!("Failed to load segment: {}", e),
+            }),
+        }
     }
 }
 

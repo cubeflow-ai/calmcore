@@ -162,7 +162,7 @@ impl SegmentScanner {
         let mut unsupported_filters = Vec::new();
         let mut has_supported_filter = false;
 
-        log::info!(
+        log::debug!(
             "🔍 [apply_filters] Processing {} filters, valid_docs={}, thread={:?}",
             filters.len(),
             self.valid_docs.len(),
@@ -1611,7 +1611,20 @@ impl SegmentStream {
         }
     }
 
-    /// 生成下一批 RecordBatches
+    /// 🚀 性能优化：批量读取 + 按 RowGroup 返回
+    ///
+    /// **折中方案**：兼顾批量 I/O 性能和按 RowGroup 返回的需求
+    ///
+    /// 策略：
+    /// 1. 一次收集多个 RowGroup 的 doc_ids (chunk_size 个)
+    /// 2. 批量读取所有 RowGroup (一次文件 I/O)
+    /// 3. 每次返回一个 RowGroup 作为独立的 RecordBatch
+    ///
+    /// 优势：
+    /// - ✅ 保持批量文件 I/O 的高性能
+    /// - ✅ 按 RowGroup 自然边界返回数据
+    /// - ✅ 降低函数调用开销
+    /// - ✅ 利用文件系统缓存
     fn generate_next_chunk(&mut self) -> DFResult<Vec<RecordBatch>> {
         use datafusion::arrow::array::UInt32Array;
         use datafusion::arrow::compute::take;
@@ -1623,9 +1636,8 @@ impl SegmentStream {
             }
         }
 
-        // 🚀 收集 doc_ids 并批量查找对应的 batch
-        // 策略：先收集足够的 doc_ids，再调用 batch_lookup_doc_ids() 批量查找
-        // 这样只需要一次查找调用，避免频繁的小查询
+        // 🎯 折中策略：批量收集 doc_ids，但按 RowGroup 分组返回
+        // 1. 收集 chunk_size 个 batch 的 doc_ids
         let mut doc_ids_to_process: Vec<u32> = Vec::new();
         let mut batch_count = 0;
 
@@ -1652,11 +1664,12 @@ impl SegmentStream {
         }
 
         log::debug!(
-            "  [SegmentStream] Collected {} doc_ids",
-            doc_ids_to_process.len()
+            "  [SegmentStream] Collected {} doc_ids (~{} RowGroups) for batch processing",
+            doc_ids_to_process.len(),
+            batch_count
         );
 
-        // 批量查找 batch_key 并分组
+        // 2. 批量查找 batch_key 并分组
         let batch_groups = self.raw_data.batch_lookup_doc_ids(&doc_ids_to_process);
 
         if batch_groups.is_empty() {
@@ -1679,7 +1692,7 @@ impl SegmentStream {
             );
         }
 
-        // 2. 处理空投影（COUNT）- 不读取任何数据
+        // 3. 处理空投影（COUNT）- 不读取任何数据
         let is_empty_projection = self.projection.as_ref().is_some_and(|p| p.is_empty());
 
         log::debug!(
@@ -1721,11 +1734,11 @@ impl SegmentStream {
             return Ok(result_batches);
         }
 
-        // 3. 正常投影：读取实际数据
+        // 4. 正常投影：批量读取所有 RowGroup（一次 I/O）
         let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
 
         log::debug!(
-            "🔧 [SegmentStream] Reading {} batches with projection",
+            "🔧 [SegmentStream] Batch reading {} RowGroups with projection (single I/O)",
             batch_keys.len()
         );
 
@@ -1734,7 +1747,8 @@ impl SegmentStream {
             .raw_data
             .get_batch_with_projection(&batch_keys, proj_to_use);
 
-        // 4. 生成 RecordBatches
+        // 5. 按 RowGroup 生成独立的 RecordBatch（每个 RowGroup 一个 batch）
+        // ⚡ 关键优化：虽然批量读取了数据，但每个 RowGroup 作为独立的 batch 返回
         let mut result_batches = Vec::new();
 
         for (batch_start_id, doc_ids_in_batch) in batch_groups {

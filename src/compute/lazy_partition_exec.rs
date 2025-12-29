@@ -277,13 +277,6 @@ impl LazyPartitionExec {
                     RecordBatchStreamAdapter::new(self.output_schema.clone(), empty_stream);
                 return Ok(Box::pin(adapter));
             }
-
-            // 4. 如果 owner 是当前节点，必须能加载，加载不到就报错
-            log::info!(
-                "✅ [LazyPartitionExec] This partition '{}' belongs to me, attempting to load (owner: {})",
-                partition_name,
-                owner_node_id
-            );
         } else {
             log::warn!(
                 "⚠️  [LazyPartitionExec] Partition '{}' has no owner info, attempting to load",
