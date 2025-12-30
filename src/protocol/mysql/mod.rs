@@ -1609,7 +1609,8 @@ fn format_arrow_value(array: &ArrayRef, index: usize) -> String {
         }
         DataType::Boolean => {
             let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-            arr.value(index).to_string()
+            // 转换为数字字符串 "1" 或 "0"，与 MySQL TINYINT(1) 行为一致
+            if arr.value(index) { "1" } else { "0" }.to_string()
         }
         DataType::Timestamp(unit, _) => {
             // 处理时间戳类型，转换为本地时区显示
