@@ -267,7 +267,7 @@ impl ArrowFlightService for CalmFlightService {
         for batch in batches {
             let rows = batch.num_rows();
 
-            // 检查分区是否存在
+            // 检查分区是否存在（由 insert_data 负责按需创建）
             if self
                 .calm_service
                 .engine
@@ -276,7 +276,7 @@ impl ArrowFlightService for CalmFlightService {
                 .is_none()
             {
                 return Err(Status::not_found(format!(
-                    "Partition '{}/{}' does not exist. Create partition first.",
+                    "Partition '{}/{}' does not exist. Partition should be created by insert_data before sending to remote node.",
                     table_name, partition_name
                 )));
             }

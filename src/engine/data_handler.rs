@@ -146,7 +146,7 @@ impl Engine {
         &self,
         table_name: &str,
         partition_name: String,
-        partition_dir: PathBuf,
+        work_dir: PathBuf,
         file_path: PathBuf,
         handler_type: Option<crate::segment_loader::FileHandlerType>,
     ) -> CoreResult<usize> {
@@ -160,42 +160,17 @@ impl Engine {
                 table_name
             );
             existing_partition
-        } else if partition_dir.exists() {
-            // 目录存在但内存中没有，从磁盘加载
-            log::info!(
-                "Loading existing partition {} from disk for table {}",
-                partition_name,
-                table_name
-            );
-            let loaded_partition = Partition::load(
-                partition_name.clone(),
-                table_name.to_string(),
-                partition_dir.clone(),
-                meta.schema.clone(),
-                (*self.partition_notify_tx).clone(),
-            )?;
-            let partition = Arc::new(loaded_partition);
-            self.add_partition_with_table(table_name, partition.clone())
-                .await;
-            partition
         } else {
             // 不存在，创建新的 partition
-            log::info!(
-                "Creating new partition {} for table {}",
+            log::error!(
+                "Partition {} not found in memory for table {}, loading from disk",
                 partition_name,
                 table_name
             );
-            let new_partition = Partition::new(
-                partition_name.clone(),
-                table_name.to_string(),
-                partition_dir,
-                meta.schema.clone(),
-                (*self.partition_notify_tx).clone(),
-            );
-            let partition = Arc::new(new_partition);
-            self.add_partition_with_table(table_name, partition.clone())
-                .await;
-            partition
+            return Err(CoreError::NotExisted(format!(
+                "Partition {} not found in memory for table {}, loading from disk",
+                partition_name, table_name
+            )));
         };
 
         // 2. 检查文件是否已经被加载过
@@ -236,7 +211,7 @@ impl Engine {
 
         // 3. 使用 SegmentLoader 加载文件
         use crate::segment_loader::SegmentLoader;
-        let loader = SegmentLoader::new(self.config.data_dir.clone());
+        let loader = SegmentLoader::new(work_dir);
 
         let doc_count = loader
             .create_segment_from_file(&partition, &file_path, handler_type)

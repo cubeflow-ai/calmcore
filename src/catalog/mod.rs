@@ -10,7 +10,8 @@ use tokio::sync::RwLock;
 
 use crate::utils::error::{CoreError, CoreResult};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -116,6 +117,10 @@ impl Catalog {
             table,
             partitions: RwLock::new(partitions),
         })
+    }
+
+    pub fn work_dir(&self) -> &Path {
+        &self.work_dir
     }
 
     pub fn partition_dir(&self, table_name: &str, partition_name: &str) -> PathBuf {
@@ -277,10 +282,11 @@ impl Catalog {
 
         // 更新内存中的 table_info.partitions
         let table_info = self.get_or_load_table(table_name).await?;
-        table_info.partitions.write().await.insert(
-            partition_name.to_string(),
-            partition_meta.clone(),
-        );
+        table_info
+            .partitions
+            .write()
+            .await
+            .insert(partition_name.to_string(), partition_meta.clone());
 
         log::info!(
             "Created partition directory: {} (name: {})",
@@ -344,8 +350,18 @@ impl Catalog {
             CoreError::IOError(format!("Failed to serialize partition meta: {}", e))
         })?;
 
-        fs::write(&partition_meta_path, content)
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&partition_meta_path)
+            .map_err(|e| CoreError::IOError(format!("Failed to open partition meta: {}", e)))?;
+
+        file.write_all(content.as_bytes())
             .map_err(|e| CoreError::IOError(format!("Failed to write partition meta: {}", e)))?;
+
+        file.sync_all()
+            .map_err(|e| CoreError::IOError(format!("Failed to sync partition meta: {}", e)))?;
 
         Ok(())
     }
@@ -410,14 +426,18 @@ impl Catalog {
         let content = serde_json::to_string_pretty(meta)
             .map_err(|e| CoreError::IOError(format!("Failed to serialize table meta: {}", e)))?;
 
-        fs::write(&meta_path, content).map_err(|e| {
-            log::error!(
-                "Saved table meta for '{}': {}",
-                meta.table_name,
-                meta_path.display()
-            );
-            CoreError::IOError(format!("Failed to write table meta: {}", e))
-        })?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&meta_path)
+            .map_err(|e| CoreError::IOError(format!("Failed to open meta file: {}", e)))?;
+
+        file.write_all(content.as_bytes())
+            .map_err(|e| CoreError::IOError(format!("Failed to write table meta: {}", e)))?;
+
+        file.sync_all()
+            .map_err(|e| CoreError::IOError(format!("Failed to sync meta file to disk: {}", e)))?;
 
         Ok(())
     }
@@ -452,6 +472,43 @@ impl Catalog {
             table_name,
             partition_name,
             node_id
+        );
+        Ok(())
+    }
+
+    /// 获取分区元数据
+    pub async fn get_partition_meta(
+        &self,
+        table_name: &str,
+        partition_name: &str,
+    ) -> CoreResult<PartitionMeta> {
+        let table_info = self.get_or_load_table(table_name).await?;
+        let partitions = table_info.partitions.read().await;
+        let partition = partitions.get(partition_name).ok_or_else(|| {
+            CoreError::NotExisted(format!(
+                "Partition '{}' not found in table '{}'",
+                partition_name, table_name
+            ))
+        })?;
+        Ok(partition.clone())
+    }
+
+    /// 更新分区元数据（用于立即同步）
+    pub async fn update_partition_meta(
+        &self,
+        table_name: &str,
+        meta: PartitionMeta,
+    ) -> CoreResult<()> {
+        let table_info = self.get_or_load_table(table_name).await?;
+        table_info
+            .partitions
+            .write()
+            .await
+            .insert(meta.partition_name.clone(), meta.clone());
+        log::debug!(
+            "📥 Synced partition meta locally: {}:{}",
+            table_name,
+            meta.partition_name
         );
         Ok(())
     }

@@ -24,6 +24,7 @@ mod job;
 mod flight_actions;
 mod flight_service;
 mod service;
+pub(self) mod servie_ext;
 
 // 公开导出 trait 和 client
 pub use service::{CalmRpcService, CalmRpcServiceClient};
@@ -69,6 +70,8 @@ pub struct NodeInfo {
     pub used_memory: u64,
     /// 系统负载 (1分钟平均负载)
     pub load_avg_1min: f32,
+    /// 所有分区列表 (table_name, partition_name)
+    pub all_partitions: Vec<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -662,11 +665,81 @@ impl CalmService {
                             partition_name
                         );
                     } else {
-                        // 本地分区：必须已存在
-                        let partition = engine.get_partition(&table_name, &partition_name).await
-                            .ok_or_else(|| CoreError::NotExisted(
-                                format!("Partition '{}/{}' does not exist", table_name, partition_name)
-                            ))?;
+                        // 本地分区：检查是否存在，不存在则按需创建
+                        if engine.get_partition(&table_name, &partition_name).await.is_none() {
+                            // 检查是否是按需创建的分区策略
+                            let table_meta = catalog.get_or_load_table(&table_name).await?;
+                            if !table_meta.table.partition_strategy.should_precreate_partitions() {
+                                log::info!(
+                                    "📦 [CalmService] Partition '{}/{}' does not exist locally, requesting creation from coordinator",
+                                    table_name,
+                                    partition_name
+                                );
+                                
+                                // 通过 tarpc 调用 create_partition（会自动路由到 coordinator）
+                                let partition_meta = calm_service
+                                    .as_ref()
+                                    .clone()
+                                    .create_partition(
+                                        tarpc::context::current(),
+                                        table_name.clone(),
+                                        partition_name.clone(),
+                                    )
+                                    .await?;
+                                
+                                log::info!(
+                                    "✅ [CalmService] Partition '{}/{}' created on node '{}', updating local catalog",
+                                    table_name,
+                                    partition_name,
+                                    partition_meta.owner
+                                );
+
+                                // 🔥 关键：只更新本地 catalog，不尝试加载（partition 可能在其他节点）
+                                catalog.update_partition_meta(&table_name, partition_meta.clone()).await?;
+                                
+                                // 重新检查归属：partition 可能被分配到其他节点
+                                if partition_meta.owner != my_node_id.as_deref().unwrap_or("") {
+                                    log::info!(
+                                        "📡 [CalmService] Partition '{}/{}' was created on remote node '{}', forwarding data",
+                                        table_name,
+                                        partition_name,
+                                        partition_meta.owner
+                                    );
+                                    
+                                    // 转发到真正的 owner 节点
+                                    calm_service
+                                        .flight_do_put(&partition_meta.owner, &table_name, &partition_name, partition_batch)
+                                        .await?;
+                                    
+                                    return Ok::<usize, CoreError>(rows);
+                                }
+                                
+                                // 如果 partition 确实分配到本地，需要加载
+                                log::info!(
+                                    "💾 [CalmService] Partition '{}/{}' assigned to local node, loading to engine",
+                                    table_name,
+                                    partition_name
+                                );
+                                
+                                let partition_path = catalog.partition_dir(&table_name, &partition_name);
+                                engine.load_partition(
+                                    &table_name,
+                                    &partition_name,
+                                    partition_path,
+                                    table_meta.table.schema.clone(),
+                                ).await?;
+                                
+                                log::info!(
+                                    "✅ [CalmService] Partition '{}/{}' loaded to local engine",
+                                    table_name,
+                                    partition_name
+                                );
+                            } else {
+                                return Err(CoreError::NotExisted(
+                                    format!("Partition '{}/{}' does not exist and should be pre-created", table_name, partition_name)
+                                ));
+                            }
+                        }
 
                         log::debug!(
                             "💾 [CalmService] Inserting {} rows to local partition '{}'",

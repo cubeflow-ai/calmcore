@@ -159,12 +159,27 @@ pub async fn query_with_cursor(
 
 结合 `_partition` 过滤，将大表分散到多个小表，每个小表内用 OFFSET。
 
+✅ **`_partition` 过滤已实现**：查询会自动进行分区裁剪（Partition Pruning），只扫描匹配的分区。
+
 ```sql
--- ✅ 可接受：只在单个 partition（86 万行）内做 OFFSET
-SELECT * FROM r2api 
-WHERE _partition = '16_0000000000002410860' 
+-- ✅ 推荐：使用 _partition 过滤（自动分区裁剪）
+SELECT * FROM events 
+WHERE _partition = '20240117_1' 
 ORDER BY id 
-LIMIT 1000 OFFSET 5000;
+LIMIT 1000;
+
+-- ✅ 支持 IN 条件
+SELECT * FROM events 
+WHERE _partition IN ('20240117_0', '20240117_1')
+ORDER BY event_time 
+LIMIT 1000;
+
+-- ✅ 支持 LIKE 模式
+SELECT * FROM events 
+WHERE _partition LIKE '202401%' 
+ORDER BY event_time 
+LIMIT 1000;
+```
 
 -- 性能：
 -- 单 partition 86 万行

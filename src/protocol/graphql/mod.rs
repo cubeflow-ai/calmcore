@@ -729,6 +729,10 @@ pub struct LoadSegmentInput {
 
     /// 文件路径 - Parquet 文件的绝对路径
     pub file_path: String,
+
+    /// 文件处理类型 - Reference(引用), Move(移动), Copy(拷贝)
+    #[graphql(default_with = "FileHandlerTypeEnum::Reference")]
+    pub handler_type: FileHandlerTypeEnum,
 }
 
 /// 加载 Segment 结果
@@ -1850,6 +1854,7 @@ impl MutationRoot {
             input.table.clone(),
             input.partition.clone(),
             input.file_path.clone(),
+            Some(input.handler_type.into()),
         )
         .await
         {

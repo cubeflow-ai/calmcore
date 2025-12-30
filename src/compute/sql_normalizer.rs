@@ -45,8 +45,20 @@ impl PartitionFilters {
 
     /// 解析分区列表（根据过滤条件）
     pub fn resolve_partitions(&self, all_partitions: &[String]) -> Vec<String> {
+        log::debug!(
+            "🔍 [resolve_partitions] has_filter={}, exact_matches={:?}, like_patterns={:?}, all_partitions={:?}",
+            self.has_filter,
+            self.exact_matches,
+            self.like_patterns,
+            all_partitions
+        );
+
         if !self.has_filter {
             // 没有过滤条件，返回所有分区
+            log::debug!(
+                "🔍 [resolve_partitions] No filter, returning all {} partitions",
+                all_partitions.len()
+            );
             return all_partitions.to_vec();
         }
 
@@ -54,8 +66,16 @@ impl PartitionFilters {
 
         // 1. 添加精确匹配的分区
         for partition in &self.exact_matches {
+            log::debug!(
+                "🔍 [resolve_partitions] Checking exact match: '{}' in {:?}",
+                partition,
+                all_partitions
+            );
             if all_partitions.contains(partition) {
+                log::debug!("✅ [resolve_partitions] Matched: '{}'", partition);
                 matched.insert(partition.clone());
+            } else {
+                log::debug!("❌ [resolve_partitions] Not found: '{}'", partition);
             }
         }
 
@@ -70,7 +90,12 @@ impl PartitionFilters {
             }
         }
 
-        matched.into_iter().collect()
+        let result: Vec<String> = matched.into_iter().collect();
+        log::debug!(
+            "🔍 [resolve_partitions] Final matched partitions: {:?}",
+            result
+        );
+        result
     }
 
     /// 将 SQL LIKE 模式转换为正则表达式
@@ -175,6 +200,7 @@ impl SqlNormalizer {
             Expr::BinaryOp { left, op, right } => {
                 if *op == BinaryOperator::Eq && Self::is_partition_field(left) {
                     if let Some(value) = Self::extract_string_literal(right) {
+                        log::debug!("🔍 [extract_from_expr] Found _partition = '{}'", value);
                         filters.exact_matches.push(value);
                     }
                 } else if matches!(op, BinaryOperator::And | BinaryOperator::Or) {

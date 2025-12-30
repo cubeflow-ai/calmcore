@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use datafusion::datasource::empty::EmptyTable;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::*;
@@ -84,6 +85,17 @@ impl DistributedDataFusionExecutor {
         let table_name = self.extract_table_name(&normalized.rewritten_sql)?;
         log::info!("📋 [Distributed Query] Target table: {}", table_name);
 
+        // 🎯 打印分区过滤信息
+        if normalized.partition_filters.has_filter {
+            log::info!(
+                "🔍 [Partition Filter] Exact matches: {:?}, LIKE patterns: {:?}",
+                normalized.partition_filters.exact_matches,
+                normalized.partition_filters.like_patterns
+            );
+        } else {
+            log::debug!("📊 [No Partition Filter] Will scan all partitions");
+        }
+
         // 创建分布式 SessionContext（基于目标表的节点分布）
         let ctx = if let Some(_cluster_manager) = &self.cluster_manager {
             // 分布式模式：基于目标表创建 ChannelResolver
@@ -93,8 +105,9 @@ impl DistributedDataFusionExecutor {
             SessionContext::new()
         };
 
-        // 注册 TableProvider
-        self.register_table(&ctx, &table_name).await?;
+        // 注册 TableProvider（传递 partition_filters）
+        self.register_table(&ctx, &table_name, &normalized.partition_filters)
+            .await?;
 
         // 执行查询
         let df = ctx
@@ -214,10 +227,16 @@ impl DistributedDataFusionExecutor {
     ///
     /// **分布式架构设计**：
     /// - 每个节点只扫描自己拥有的 partition（基于 PartitionMeta.owner）
+    /// - 支持 _partition 过滤：根据 WHERE _partition='xxx' 条件裁剪分区
     /// - 使用本地的 UnionTableProvider + MultiSegmentExec（支持内存数据和标记删除）
     /// - datafusion-distributed 协调多节点查询，但每个节点独立执行本地数据扫描
     /// - 不涉及跨节点序列化自定义执行计划
-    async fn register_table(&self, ctx: &SessionContext, table_name: &str) -> CoreResult<()> {
+    async fn register_table(
+        &self,
+        ctx: &SessionContext,
+        table_name: &str,
+        partition_filters: &crate::compute::PartitionFilters,
+    ) -> CoreResult<()> {
         log::info!(
             "📋 [DistributedExecutor] Registering table '{}' (local partitions only)",
             table_name
@@ -235,61 +254,101 @@ impl DistributedDataFusionExecutor {
             "standalone".to_string()
         };
 
-        // 只加载本地节点拥有的 Partition
+        // 🎯 应用 _partition 过滤
+        let all_partition_names: Vec<String> = partition_meta.keys().cloned().collect();
+
+        log::info!(
+            "🔍 [Partition Debug] All partition names in catalog: {:?}",
+            all_partition_names
+        );
+        log::info!(
+            "🔍 [Partition Debug] Filter exact_matches: {:?}, like_patterns: {:?}",
+            partition_filters.exact_matches,
+            partition_filters.like_patterns
+        );
+
+        let filtered_partition_names = partition_filters.resolve_partitions(&all_partition_names);
+
+        if partition_filters.has_filter {
+            log::info!(
+                "🔍 [Partition Pruning] {} partitions matched filter (total: {})",
+                filtered_partition_names.len(),
+                all_partition_names.len()
+            );
+            log::info!(
+                "🔍 [Partition Pruning] Matched partitions: {:?}",
+                filtered_partition_names
+            );
+        }
+
+        // 只加载本地节点拥有的、且通过过滤的 Partition
         let mut local_partitions = Vec::new();
         let mut partition_owners = std::collections::HashMap::new();
 
+        // 🔍 调试：检查 Engine 中实际有哪些分区
+        let engine_partitions = self.engine.list_all_spartitions().await;
+        let table_partitions_in_engine: Vec<String> = engine_partitions
+            .iter()
+            .filter(|(t, _)| t == table_name)
+            .map(|(_, p)| p.clone())
+            .collect();
+        log::info!(
+            "🔍 [Engine Debug] Partitions in Engine for table '{}': {:?}",
+            table_name,
+            table_partitions_in_engine
+        );
+
         for (partition_name, partition_info) in partition_meta.iter() {
-            // 记录所有 partition 的 owner（不仅是本地的）
+            // ✅ 应用分区过滤 - 先过滤再记录
+            if !filtered_partition_names.contains(partition_name) {
+                log::debug!("⏭️  Skipping filtered partition: {}", partition_name);
+                continue;
+            }
+
+            // 🎯 记录通过过滤的 partition 的 owner（用于 LazyPartitionExec 路由）
             partition_owners.insert(partition_name.clone(), partition_info.owner.clone());
 
-            // 只加载本地节点拥有的 partition
-            if partition_info.owner == my_node_id || self.cluster_manager.is_none() {
-                if let Some(partition) = self.engine.get_partition(table_name, partition_name).await
-                {
-                    local_partitions.push(partition);
-                    log::debug!("✅ Loaded local partition: {}", partition_name);
-                } else {
-                    log::warn!("⚠️  Partition '{}' not found in Engine", partition_name);
-                }
+            // 🎯 关键：直接尝试从本地 Engine 获取，如果存在就说明是本地分区
+            // 不需要检查 owner，因为 Engine 中只有本地分区
+            if let Some(partition) = self.engine.get_partition(table_name, partition_name).await {
+                local_partitions.push(partition);
+                log::info!(
+                    "✅ Loaded local partition: {} (owner: {})",
+                    partition_name,
+                    partition_info.owner
+                );
             } else {
-                log::debug!(
-                    "⏭️  Skipping remote partition '{}' (owner: {})",
+                log::info!(
+                    "⏭️  Partition '{}' not in local Engine (owner: {})",
                     partition_name,
                     partition_info.owner
                 );
             }
         }
 
-        if local_partitions.is_empty() {
-            log::warn!(
-                "⚠️  No local partitions found for table '{}' on node '{}'",
-                table_name,
-                my_node_id
-            );
-            // 仍然需要注册表，但使用空的 provider
-            // 这样分布式查询时，其他节点可以提供数据
-            return Ok(());
-        }
-
         log::info!(
-            "📦 [DistributedExecutor] Found {} local partitions for table '{}' on node '{}'",
+            "📦 [DistributedExecutor] Found {} local partitions for table '{}' on node '{}' (after filtering)",
             local_partitions.len(),
             table_name,
             my_node_id
         );
 
-        // 🎯 分布式模式：使用 UnionTableProvider，但限制在单节点
-        // datafusion-distributed 会在每个节点上独立执行本地扫描
-        // MultiSegmentExec 不会被序列化到远程节点（每个节点只扫描自己的数据）
+        // 🎯 关键：即使本地没有匹配的分区，接收请求的节点也必须注册表
+        // 这样查询规划器才能找到表定义，然后 datafusion-distributed 会从其他节点获取数据
+        if local_partitions.is_empty() {
+            log::info!(
+                "ℹ️  No local partitions matched filter for table '{}' on node '{}', registering EmptyTable for schema",
+                table_name,
+                my_node_id
+            );
 
-        log::info!(
-            "📦 [DistributedExecutor] Registering {} local partitions for table '{}'",
-            local_partitions.len(),
-            table_name
-        );
+            // 从 catalog 获取表的 schema
+            let schema = table_info.table.schema.to_arrow_schema();
+        }
 
-        // 创建 UnionTableProvider (使用 LazyPartitionExec,可序列化)
+        let local_partition_len = local_partitions.len();
+
+        // 创建 UnionTableProvider (只有非空时才创建)
         let union_provider = UnionTableProvider::new(
             local_partitions,
             table_name.to_string(),
@@ -302,13 +361,9 @@ impl DistributedDataFusionExecutor {
             .map_err(|e| CoreError::Internal(e.to_string()))?;
 
         log::info!(
-            "✅ [DistributedExecutor] Table '{}' registered successfully",
-            table_name
-        );
-
-        log::info!(
-            "✅ [DistributedExecutor] Registered table '{}' with local partitions",
-            table_name
+            "✅ [DistributedExecutor] Table '{}' registered successfully with {} local partitions",
+            table_name,
+            local_partition_len
         );
 
         Ok(())
