@@ -7,6 +7,10 @@ use std::io::Write;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 🎨 安装 color-eyre 以获得美观的错误输出和堆栈追踪
+    // 设置环境变量 RUST_BACKTRACE=1 或 RUST_LIB_BACKTRACE=1 启用堆栈
+    color_eyre::install()?;
+
     let mut config = Config::from_args()?;
 
     init_logger(&config)?;

@@ -64,10 +64,12 @@ impl CalmChannelResolver {
             .iter()
             .filter_map(|node_id| {
                 // 使用 cluster keys 模块的解析函数提取 custom Flight 地址
-                if let Some(mut socket_addr) = crate::cluster::keys::parse_flight_address_from_node_id(node_id) {
+                if let Some(mut socket_addr) =
+                    crate::cluster::keys::parse_flight_address_from_node_id(node_id)
+                {
                     // ChannelResolver 需要连接到 distributed Flight（+1）
                     socket_addr.set_port(socket_addr.port() + 1);
-                    
+
                     let flight_url = format!("http://{}", socket_addr);
                     match Url::parse(&flight_url) {
                         Ok(url) => {

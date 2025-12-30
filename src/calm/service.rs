@@ -15,10 +15,38 @@ use crate::{
     schema::Schema,
     utils::error::{CoreError, CoreResult},
 };
+use datafusion::arrow::compute::kernels::partition;
 use ddl_macros::coordinator_route;
 use itertools::Itertools;
 use tarpc::context::Context;
 use tokio_serde::formats::Bincode;
+
+/// RPC 调用结果处理的扩展 trait
+///
+/// tarpc 调用返回 `Result<Result<T, CoreError>, RpcError>`，这个 trait 提供便捷方法来展平并添加上下文
+trait RpcResultExt<T> {
+    /// 展平双层 Result 并添加上下文信息
+    fn flatten_rpc(self, context: &str) -> CoreResult<T>;
+}
+
+impl<T> RpcResultExt<T> for Result<CoreResult<T>, tarpc::client::RpcError> {
+    fn flatten_rpc(self, context: &str) -> CoreResult<T> {
+        match self {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => {
+                log::error!("❌ [RPC] {}: {}", context, e);
+                Err(e)
+            }
+            Err(e) => {
+                log::error!("❌ [RPC] {} - Network error: {}", context, e);
+                Err(CoreError::Network(format!(
+                    "{}: RPC failed: {}",
+                    context, e
+                )))
+            }
+        }
+    }
+}
 
 /// 统一的 RPC 服务接口
 #[tarpc::service]
@@ -138,133 +166,12 @@ impl CalmService {
 
 impl CalmRpcService for CalmService {
     //=========================================================== local operator
-
-    #[doc = " 列出当前结点的所有分区"]
+    #[ddl_macros::local_only]
     async fn list_all_partitions(
         self,
         _context: ::tarpc::context::Context,
     ) -> CoreResult<Vec<(String, String)>> {
         Ok(self.engine.list_all_spartitions().await)
-    }
-
-    #[coordinator_route]
-    async fn create_partition(
-        self,
-        ctx: Context,
-        table_name: String,
-        partition_name: String,
-    ) -> CoreResult<crate::catalog::PartitionMeta> {
-        // === 以下是协调节点的实际执行逻辑 ===
-        log::info!(
-            "📦 [CoordNode] Coordinating partition '{}/{}' creation",
-            table_name,
-            partition_name
-        );
-
-        // 1. 检查分区是否已经存在（处理并发创建）
-        match self
-            .catalog
-            .get_partition_meta(&table_name, &partition_name)
-            .await
-        {
-            Ok(partition_meta) => {
-                log::info!(
-                    "✅ [CoordNode] Partition '{}/{}' already exists in catalog, returning existing meta",
-                    table_name,
-                    partition_name
-                );
-                return Ok(partition_meta);
-            }
-            Err(CoreError::NotExisted(_)) => {
-                // 分区不存在，继续创建流程
-                log::debug!(
-                    "📦 [CoordNode] Partition '{}/{}' does not exist, proceeding with node selection",
-                    table_name,
-                    partition_name
-                );
-            }
-            Err(e) => {
-                // 其他错误，直接返回
-                return Err(e);
-            }
-        }
-
-        // 2. 选择合适的节点来创建分区（负载均衡）
-        let best_node = self.idle_node().await?;
-
-        let target_node = best_node.ok_or_else(|| {
-            CoreError::ClusterState(
-                "No connectable nodes available to create partition".to_string(),
-            )
-        })?;
-
-        log::info!(
-            "📍 [CoordNode] Selected node '{}' to create partition '{}/{}'",
-            target_node,
-            table_name,
-            partition_name,
-        );
-
-        // 3. 通知选定的节点创建分区
-        let client = new_data_client(&target_node).await?;
-
-        let partition_meta = match client
-            .create_partition_local(
-                tarpc::context::current(),
-                table_name.clone(),
-                partition_name.clone(),
-            )
-            .await
-        {
-            Ok(Ok(partition_meta)) => {
-                log::info!(
-                    "✅ [CoordNode] Partition '{}/{}' created successfully on node '{}'",
-                    table_name,
-                    partition_name,
-                    target_node
-                );
-                partition_meta
-            }
-            Ok(Err(e)) => {
-                log::error!(
-                    "❌ [CoordNode] Failed to create partition '{}/{}' on node '{}': {}",
-                    table_name,
-                    partition_name,
-                    target_node,
-                    e
-                );
-                return Err(e);
-            }
-            Err(e) => {
-                log::error!(
-                    "❌ [CoordNode] RPC error creating partition '{}/{}' on node '{}': {}",
-                    table_name,
-                    partition_name,
-                    target_node,
-                    e
-                );
-                return Err(CoreError::Network(format!("RPC failed: {}", e)));
-            }
-        };
-
-        // 4. 🔥 协调节点立即同步到本地 catalog（关键！）
-        log::info!(
-            "📥 [CoordNode] Syncing partition '{}/{}' metadata to local catalog",
-            table_name,
-            partition_name
-        );
-
-        self.catalog
-            .update_partition_meta(&table_name, partition_meta.clone())
-            .await?;
-
-        log::info!(
-            "✅ [CoordNode] Partition '{}/{}' metadata synced to coordinator catalog",
-            table_name,
-            partition_name
-        );
-
-        Ok(partition_meta)
     }
 
     /// 本地创建分区（数据节点执行）
@@ -280,6 +187,8 @@ impl CalmRpcService for CalmService {
             table_name,
             partition_name
         );
+
+        let _lock = self.locker.partition_lock.lock().await;
 
         // 1. 检查分区是否已经在本地存在（处理并发）
         if self
@@ -300,8 +209,19 @@ impl CalmRpcService for CalmService {
             return Ok(partition_meta);
         }
 
+        let partition_path = self.catalog.partition_dir(&table_name, &partition_name);
+
+        // 验证parititon目录不存在
+        if partition_path.exists() {
+            return Err(CoreError::Existed(format!(
+                "Partition '{}/{}' already exists on filesystem but not loaded in engine. Possible concurrent creation?",
+                table_name,
+                partition_name
+            )));
+        }
+
         // 2. 加载表信息
-        let table_info = self.catalog.load_table(&table_name).await?;
+        let table_info = self.catalog.get_or_load_table(&table_name).await?;
 
         // 3. 在 catalog 中创建分区元数据
         let owner = self.cluster_manager.node_id().unwrap_or("standalone");
@@ -310,45 +230,19 @@ impl CalmRpcService for CalmService {
             .await?;
 
         // 4. 在 engine 中加载分区
-        let partition_path = self.catalog.partition_dir(&table_name, &partition_name);
         self.engine
             .load_partition(
                 &table_name,
                 &partition_name,
                 partition_path,
-                table_info.table.schema,
+                table_info.table.schema.clone(),
             )
             .await?;
 
         // 5. 通过 gossip 发布分区信息
-        if let Some(cm) = self.cluster_manager.as_ref() {
-            let version = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            log::info!(
-                "📡 [DataNode] Publishing partition '{}/{}' to gossip with version {}",
-                table_name,
-                partition_name,
-                version
-            );
-
-            cm.put_partition(&table_name, &partition_name, version)
-                .await;
-
-            log::info!(
-                "✅ [DataNode] Partition '{}/{}' published to gossip successfully",
-                table_name,
-                partition_name
-            );
-        } else {
-            log::warn!(
-                "⚠️  [DataNode] No cluster manager available, partition '{}/{}' NOT published to gossip",
-                table_name,
-                partition_name
-            );
-        }
+        self.cluster_manager
+            .publish_partition(&table_name, &partition_name)
+            .await;
 
         // 6. 返回创建的分区元数据
         let partition_meta = self
@@ -372,53 +266,50 @@ impl CalmRpcService for CalmService {
         table_name: String,
         partition_name: String,
     ) -> CoreResult<()> {
-        let table_info = self.catalog.load_table(&table_name).await?;
+        let _partition_lock = self.locker.partition_lock.lock().await;
+
+        let table_info = self.catalog.get_or_load_table(&table_name).await?;
 
         let owner = self
             .catalog
-            .get_partition_owner(&table_name, &partition_name)
-            .await?;
+            .get_or_load_partition_meta(&table_name, &partition_name)
+            .await?
+            .owner;
 
         // 判断partition是否已经被分配给其他节点, 且还在工作中
-        if owner != self.cluster_manager.node_id().unwrap_or("standalone") {
-            match new_data_client(&owner)
-                .await?
-                .get_partition_detail(
-                    tarpc::context::current(),
-                    table_name.clone(),
-                    partition_name.clone(),
-                )
+        if owner.as_str() != self.cluster_manager.node_id_without_none() {
+            match self
+                .check_partition_on_node(&table_name, &partition_name, &owner)
                 .await
             {
-                Ok(Ok(p)) => {
-                    return Err(CoreError::Existed(format!(
-                        "Partition is owned by node '{}', details: {:?}",
-                        owner, p
+                Ok(Some(true)) => {
+                    return Err(CoreError::ClusterState(format!(
+                        "Partition '{}/{}' is owned by node '{}' which already has the partition loaded",
+                        table_name,
+                        partition_name,
+                        owner
                     )));
                 }
-                Ok(Err(e)) => {
-                    if e.code() != CoreError::NotExisted("".to_string()).code() {
-                        log::warn!(
-                        "⚠️  Failed to get partition detail from owner node '{}': {}, proceeding to load locally",
-                        owner,
-                        e
+                Ok(Some(false)) => {
+                    log::info!(
+                        "⚠️  Partition '{}/{}' owner node '{}' does not have the partition, proceeding to load locally",
+                        table_name,
+                        partition_name,
+                        owner
                     );
-                    }
                 }
-                Err(e) => {
+                _ => {
                     log::warn!(
-                        "⚠️  Failed to get partition detail from owner node '{}': {}, proceeding to load locally",
-                        owner,
-                        e
+                        "⚠️  Partition '{}/{}' owner node '{}' is unknown state, proceeding to load locally",
+                        table_name,
+                        partition_name,
+                        owner
                     );
                 }
             }
-        }
+        };
 
-        let owner = self.cluster_manager.node_id().unwrap_or("standalone");
-        self.catalog
-            .set_partition_owner(&table_name, &partition_name, owner)
-            .await?;
+        let owner = self.cluster_manager.node_id_without_none();
 
         let partition_path = self.catalog.partition_dir(&table_name, &partition_name);
 
@@ -427,14 +318,24 @@ impl CalmRpcService for CalmService {
                 &table_name,
                 &partition_name,
                 partition_path,
-                table_info.table.schema,
+                table_info.table.schema.clone(),
             )
             .await?;
+
+        self.catalog
+            .set_partition_owner(&table_name, &partition_name, owner)
+            .await?;
+
+        // 5. 通过 gossip 发布分区信息
+        self.cluster_manager
+            .publish_partition(&table_name, &partition_name)
+            .await;
 
         Ok(())
     }
 
     /// 获取分区详细信息（包括 segments）
+    #[ddl_macros::local_only]
     async fn get_partition_detail(
         self,
         _context: Context,
@@ -451,6 +352,22 @@ impl CalmRpcService for CalmService {
                     partition_name, table_name
                 ))
             })?;
+
+        let partition_info = self
+            .catalog
+            .get_partition_meta(&table_name, &partition_name)
+            .await?;
+
+        // check partition is self
+        if (partition_info.owner != self.node_id()) && (self.node_id() != "standalone") {
+            return Err(CoreError::NotExisted(format!(
+                "Partition '{}/{}' is owned by node '{}', cannot get detail from node '{}'",
+                table_name,
+                partition_name,
+                partition_info.owner,
+                self.node_id()
+            )));
+        }
 
         let mut segments = Vec::new();
 
@@ -482,19 +399,24 @@ impl CalmRpcService for CalmService {
         });
 
         Ok(PartitionDetail {
-            partition_id: partition_name.to_string(),
             segments,
-            owner_node: self.cluster_manager.node_id().map(|s| s.to_string()),
+            partition_name,
+            created_at: partition_info.created_at,
+            updated_at: partition_info.updated_at,
+            owner: partition_info.owner.clone(),
         })
     }
 
     /// 本地删除分区数据
+    #[ddl_macros::local_only]
     async fn drop_partition(
         self,
         _context: Context,
         table_name: String,
         partition_name: String,
     ) -> CoreResult<()> {
+        let _partition_lock = self.locker.partition_lock.lock().await;
+
         log::info!(
             "🗑️  [Local] Dropping partition '{}/{}'",
             table_name,
@@ -515,6 +437,7 @@ impl CalmRpcService for CalmService {
     }
 
     /// 本地持久化分区数据
+    #[ddl_macros::local_only]
     async fn flush_partition(
         self,
         _context: Context,
@@ -553,6 +476,7 @@ impl CalmRpcService for CalmService {
     }
 
     /// 获取当前节点的状态信息
+    #[ddl_macros::local_only]
     async fn node_info(self, _context: Context) -> CoreResult<crate::calm::NodeInfo> {
         use sysinfo::System;
 
@@ -591,6 +515,162 @@ impl CalmRpcService for CalmService {
         })
     }
 
+    #[doc = " 加载 segment 文件到指定分区 , （自动路由到分区所在节点）"]
+    #[ddl_macros::local_only]
+    async fn load_segment(
+        self,
+        _: Context,
+        table_name: String,
+        partition_name: String,
+        file_path: String,
+        handler_type: Option<crate::segment_loader::FileHandlerType>,
+    ) -> CoreResult<()> {
+        log::info!(
+            "📤 Starting load_segment for '{}/{}' from file '{}'",
+            table_name,
+            partition_name,
+            file_path
+        );
+
+        // 1. 获取 partition 信息
+        let table_info = self.catalog.get_or_load_table(&table_name).await?;
+        let partitions = table_info.partitions.read().await;
+        let partition_info = partitions.get(&partition_name).ok_or_else(|| {
+            CoreError::NotExisted(format!(
+                "Partition '{}/{}' not found",
+                table_name, partition_name
+            ))
+        })?;
+
+        let owner_node = partition_info.owner.clone();
+        drop(partitions);
+
+        log::info!(
+            "📍 Partition '{}/{}' is owned by node '{}'",
+            table_name,
+            partition_name,
+            owner_node
+        );
+
+        // 2. 连接到 owner 节点并调用本地加载方法
+        let client = new_data_client(&owner_node).await?;
+
+        let rows_loaded = client
+            .load_segment_local(
+                tarpc::context::current(),
+                table_name.clone(),
+                partition_name.clone(),
+                file_path.clone(),
+                handler_type,
+            )
+            .await
+            .flatten_rpc(&format!(
+                "Load segment for '{}/{}' on node '{}' from '{}'",
+                table_name, partition_name, owner_node, file_path
+            ))?;
+
+        log::info!(
+            "✅ Segment loaded successfully for '{}/{}' on node '{}': {} rows",
+            table_name,
+            partition_name,
+            owner_node,
+            rows_loaded
+        );
+
+        Ok(())
+    }
+
+    #[doc = " 本地加载 segment 文件（仅在分区所在节点执行）"]
+    #[ddl_macros::local_only]
+    async fn load_segment_local(
+        self,
+        _: Context,
+        table_name: String,
+        partition_name: String,
+        file_path: String,
+        handler_type: Option<crate::segment_loader::FileHandlerType>,
+    ) -> CoreResult<usize> {
+        log::info!(
+            "🔧 [Local] Loading segment for '{}/{}' from '{}' with handler_type: {:?}",
+            table_name,
+            partition_name,
+            file_path,
+            handler_type
+        );
+
+        // 获取根工作目录（SegmentLoader 会自己构建完整路径）
+        let work_dir = self.catalog.work_dir().to_path_buf();
+
+        log::debug!("📂 Work directory: {}", work_dir.display());
+
+        // 调用 engine.load_segment
+        let rows_loaded = self
+            .engine
+            .load_segment(
+                &table_name,
+                partition_name.clone(),
+                work_dir,
+                PathBuf::from(file_path.clone()),
+                handler_type,
+            )
+            .await?;
+
+        log::info!(
+            "✅ [Local] Segment loaded successfully for '{}/{}': {} rows",
+            table_name,
+            partition_name,
+            rows_loaded
+        );
+
+        Ok(rows_loaded)
+    }
+
+    #[doc = " 本地删除表元数据"]
+    #[ddl_macros::local_only]
+    async fn drop_table_local(self, _: Context, table_name: String) -> CoreResult<()> {
+        log::info!(
+            "🗑️  [Local] Dropping table '{}' metadata from local catalog",
+            table_name
+        );
+
+        // 1. 从本地 engine 中移除所有该表的分区
+        let all_partitions = self.engine.list_all_spartitions().await;
+        for (table, partition) in all_partitions {
+            if table == table_name {
+                self.engine.remove_partition(&table_name, &partition).await;
+                log::debug!(
+                    "🗑️  Removed partition '{}/{}' from engine",
+                    table_name,
+                    partition
+                );
+            }
+        }
+
+        // 2. 从本地 catalog 中删除表元数据
+        if let Err(e) = self.catalog.drop_table(&table_name).await {
+            // 如果表不存在，不报错（可能已经删除或从未加载）
+            if matches!(e, CoreError::NotExisted(_)) {
+                log::debug!(
+                    "ℹ️  Table '{}' not found in local catalog (already dropped or never loaded)",
+                    table_name
+                );
+            } else {
+                log::error!(
+                    "❌ Failed to drop table '{}' from local catalog: {}",
+                    table_name,
+                    e
+                );
+                return Err(e);
+            }
+        }
+
+        log::info!(
+            "✅ [Local] Table '{}' metadata dropped from local catalog",
+            table_name
+        );
+        Ok(())
+    }
+
     // ========================================================== meta operator
     #[doc = " 创建表"]
     #[coordinator_route]
@@ -600,7 +680,7 @@ impl CalmRpcService for CalmService {
         schema: Schema,
         partition_strategy: PartitionStrategy,
     ) -> CoreResult<()> {
-        // === 以下是协调节点的实际执行逻辑 ===
+        let _lock = self.locker.coord_partition_lock.lock().await;
         let table_name = schema.name.clone();
 
         // 1. 构建 TableMeta
@@ -631,119 +711,25 @@ impl CalmRpcService for CalmService {
             partitions.len()
         );
 
-        // 1. 获取所有可用节点
-        let available_nodes = self.cluster_manager.idle_nodes().await?;
-
-        if available_nodes.is_empty() {
-            return Err(CoreError::ClusterState(
-                "No available nodes to create partitions".to_string(),
-            ));
-        }
-
-        log::info!("📊 Found {} available nodes", available_nodes.len());
-
-        // 2. 获取每个节点的状态（partition 数量、CPU、内存等），如果节点无法连接则跳过
-        let mut node_states: Vec<(String, crate::calm::NodeInfo)> = Vec::new();
-
-        for node_id in available_nodes {
-            match new_data_client(&node_id).await {
-                Ok(client) => match client.node_info(tarpc::context::current()).await {
-                    Ok(Ok(node_info)) => {
-                        log::debug!(
-                            "📊 Node '{}': {} partitions, CPU: {:.1}%, Memory: {:.1}%, Load: {:.2}",
-                            node_id,
-                            node_info.partition_count,
-                            node_info.cpu_usage,
-                            node_info.memory_usage,
-                            node_info.load_avg_1min
-                        );
-                        node_states.push((node_id.clone(), node_info));
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!(
-                            "⚠️  Failed to get node info from '{}': {}, skipping",
-                            node_id,
-                            e
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("⚠️  RPC error from node '{}': {}, skipping", node_id, e);
-                    }
-                },
-                Err(e) => {
-                    log::warn!("⚠️  Cannot connect to node '{}': {}, skipping", node_id, e);
-                }
-            }
-        }
-
-        if node_states.is_empty() {
-            return Err(CoreError::ClusterState(
-                "No connectable nodes available to create partitions".to_string(),
-            ));
-        }
-
-        // 3. 排序节点：优先选择负载低的节点（综合考虑 partition 数量、CPU、内存、系统负载）
-        node_states.sort_by(|(_, a), (_, b)| {
-            // 综合评分：partition 数量权重 40%，CPU 30%，内存 20%，系统负载 10%
-            let score_a = a.partition_count as f32 * 0.4
-                + a.cpu_usage * 0.3
-                + a.memory_usage * 0.2
-                + a.load_avg_1min * 10.0 * 0.1;
-            let score_b = b.partition_count as f32 * 0.4
-                + b.cpu_usage * 0.3
-                + b.memory_usage * 0.2
-                + b.load_avg_1min * 10.0 * 0.1;
-            score_a
-                .partial_cmp(&score_b)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        log::info!("📊 Node load distribution:");
-        for (node_id, info) in &node_states {
-            log::info!(
-                "   - {}: {} partitions, CPU: {:.1}%, Memory: {:.1}% ({}/{}MB), Load: {:.2}",
-                node_id,
-                info.partition_count,
-                info.cpu_usage,
-                info.memory_usage,
-                info.used_memory / 1024 / 1024,
-                info.total_memory / 1024 / 1024,
-                info.load_avg_1min
-            );
-        }
-
         // 4. 轮询分配 partition 到节点上
-        let mut assignments: Vec<(String, String)> = Vec::new(); // (partition_name, node_id)
-        let mut node_index = 0;
+        let mut node_states: HashMap<String, usize> = self
+            .idle_nodes()
+            .await?
+            .into_iter()
+            .map(|n| (n.node_id, n.partition_count))
+            .collect();
 
+        let min_value = |m: &HashMap<String, usize>| {
+            m.iter()
+                .min_by_key(|entry| entry.1)
+                .map(|(k, _)| k.clone())
+                .unwrap()
+        };
+        let mut assignments = Vec::new();
         for partition_name in &partitions {
-            let (node_id, node_info) = &mut node_states[node_index];
-
+            let node_id = min_value(&node_states);
             assignments.push((partition_name.clone(), node_id.clone()));
-
-            // 更新该节点的 partition 计数（模拟负载）
-            node_info.partition_count += 1;
-
-            // 移动到下一个节点，并重新排序以保持负载均衡
-            node_index = (node_index + 1) % node_states.len();
-            node_states.sort_by(|(_, a), (_, b)| {
-                let score_a = a.partition_count as f32 * 0.4
-                    + a.cpu_usage * 0.3
-                    + a.memory_usage * 0.2
-                    + a.load_avg_1min * 10.0 * 0.1;
-                let score_b = b.partition_count as f32 * 0.4
-                    + b.cpu_usage * 0.3
-                    + b.memory_usage * 0.2
-                    + b.load_avg_1min * 10.0 * 0.1;
-                score_a
-                    .partial_cmp(&score_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        }
-
-        log::info!("📋 Partition assignment plan:");
-        for (partition_name, node_id) in &assignments {
-            log::info!("   - {}/{} -> {}", table_name, partition_name, node_id);
+            node_states.entry(node_id).and_modify(|count| *count += 1);
         }
 
         // 5. 通过 RPC 通知数据节点创建分区
@@ -756,51 +742,26 @@ impl CalmRpcService for CalmService {
             );
 
             // 在远程节点创建分区（数据节点会通过 gossip 发布）
-            match new_data_client(&node_id).await {
-                Ok(client) => {
-                    match client
-                        .create_partition(
-                            tarpc::context::current(),
-                            table_name.clone(),
-                            partition_name.clone(),
-                        )
-                        .await
-                    {
-                        Ok(Ok(_)) => {
-                            log::info!(
-                                "✅ Partition '{}/{}' created on node '{}'",
-                                table_name,
-                                partition_name,
-                                node_id
-                            );
-                        }
-                        Ok(Err(e)) => {
-                            log::error!(
-                                "❌ Failed to create partition '{}/{}' on node '{}': {}",
-                                table_name,
-                                partition_name,
-                                node_id,
-                                e
-                            );
-                            return Err(e);
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "❌ RPC error creating partition '{}/{}' on node '{}': {}",
-                                table_name,
-                                partition_name,
-                                node_id,
-                                e
-                            );
-                            return Err(CoreError::Network(format!("RPC failed: {}", e)));
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("❌ Cannot connect to node '{}': {}", node_id, e);
-                    return Err(e);
-                }
-            }
+            let client = new_data_client(&node_id).await?;
+
+            client
+                .create_partition_local(
+                    tarpc::context::current(),
+                    table_name.clone(),
+                    partition_name.clone(),
+                )
+                .await
+                .flatten_rpc(&format!(
+                    "Create partition '{}/{}' on node '{}'",
+                    table_name, partition_name, node_id
+                ))?;
+
+            log::info!(
+                "✅ Partition '{}/{}' created on node '{}'",
+                table_name,
+                partition_name,
+                node_id
+            );
         }
 
         // 2. 等待所有分区通过 gossip 发布并被 coord_job 更新到 table_info
@@ -855,140 +816,6 @@ impl CalmRpcService for CalmService {
         Ok(())
     }
 
-    #[doc = " 加载 segment 文件到指定分区"]
-    #[coordinator_route]
-    async fn load_segment(
-        self,
-        _: Context,
-        table_name: String,
-        partition_name: String,
-        file_path: String,
-        handler_type: Option<crate::segment_loader::FileHandlerType>,
-    ) -> CoreResult<()> {
-        log::info!(
-            "📤 [CoordNode] Starting load_segment for '{}/{}' from file '{}'",
-            table_name,
-            partition_name,
-            file_path
-        );
-
-        // 1. 获取 partition 信息
-        let table_info = self.catalog.get_or_load_table(&table_name).await?;
-        let partitions = table_info.partitions.read().await;
-        let partition_info = partitions.get(&partition_name).ok_or_else(|| {
-            CoreError::NotExisted(format!(
-                "Partition '{}/{}' not found",
-                table_name, partition_name
-            ))
-        })?;
-
-        let owner_node = partition_info.owner.clone();
-        drop(partitions);
-
-        log::info!(
-            "📍 Partition '{}/{}' is owned by node '{}'",
-            table_name,
-            partition_name,
-            owner_node
-        );
-
-        // 2. 连接到 owner 节点并调用本地加载方法
-        let client = new_data_client(&owner_node).await?;
-
-        log::info!(
-            "📤 Requesting node '{}' to load segment from '{}'",
-            owner_node,
-            file_path
-        );
-
-        match client
-            .load_segment_local(
-                tarpc::context::current(),
-                table_name.clone(),
-                partition_name.clone(),
-                file_path.clone(),
-                handler_type,
-            )
-            .await
-        {
-            Ok(Ok(rows_loaded)) => {
-                log::info!(
-                    "✅ Segment loaded successfully for '{}/{}' on node '{}': {} rows",
-                    table_name,
-                    partition_name,
-                    owner_node,
-                    rows_loaded
-                );
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                log::error!(
-                    "❌ Failed to load segment for '{}/{}' on node '{}': {}",
-                    table_name,
-                    partition_name,
-                    owner_node,
-                    e
-                );
-                Err(e)
-            }
-            Err(e) => {
-                log::error!(
-                    "❌ RPC error loading segment for '{}/{}' on node '{}': {}",
-                    table_name,
-                    partition_name,
-                    owner_node,
-                    e
-                );
-                Err(CoreError::Network(format!("RPC failed: {}", e)))
-            }
-        }
-    }
-
-    #[doc = " 本地加载 segment 文件（仅在分区所在节点执行）"]
-    #[ddl_macros::local_only]
-    async fn load_segment_local(
-        self,
-        _: Context,
-        table_name: String,
-        partition_name: String,
-        file_path: String,
-        handler_type: Option<crate::segment_loader::FileHandlerType>,
-    ) -> CoreResult<usize> {
-        log::info!(
-            "🔧 [Local] Loading segment for '{}/{}' from '{}' with handler_type: {:?}",
-            table_name,
-            partition_name,
-            file_path,
-            handler_type
-        );
-
-        // 获取根工作目录（SegmentLoader 会自己构建完整路径）
-        let work_dir = self.catalog.work_dir().to_path_buf();
-
-        log::debug!("📂 Work directory: {}", work_dir.display());
-
-        // 调用 engine.load_segment
-        let rows_loaded = self
-            .engine
-            .load_segment(
-                &table_name,
-                partition_name.clone(),
-                work_dir,
-                PathBuf::from(file_path.clone()),
-                handler_type,
-            )
-            .await?;
-
-        log::info!(
-            "✅ [Local] Segment loaded successfully for '{}/{}': {} rows",
-            table_name,
-            partition_name,
-            rows_loaded
-        );
-
-        Ok(rows_loaded)
-    }
-
     #[doc = " 删除表"]
     #[coordinator_route]
     async fn drop_table(self, _: Context, table_name: String) -> CoreResult<()> {
@@ -1033,40 +860,30 @@ impl CalmRpcService for CalmService {
             );
 
             for node_id in &alive_nodes {
-                match new_data_client(node_id).await {
-                    Ok(client) => {
-                        match client
-                            .drop_table_local(tarpc::context::current(), table_name.clone())
-                            .await
-                        {
-                            Ok(Ok(())) => {
-                                log::info!(
-                                    "✅ Node '{}' dropped table '{}' metadata locally",
-                                    node_id,
-                                    table_name
-                                );
-                            }
-                            Ok(Err(e)) => {
-                                log::warn!(
-                                    "⚠️  Node '{}' failed to drop table '{}' metadata: {}",
-                                    node_id,
-                                    table_name,
-                                    e
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "⚠️  RPC error notifying node '{}' to drop table '{}': {}",
-                                    node_id,
-                                    table_name,
-                                    e
-                                );
-                            }
-                        }
+                let result = async {
+                    let client = new_data_client(node_id).await?;
+                    client
+                        .drop_table_local(tarpc::context::current(), table_name.clone())
+                        .await
+                        .flatten_rpc(&format!(
+                            "Drop table '{}' metadata on node '{}'",
+                            table_name, node_id
+                        ))
+                }
+                .await;
+
+                match result {
+                    Ok(()) => {
+                        log::info!(
+                            "✅ Node '{}' dropped table '{}' metadata locally",
+                            node_id,
+                            table_name
+                        );
                     }
                     Err(e) => {
                         log::warn!(
-                            "⚠️  Cannot connect to node '{}' to drop table metadata: {}",
+                            "⚠️  Failed to drop table '{}' metadata on node '{}': {}",
+                            table_name,
                             node_id,
                             e
                         );
@@ -1082,52 +899,6 @@ impl CalmRpcService for CalmService {
         }
 
         log::info!("✅ [CoordNode] Table '{}' dropped successfully", table_name);
-        Ok(())
-    }
-
-    #[doc = " 本地删除表元数据"]
-    #[ddl_macros::local_only]
-    async fn drop_table_local(self, _: Context, table_name: String) -> CoreResult<()> {
-        log::info!(
-            "🗑️  [Local] Dropping table '{}' metadata from local catalog",
-            table_name
-        );
-
-        // 1. 从本地 engine 中移除所有该表的分区
-        let all_partitions = self.engine.list_all_spartitions().await;
-        for (table, partition) in all_partitions {
-            if table == table_name {
-                self.engine.remove_partition(&table_name, &partition).await;
-                log::debug!(
-                    "🗑️  Removed partition '{}/{}' from engine",
-                    table_name,
-                    partition
-                );
-            }
-        }
-
-        // 2. 从本地 catalog 中删除表元数据
-        if let Err(e) = self.catalog.drop_table(&table_name).await {
-            // 如果表不存在，不报错（可能已经删除或从未加载）
-            if matches!(e, CoreError::NotExisted(_)) {
-                log::debug!(
-                    "ℹ️  Table '{}' not found in local catalog (already dropped or never loaded)",
-                    table_name
-                );
-            } else {
-                log::error!(
-                    "❌ Failed to drop table '{}' from local catalog: {}",
-                    table_name,
-                    e
-                );
-                return Err(e);
-            }
-        }
-
-        log::info!(
-            "✅ [Local] Table '{}' metadata dropped from local catalog",
-            table_name
-        );
         Ok(())
     }
 
@@ -1156,32 +927,41 @@ impl CalmRpcService for CalmService {
 
             let cli = new_data_client(&owner).await?;
 
-            if let Ok(Ok(partition_detail)) = cli
+            match cli
                 .get_partition_detail(
                     tarpc::context::current(),
                     table_name.clone(),
                     partition_name.clone(),
                 )
                 .await
-            {
-                partitions.insert(partition_name.clone(), partition_detail);
-            } else {
-                log::warn!(
-                    "⚠️  Failed to get partition detail for '{}/{}' from node '{}'",
-                    table_name,
-                    partition_name,
-                    owner
-                );
+                .flatten_rpc(&format!(
+                    "Get partition detail for '{}/{}' from node '{}'",
+                    table_name, partition_name, owner
+                )) {
+                Ok(partition_detail) => {
+                    partitions.insert(partition_name.clone(), partition_detail);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "⚠️  Failed to get partition detail for '{}/{}' from node '{}' err: {}. Returning empty detail.",
+                        table_name,
+                        partition_name,
+                        owner,
+                        e,
+                    );
 
-                partitions.insert(
-                    partition_name.clone(),
-                    PartitionDetail {
-                        partition_id: partition_name.clone(),
-                        segments: Vec::new(),
-                        owner_node: Some(owner),
-                    },
-                );
-            }
+                    partitions.insert(
+                        partition_name.clone(),
+                        PartitionDetail {
+                            partition_name: partition_name.clone(),
+                            segments: Vec::new(),
+                            created_at: 0,
+                            updated_at: 0,
+                            owner,
+                        },
+                    );
+                }
+            };
         }
 
         Ok(TableDetail {
@@ -1252,29 +1032,176 @@ impl CalmRpcService for CalmService {
 
         // 查询每个节点的状态
         for node_id in alive_nodes {
-            match new_data_client(&node_id).await {
-                Ok(client) => match client.node_info(tarpc::context::current()).await {
-                    Ok(Ok(node_info)) => {
-                        node_infos.push(node_info);
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!(
-                            "⚠️  Failed to get node info from '{}': {}, skipping",
-                            node_id,
-                            e
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("⚠️  RPC error from node '{}': {}, skipping", node_id, e);
-                    }
-                },
+            let result = async {
+                let client = new_data_client(&node_id).await?;
+                client
+                    .node_info(tarpc::context::current())
+                    .await
+                    .flatten_rpc(&format!("Get node info from '{}'", node_id))
+            }
+            .await;
+
+            match result {
+                Ok(node_info) => node_infos.push(node_info),
                 Err(e) => {
-                    log::warn!("⚠️  Cannot connect to node '{}': {}, skipping", node_id, e);
+                    log::warn!(
+                        "⚠️  Failed to get info from node '{}': {}, skipping",
+                        node_id,
+                        e
+                    );
                 }
             }
         }
 
         Ok(node_infos)
+    }
+
+    #[coordinator_route]
+    async fn create_partition(
+        self,
+        ctx: Context,
+        table_name: String,
+        partition_name: String,
+    ) -> CoreResult<crate::catalog::PartitionMeta> {
+        let _lock = self.locker.coord_partition_lock.lock().await;
+
+        // === 以下是协调节点的实际执行逻辑 ===
+        log::info!(
+            "📦 [CoordNode] Coordinating partition '{}/{}' creation",
+            table_name,
+            partition_name
+        );
+
+        // 1. 检查分区是否已经存在（处理并发创建）
+        match self
+            .catalog
+            .get_partition_meta(&table_name, &partition_name)
+            .await
+        {
+            Ok(partition_meta) => {
+                log::info!(
+                    "✅ [CoordNode] Partition '{}/{}' already exists in catalog, returning existing meta",
+                    table_name,
+                    partition_name
+                );
+                return Ok(partition_meta);
+            }
+            Err(CoreError::NotExisted(_)) => {
+                // 分区不存在，继续创建流程
+                log::debug!(
+                    "📦 [CoordNode] Partition '{}/{}' does not exist, proceeding with node selection",
+                    table_name,
+                    partition_name
+                );
+            }
+            Err(e) => {
+                // 其他错误，直接返回
+                return Err(e);
+            }
+        }
+
+        // 2. 选择合适的节点来创建分区（负载均衡）
+        let target_node = self.idle_node().await?;
+
+        log::info!(
+            "📍 [CoordNode] Selected node '{}' to create partition '{}/{}'",
+            target_node,
+            table_name,
+            partition_name,
+        );
+
+        // 3. 通知选定的节点创建分区
+        let client = new_data_client(&target_node).await?;
+
+        let partition_meta = client
+            .create_partition_local(
+                tarpc::context::current(),
+                table_name.clone(),
+                partition_name.clone(),
+            )
+            .await
+            .flatten_rpc(&format!(
+                "[CoordNode] Create partition '{}/{}' on node '{}'",
+                table_name, partition_name, target_node
+            ))?;
+
+        log::info!(
+            "✅ [CoordNode] Partition '{}/{}' created successfully on node '{}'",
+            table_name,
+            partition_name,
+            target_node
+        );
+
+        // 4. 等待 gossip 同步到协调节点 catalog，超时后主动查询
+        log::info!(
+            "⏳ [CoordNode] Waiting for partition '{}/{}' to be synced via gossip...",
+            table_name,
+            partition_name
+        );
+
+        let max_wait_secs = 20;
+        let start = std::time::Instant::now();
+
+        loop {
+            // 检查分区是否已同步到本地 catalog
+            if let Ok(synced_meta) = self
+                .catalog
+                .get_partition_meta(&table_name, &partition_name)
+                .await
+            {
+                log::info!(
+                    "✅ [CoordNode] Partition '{}/{}' synced via gossip",
+                    table_name,
+                    partition_name
+                );
+                return Ok(synced_meta);
+            }
+
+            // 超时检查
+            if start.elapsed().as_secs() > max_wait_secs {
+                log::warn!(
+                    "⏰ [CoordNode] Gossip sync timeout for partition '{}/{}', verifying with data node...",
+                    table_name,
+                    partition_name
+                );
+
+                // 超时后，主动查询数据节点验证分区是否真实存在
+                let client = new_data_client(&target_node).await?;
+                match client
+                    .get_partition_detail(
+                        tarpc::context::current(),
+                        table_name.clone(),
+                        partition_name.clone(),
+                    )
+                    .await
+                    .flatten_rpc(&format!(
+                        "Verify partition '{}/{}' on node '{}'",
+                        table_name, partition_name, target_node
+                    )) {
+                    Ok(_) => {
+                        // 分区在数据节点上确实存在，手动同步到本地 catalog
+                        log::info!(
+                            "📥 [CoordNode] Partition '{}/{}' verified on node '{}', manually syncing to catalog",
+                            table_name,
+                            partition_name,
+                            target_node
+                        );
+                        self.catalog
+                            .update_partition_meta(&table_name, partition_meta.clone())
+                            .await?;
+                        return Ok(partition_meta);
+                    }
+                    Err(e) => {
+                        return Err(CoreError::Timeout(format!(
+                            "Partition '{}/{}' gossip sync timeout and verification failed: {}",
+                            table_name, partition_name, e
+                        )));
+                    }
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
     }
 
     #[doc = r" Returns a serving function to use with"]

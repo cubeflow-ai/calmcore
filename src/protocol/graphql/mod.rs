@@ -1794,6 +1794,7 @@ impl MutationRoot {
 
         // 4. 调用 CalmService 插入数据（内部使用 Router 路由）
         let rows_inserted = service
+            .clone()
             .insert_data(&input.table, batch)
             .await
             .map_err(|e| async_graphql::Error::new(format!("Insert failed: {}", e)))?;

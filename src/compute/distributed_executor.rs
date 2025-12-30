@@ -344,6 +344,19 @@ impl DistributedDataFusionExecutor {
 
             // 从 catalog 获取表的 schema
             let schema = table_info.table.schema.to_arrow_schema();
+
+            // 注册空表（提供 schema，但无数据）
+            let empty_table = Arc::new(EmptyTable::new(schema));
+            ctx.register_table(table_name, empty_table)
+                .map_err(|e| CoreError::Internal(e.to_string()))?;
+
+            log::info!(
+                "✅ [DistributedExecutor] EmptyTable registered for '{}' on node '{}'",
+                table_name,
+                my_node_id
+            );
+
+            return Ok(());
         }
 
         let local_partition_len = local_partitions.len();

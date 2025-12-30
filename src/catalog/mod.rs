@@ -8,6 +8,7 @@ pub use table_meta::{
 };
 use tokio::sync::RwLock;
 
+use crate::calm::TableDetail;
 use crate::utils::error::{CoreError, CoreResult};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -227,9 +228,7 @@ impl Catalog {
         // 从缓存中移除
         let _meta = {
             let mut tables = self.tables.write().await;
-            tables
-                .remove(table_name)
-                .ok_or_else(|| CoreError::NotExisted(format!("Table '{}' not found", table_name)))?
+            tables.remove(table_name);
         };
 
         // 删除表目录
@@ -313,6 +312,13 @@ impl Catalog {
         }
 
         crate::utils::json::load_json_from_file(&partition_meta_path)
+    }
+
+    pub fn check_partition_exists_by_fs(&self, table_name: &str, partition_name: &str) -> bool {
+        let partition_meta_path =
+            dir::partition_dir(&self.work_dir, table_name, partition_name).join("meta.json");
+
+        partition_meta_path.exists()
     }
 
     pub async fn get_or_load_partition_meta(
@@ -510,6 +516,37 @@ impl Catalog {
             table_name,
             meta.partition_name
         );
+        Ok(())
+    }
+
+    /// 更新分区元数据（用于立即同步）, 目前是通过coord结点来获取
+    pub async fn force_update_table_detail(&self, table: TableDetail) -> CoreResult<()> {
+        // table detail to. table
+
+        let TableDetail { table, partitions } = table;
+
+        let partitions = RwLock::new(
+            partitions
+                .into_iter()
+                .map(|(pname, pmeta)| {
+                    (
+                        pname,
+                        PartitionMeta {
+                            partition_name: pmeta.partition_name,
+                            created_at: pmeta.created_at,
+                            updated_at: pmeta.updated_at,
+                            owner: pmeta.owner,
+                        },
+                    )
+                })
+                .collect::<HashMap<String, PartitionMeta>>(),
+        );
+
+        self.tables.write().await.insert(
+            table.table_name.clone(),
+            Arc::new(TableInfo { table, partitions }),
+        );
+
         Ok(())
     }
 

@@ -120,6 +120,7 @@ fn generate_coordinator_route(input_fn: ItemFn) -> TokenStream {
 
     let expanded = quote! {
         #vis #asyncness fn #fn_name(#inputs) #output {
+            let node_id = self.cluster_manager.node_id_without_none();
             let trace_info = format!("[{}]", #fn_name_str);
 
             if self.am_i_coord_node() {
@@ -130,10 +131,12 @@ fn generate_coordinator_route(input_fn: ItemFn) -> TokenStream {
                 log::info!("📤 [Node] {} forwarding to coordinator with params: {}", trace_info, #log_params);
                 // 非协调者通过 RPC 转发
                 self.coord_client()
-                    .await?
+                    .await
+                    .map_err(|e| CoreError::Network(format!("[node_id={}] Failed to get coordinator client: {}", node_id, e)))?
                     .#fn_name(#ctx_param_expr, #(#params),*)
                     .await
-                    .map_err(|e| CoreError::Network(format!("RPC call failed: {}", e)))?
+                    .map_err(|rpc_err| CoreError::Network(format!("[node_id={}] RPC transport error: {}", node_id, rpc_err)))?
+                    .map_err(|core_err| CoreError::Internal(format!("[node_id={}] {}", node_id, core_err)))
             }
         }
     };

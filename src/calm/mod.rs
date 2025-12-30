@@ -37,9 +37,11 @@ pub struct TableDetail {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionDetail {
-    pub partition_id: String,
+    pub partition_name: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub owner: String,
     pub segments: Vec<SegmentDetail>,
-    pub owner_node: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,11 +76,26 @@ pub struct NodeInfo {
     pub all_partitions: Vec<(String, String)>,
 }
 
+pub struct Locker {
+    partition_lock: Mutex<()>,
+    coord_partition_lock: Mutex<()>,
+}
+
+impl Locker {
+    pub fn new() -> Self {
+        Self {
+            partition_lock: Mutex::new(()),
+            coord_partition_lock: Mutex::new(()),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CalmService {
     pub(crate) catalog: Arc<Catalog>,
     pub(crate) cluster_manager: ClusterManagerRef,
     pub(crate) engine: Arc<Engine>,
+    locker: Arc<Locker>,
 }
 
 impl CalmService {
@@ -100,6 +117,7 @@ impl CalmService {
             catalog,
             cluster_manager,
             engine,
+            locker: Arc::new(Locker::new()),
         });
 
         calm_service.clone().init(&conf).await?;
@@ -598,166 +616,150 @@ impl CalmService {
         );
 
         // 获取分区路由信息（集群模式）
-        let partition_routes = if let Some(cm) = self.cluster_manager.as_ref() {
-            cm.find_partition_routes().await
-        } else {
-            HashMap::new()
-        };
 
-        let my_node_id = self.cluster_manager.node_id().map(|s| s.to_string());
+        let table = self.catalog.get_or_load_table(&table_name).await?;
 
-        // 并发处理所有分区
-        let tasks: Vec<_> = routed_batches
-            .into_iter()
-            .map(|(partition_name, partition_batch)| {
-                let table_name = table_name.to_string();
-                let partition_routes = partition_routes.clone();
-                let my_node_id = my_node_id.clone();
-                let engine = self.engine.clone();
-                let catalog = self.catalog.clone();
-                let meta_schema = meta.schema.clone();
-                
-                // 克隆 self 用于远程调用
-                let calm_service = Arc::new(Self {
-                    catalog: self.catalog.clone(),
-                    cluster_manager: self.cluster_manager.clone(),
-                    engine: self.engine.clone(),
-                });
+        let my_node_id = self.cluster_manager.node_id_without_none().to_string(); // 🔥 转换为 String，拥有所有权
 
-                tokio::spawn(async move {
-                    let rows = partition_batch.num_rows();
+        // 🔥 关键：在循环外先克隆需要的组件，避免生命周期问题
+        let self_for_tasks = self.clone();
+        let catalog_for_loop = self.catalog.clone();
 
-                    // 检查分区归属
-                    let owner_node = partition_routes
-                        .get(&(table_name.clone(), partition_name.clone()))
-                        .map(|(owner, _version)| owner.clone());
+        let mut tasks = Vec::new();
 
-                    // 判断是远程分区还是本地分区
-                    let is_remote = match (owner_node.as_deref(), my_node_id.as_deref()) {
-                        (Some(owner), Some(me)) => owner != me,
-                        _ => false,
-                    };
+        for (partition_name, batch) in routed_batches.into_iter() {
+            let node_id = table
+                .partitions
+                .read()
+                .await
+                .get(&partition_name)
+                .map(|p| p.owner.clone());
 
-                    log::info!(
-                        "🔍 [CalmService] Partition '{}': owner={:?}, my_node_id={:?}, is_remote={}",
+            let owner_node = match node_id {
+                Some(node_id) => node_id,
+                None => {
+                    log::warn!(
+                        "⚠️  [CalmService] Partition '{}' does not exist in table '{}'",
                         partition_name,
-                        owner_node,
-                        my_node_id,
-                        is_remote
+                        table_name
                     );
-
-                    if is_remote {
-                        let owner = owner_node.unwrap();
-                        log::debug!(
-                            "📡 [CalmService] Forwarding {} rows to remote partition '{}' on node '{}'",
-                            rows,
-                            partition_name,
-                            owner
-                        );
-
-                        calm_service
-                            .flight_do_put(&owner, &table_name, &partition_name, partition_batch)
-                            .await?;
-
-                        log::debug!(
-                            "✅ [CalmService] Successfully sent {} rows to remote partition '{}'",
-                            rows,
-                            partition_name
-                        );
-                    } else {
-                        // 本地分区：检查是否存在，不存在则按需创建
-                        if engine.get_partition(&table_name, &partition_name).await.is_none() {
-                            // 检查是否是按需创建的分区策略
-                            let table_meta = catalog.get_or_load_table(&table_name).await?;
-                            if !table_meta.table.partition_strategy.should_precreate_partitions() {
-                                log::info!(
+                    if !table.table.partition_strategy.should_precreate_partitions() {
+                        log::info!(
                                     "📦 [CalmService] Partition '{}/{}' does not exist locally, requesting creation from coordinator",
                                     table_name,
                                     partition_name
                                 );
-                                
-                                // 通过 tarpc 调用 create_partition（会自动路由到 coordinator）
-                                let partition_meta = calm_service
-                                    .as_ref()
-                                    .clone()
-                                    .create_partition(
-                                        tarpc::context::current(),
-                                        table_name.clone(),
-                                        partition_name.clone(),
-                                    )
-                                    .await?;
-                                
-                                log::info!(
+
+                        let partition_meta = self_for_tasks
+                            .clone()
+                            .create_partition(
+                                tarpc::context::current(),
+                                table_name.to_string(),
+                                partition_name.to_string(),
+                            )
+                            .await?;
+
+                        let partition_owner = partition_meta.owner.clone();
+                        log::info!(
                                     "✅ [CalmService] Partition '{}/{}' created on node '{}', updating local catalog",
                                     table_name,
                                     partition_name,
                                     partition_meta.owner
                                 );
 
-                                // 🔥 关键：只更新本地 catalog，不尝试加载（partition 可能在其他节点）
-                                catalog.update_partition_meta(&table_name, partition_meta.clone()).await?;
-                                
-                                // 重新检查归属：partition 可能被分配到其他节点
-                                if partition_meta.owner != my_node_id.as_deref().unwrap_or("") {
-                                    log::info!(
-                                        "📡 [CalmService] Partition '{}/{}' was created on remote node '{}', forwarding data",
+                        // 🔥 关键：只更新本地 catalog，不尝试加载（partition 可能在其他节点）
+                        catalog_for_loop
+                            .update_partition_meta(&table_name, partition_meta)
+                            .await?;
+
+                        partition_owner
+                    } else {
+                        // 去中央结点询问这个parititon的位置
+                        let table_detail = self_for_tasks
+                            .clone()
+                            .get_table_detail(tarpc::context::current(), table_name.to_string())
+                            .await?;
+
+                        log::info!(
+                                    "📦 [CalmService] Partition '{}/{}' does not exist locally, checking with coordinator",
+                                    table_name,
+                                    partition_name
+                                );
+
+                        let partition_owner = table_detail.partitions.get(&partition_name).map(|p| p.owner.clone()).ok_or_else(||{
+                                    log::error!(
+                                        "❌ [CalmService] Partition '{}/{}' does not exist according to coordinator",
                                         table_name,
-                                        partition_name,
-                                        partition_meta.owner
+                                        partition_name
                                     );
-                                    
-                                    // 转发到真正的 owner 节点
-                                    calm_service
-                                        .flight_do_put(&partition_meta.owner, &table_name, &partition_name, partition_batch)
-                                        .await?;
-                                    
-                                    return Ok::<usize, CoreError>(rows);
-                                }
-                                
-                                // 如果 partition 确实分配到本地，需要加载
-                                log::info!(
-                                    "💾 [CalmService] Partition '{}/{}' assigned to local node, loading to engine",
+                                    CoreError::NotExisted(
+                                        format!("Partition '{}/{}' does not exist and should be pre-created", table_name, partition_name)
+                                    )
+                                })?;
+                        log::info!(
+                                    "📡 [CalmService] Coordinator indicates partition '{}/{}' is owned by node '{}'",
                                     table_name,
-                                    partition_name
+                                    partition_name,
+                                    partition_owner
                                 );
-                                
-                                let partition_path = catalog.partition_dir(&table_name, &partition_name);
-                                engine.load_partition(
-                                    &table_name,
-                                    &partition_name,
-                                    partition_path,
-                                    table_meta.table.schema.clone(),
-                                ).await?;
-                                
-                                log::info!(
-                                    "✅ [CalmService] Partition '{}/{}' loaded to local engine",
-                                    table_name,
-                                    partition_name
-                                );
-                            } else {
-                                return Err(CoreError::NotExisted(
-                                    format!("Partition '{}/{}' does not exist and should be pre-created", table_name, partition_name)
-                                ));
-                            }
-                        }
 
-                        log::debug!(
-                            "💾 [CalmService] Inserting {} rows to local partition '{}'",
-                            rows,
-                            partition_name
-                        );
+                        catalog_for_loop
+                            .force_update_table_detail(table_detail)
+                            .await?;
 
-                        engine.insert_batch(&table_name, &partition_name, partition_batch).await?;
+                        partition_owner
                     }
+                }
+            };
 
-                    Ok::<usize, CoreError>(rows)
-                })
-            })
-            .collect();
+            let self_clone = self_for_tasks.clone();
+            let table_name = table_name.to_string();
+            let partition_name = partition_name.to_string();
+            let is_remote = !owner_node.eq(&my_node_id);
 
-        // 等待所有任务完成并统计结果
+            log::info!(
+                "🔍 [CalmService] Partition '{}': owner={:?}, my_node_id={:?}, is_remote={}",
+                partition_name,
+                owner_node,
+                my_node_id,
+                is_remote
+            );
+
+            let handle = tokio::spawn(async move {
+                let rows = batch.num_rows();
+
+                if is_remote {
+                    log::debug!(
+                        "📡 [CalmService] Forwarding {} rows to remote partition '{}' on node '{}'",
+                        rows,
+                        partition_name,
+                        owner_node,
+                    );
+
+                    self_clone
+                        .flight_do_put(&owner_node, &table_name, &partition_name, batch)
+                        .await?;
+
+                    log::debug!(
+                        "✅ [CalmService] Successfully sent {} rows to remote partition '{}'",
+                        rows,
+                        partition_name
+                    );
+                } else {
+                    self_clone
+                        .engine
+                        .insert_batch(&table_name, &partition_name, batch)
+                        .await?;
+                }
+
+                Ok::<usize, CoreError>(rows)
+            });
+            tasks.push(handle);
+        }
+
+        // // 等待所有任务完成并统计结果
         let mut total_inserted = 0;
-        
+
         for task in tasks {
             match task.await {
                 Ok(Ok(rows)) => {
@@ -807,6 +809,13 @@ impl ClusterManagerRef {
         }
     }
 
+    pub fn node_id_without_none(&self) -> &str {
+        match &self.0 {
+            Some(cm) => cm.node_id(),
+            None => "standalone",
+        }
+    }
+
     pub async fn idle_nodes(&self) -> CoreResult<Vec<String>> {
         match &self.0 {
             Some(cm) => Ok(cm.idle_nodes().await),
@@ -818,6 +827,25 @@ impl ClusterManagerRef {
         match &self.0 {
             Some(cm) => cm.am_i_coord_node(),
             None => true,
+        }
+    }
+
+    pub async fn publish_partition(&self, table_name: &str, partition_name: &str) {
+        if let Some(cm) = &self.0 {
+            let version = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            log::info!(
+                "📡 [DataNode] Publishing partition '{}/{}' to gossip with version {}",
+                table_name,
+                partition_name,
+                version
+            );
+
+            cm.put_partition(&table_name, &partition_name, version)
+                .await;
         }
     }
 
