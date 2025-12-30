@@ -1,0 +1,83 @@
+<svg width="600" height="700" viewBox="0 0 600 700" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+    <defs>
+        <linearGradient id="headerGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" style="stop-color:#764ba2; stop-opacity:1" />
+            <stop offset="100%" style="stop-color:#667eea; stop-opacity:1" />
+        </linearGradient>
+        <linearGradient id="layerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" style="stop-color:#f8fafc; stop-opacity:1" />
+            <stop offset="100%" style="stop-color:#eef2f9; stop-opacity:1" />
+        </linearGradient>
+        <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#475569" />
+        </marker>
+        <style>
+            .layer-rect {
+                stroke: #cbd5e1;
+                stroke-width: 1;
+                rx: 12;
+                ry: 12;
+                filter: drop-shadow(0 4px 6px rgba(0,0,0,0.05));
+            }
+            .layer-title {
+                font-size: 18px;
+                font-weight: 600;
+                fill: #1e293b;
+            }
+            .layer-subtitle {
+                font-size: 14px;
+                fill: #475569;
+            }
+            .connector {
+                stroke: #475569;
+                stroke-width: 2;
+                marker-end: url(#arrowhead);
+            }
+        </style>
+    </defs>
+
+    <!-- Background -->
+    <rect width="100%" height="100%" fill="white"/>
+
+    <!-- Layer 1: Client -->
+    <g>
+        <rect x="50" y="30" width="500" height="70" class="layer-rect" fill="url(#layerGradient)"/>
+        <text x="300" y="65" text-anchor="middle" class="layer-title">客户端层 (Clients)</text>
+        <text x="300" y="85" text-anchor="middle" class="layer-subtitle">GraphQL, MySQL, Elasticsearch</text>
+    </g>
+
+    <!-- Connector -->
+    <line x1="300" y1="100" x2="300" y2="140" class="connector" />
+    <line x1="150" y1="100" x2="150" y2="140" class="connector" />
+    <line x1="450" y1="100" x2="450" y2="140" class="connector" />
+
+
+    <!-- Layer 2: Protocol -->
+    <g>
+        <rect x="50" y="140" width="500" height="70" class="layer-rect" fill="url(#layerGradient)"/>
+        <text x="300" y="180" text-anchor="middle" class="layer-title">协议层 (Protocol Layer)</text>
+    </g>
+
+    <!-- Connector -->
+    <line x1="300" y1="210" x2="300" y2="250" class="connector" />
+
+    <!-- Layer 3: CalmService -->
+    <g>
+        <rect x="50" y="250" width="500" height="90" class="layer-rect" fill="url(#layerGradient)"/>
+        <text x="300" y="285" text-anchor="middle" class="layer-title">CalmService (核心协调层)</text>
+        <text x="300" y="315" text-anchor="middle" class="layer-subtitle">元数据 (Catalog), 集群 (ClusterManager), 引擎 (Engine)</text>
+    </g>
+
+    <!-- Connector -->
+    <line x1="300" y1="340" x2="300" y2="380" class="connector" />
+     <text x="300" y="370" text-anchor="middle" class="layer-subtitle" font-style="italic">统一 gRPC / Arrow Flight 通信</text>
+
+
+    <!-- Layer 4: Storage -->
+    <g>
+        <rect x="50" y="400" width="500" height="90" class="layer-rect" fill="url(#layerGradient)"/>
+        <text x="300" y="435" text-anchor="middle" class="layer-title">存储层 (Storage Layer)</text>
+        <text x="300" y="465" text-anchor="middle" class="layer-subtitle">分区 (Partition), 段 (Segment)</text>
+    </g>
+    
+</svg>
