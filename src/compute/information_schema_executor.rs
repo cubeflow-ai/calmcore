@@ -548,8 +548,9 @@ impl InformationSchemaExecutor {
             FieldType::F32 => (7, "REAL".to_string(), Some(7), Some(31)),
             FieldType::F64 => (8, "DOUBLE".to_string(), Some(15), Some(31)),
 
-            // 布尔类型
-            FieldType::Boolean => (16, "BOOLEAN".to_string(), Some(1), None),
+            // 布尔类型 - 映射为 TINYINT，与 MySQL 协议和 DESC 输出保持一致
+            // JDBC 会将 TINYINT(1) 识别为 Boolean
+            FieldType::Boolean => (-6, "TINYINT".to_string(), Some(1), Some(0)),
 
             // 时间戳类型（存储为 i64 毫秒）
             FieldType::Timestamp => (93, "TIMESTAMP".to_string(), Some(23), Some(3)),
