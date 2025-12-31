@@ -22,7 +22,8 @@ use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::{ExecutionPlan, Partitioning};
 use futures::StreamExt;
 
 use crate::engine::Engine;
@@ -56,40 +57,49 @@ impl UnionTableProvider {
     /// 创建新的 UnionTableProvider
     ///
     /// # 参数
-    /// - `partitions`: 所有 partition
+    /// - `partitions`: 本地 partition（可以为空）
     /// - `table_name`: 表名
     /// - `engine`: Engine 引用
+    /// - `partition_owners`: Partition owner映射（用于分布式路由）
+    /// - `schema`: 表的schema（当partitions为空时必须提供）
     ///
     /// # 错误
-    /// 如果 partitions 为空或 schema 不一致,返回错误
+    /// 如果 schema 不一致,返回错误
+    ///
+    /// # 分布式查询支持
+    /// 即使本地没有partition（partitions为空），也会保留partition_owners信息，
+    /// 这样LazyPartitionExec可以根据owner路由到正确的远程节点
     pub fn new(
         partitions: Vec<Arc<Partition>>,
         table_name: String,
         engine: Arc<Engine>,
         partition_owners: std::collections::HashMap<String, String>,
+        schema: SchemaRef,
     ) -> CoreResult<Self> {
-        if partitions.is_empty() {
-            return Err(crate::utils::error::CoreError::Internal(
-                "UnionTableProvider requires at least one partition".to_string(),
-            ));
-        }
+        // 🎯 允许空的 partitions 列表（用于分布式路由场景）
+        let final_schema = if partitions.is_empty() {
+            // 本地没有partition，使用传入的schema
+            schema
+        } else {
+            // 本地有partition，从第一个partition获取schema
+            let first_schema = partitions[0].schema().to_arrow_schema();
 
-        // 获取第一个 partition 的 schema 作为基准
-        let schema = partitions[0].schema().to_arrow_schema();
-
-        // 验证所有 partition 的 schema 一致
-        for (idx, partition) in partitions.iter().enumerate().skip(1) {
-            let part_schema = partition.schema().to_arrow_schema();
-            if part_schema != schema {
-                return Err(crate::utils::error::CoreError::Internal(format!(
-                    "Schema mismatch: partition {} has different schema",
-                    idx
-                )));
+            // 验证所有本地 partition 的 schema 一致
+            for (idx, partition) in partitions.iter().enumerate().skip(1) {
+                let part_schema = partition.schema().to_arrow_schema();
+                if part_schema != first_schema {
+                    return Err(crate::utils::error::CoreError::Internal(format!(
+                        "Schema mismatch: partition {} has different schema",
+                        idx
+                    )));
+                }
             }
-        }
+
+            first_schema
+        };
 
         Ok(Self {
-            schema,
+            schema: final_schema,
             partitions,
             table_name,
             engine,
@@ -177,7 +187,7 @@ impl TableProvider for UnionTableProvider {
         // 创建 LazyPartitionExec（类似 ParquetExec，只包含元数据）
         let lazy_exec = LazyPartitionExec::new(
             self.table_name.clone(),
-            partition_names,
+            partition_names.clone(),
             self.partition_owners.clone(),
             self.schema.clone(),
             filters.to_vec(),
@@ -186,6 +196,30 @@ impl TableProvider for UnionTableProvider {
             self.engine.clone(),
         );
 
-        Ok(Arc::new(lazy_exec))
+        // 🔑 分布式优化：在分布式环境下（partition_owners非空），包装 RepartitionExec 触发 datafusion-distributed
+        // datafusion-distributed 的 DistributedPhysicalOptimizerRule 只识别 RepartitionExec(Hash)
+        // 才会插入 NetworkShuffleExec 进行跨节点查询
+        // 注意：即使只有1个partition，也需要触发分布式执行以支持跨节点查询
+        if !self.partition_owners.is_empty() && !partition_names.is_empty() {
+            log::info!(
+                "🌐 [UnionTableProvider] Wrapping LazyPartitionExec with RepartitionExec (distributed mode, {} partitions)",
+                partition_names.len()
+            );
+
+            // 使用 Hash(vec![], partition_count) 触发 shuffle
+            // 空的 hash expressions 表示按 partition 本身分布（类似 RoundRobinBatch）
+            let repartition_exec = RepartitionExec::try_new(
+                Arc::new(lazy_exec),
+                Partitioning::Hash(vec![], partition_names.len()),
+            )?;
+
+            Ok(Arc::new(repartition_exec))
+        } else {
+            // 单机模式或没有partition，直接返回
+            log::info!(
+                "📦 [UnionTableProvider] Direct LazyPartitionExec (standalone mode or no partitions)"
+            );
+            Ok(Arc::new(lazy_exec))
+        }
     }
 }

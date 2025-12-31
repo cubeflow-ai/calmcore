@@ -25,28 +25,50 @@ pub mod keys {
 
     pub const PARTITION_PREFIX: &str = "partition:";
 
-    pub fn make_partition_key(table_name: &str, partition_name: &str, version: u64) -> String {
-        format!(
-            "{}{}:{}:{}",
-            PARTITION_PREFIX, table_name, partition_name, version
-        )
+    pub fn make_partition_key(table_name: &str, partition_name: &str) -> String {
+        format!("{}{}:{}", PARTITION_PREFIX, table_name, partition_name)
     }
 
-    pub fn make_partition_key_prefix(table_name: &str, partition_name: &str) -> String {
-        format!("{}{}:{}:", PARTITION_PREFIX, table_name, partition_name)
+    pub fn make_partition_value(version: u64, owner_node_id: &str) -> String {
+        format!("{}:{}", version, owner_node_id)
     }
 
-    pub fn parse_partition_key(key: &str) -> CoreResult<(String, String, u64)> {
-        let parts: Vec<&str> = key.split(':').collect();
-        if parts.len() == 4 && parts[0] == "partition" {
-            let version = parts[3].parse::<u64>().map_err(|_| {
-                CoreError::InvalidParam(format!("Invalid version in partition key: {}", key))
-            })?;
-            return Ok((parts[1].to_string(), parts[2].to_string(), version));
+    /// 解析分区 key: partition:table_name:partition_name -> (table_name, partition_name)
+    pub fn parse_partition_key(key: &str) -> CoreResult<(String, String)> {
+        if !key.starts_with(PARTITION_PREFIX) {
+            return Err(CoreError::InvalidParam(format!(
+                "Key does not start with partition prefix: {}",
+                key
+            )));
         }
+
+        let key_without_prefix = &key[PARTITION_PREFIX.len()..];
+        let parts: Vec<&str> = key_without_prefix.split(':').collect();
+
+        if parts.len() == 2 {
+            return Ok((parts[0].to_string(), parts[1].to_string()));
+        }
+
         Err(CoreError::InvalidParam(format!(
-            "Invalid partition key: {}",
+            "Invalid partition key format (expected 'partition:table:partition'): {}",
             key
+        )))
+    }
+
+    /// 解析分区 value: version:owner_node_id -> (version, owner_node_id)
+    pub fn parse_partition_value(value: &str) -> CoreResult<(u64, String)> {
+        let parts: Vec<&str> = value.split(':').collect();
+
+        if parts.len() == 2 {
+            let version = parts[0].parse::<u64>().map_err(|_| {
+                CoreError::InvalidParam(format!("Invalid version in partition value: {}", value))
+            })?;
+            return Ok((version, parts[1].to_string()));
+        }
+
+        Err(CoreError::InvalidParam(format!(
+            "Invalid partition value format (expected 'version:owner_node_id'): {}",
+            value
         )))
     }
 
@@ -294,17 +316,24 @@ impl ClusterManager {
     }
 
     /// =========================================== table_partition operations ===========================================
-    pub async fn put_partition(&self, table_name: &str, partition_name: &str, version: u64) {
-        let key = make_partition_key(table_name, partition_name, version);
-        self.gossip.set(&key, &self.node_id).await;
+    pub async fn put_partition(&self, table_name: &str, partition_name: &str) {
+        let version = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let key = make_partition_key(table_name, partition_name);
+        let value = make_partition_value(version, &self.node_id);
+        self.gossip.set(&key, &value).await;
     }
 
-    pub async fn del_partition(&self, table_name: &str, partition_name: &str) {
-        let key = make_partition_key_prefix(table_name, partition_name);
-        for (k, v) in self.gossip.find_local_by_prefix(&key).await {
-            log::info!("🗑️  [Cluster] Deleting partition key: {} onwer:{}", k, v);
-            self.gossip.delete(&k).await;
-        }
+    pub async fn remove_partition(&self, table_name: &str, partition_name: &str) {
+        let version = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let key = make_partition_key(table_name, partition_name);
+        let value = make_partition_value(version, "deleted");
+        self.gossip.set(&key, &value).await;
     }
 
     /// find the owner node ID of a partition
@@ -314,34 +343,32 @@ impl ClusterManager {
         table_name: &str,
         partition_name: &str,
     ) -> Option<String> {
-        let key = make_partition_key_prefix(table_name, partition_name);
-        let partitions = self.gossip.find_all_by_prefix(&key).await;
+        let key = make_partition_key(table_name, partition_name);
 
-        let mut max_version = None;
-        let mut latest_owner: Option<String> = None;
-
-        for (key, owner_node_id) in partitions.iter() {
-            if let Ok((_, _, version)) = parse_partition_key(key) {
-                log::debug!(
-                    "🔍 [Cluster] Found partition owner: table='{}', partition='{}', version={}, owner='{}'",
-                    table_name,
-                    partition_name,
-                    version,
-                    owner_node_id
-                );
-                match max_version {
-                    Some(v) if version < v => continue,
-                    _ => {
-                        max_version = Some(version);
-                        latest_owner = Some(owner_node_id.clone());
-                    }
+        // 直接查找精确 key 的 value
+        if let Some(value) = self.gossip.find_all_by_prefix(&key).await.get(&key) {
+            match parse_partition_value(value) {
+                Ok((version, owner_node_id)) => {
+                    log::debug!(
+                        "🔍 [Cluster] Found partition owner: table='{}', partition='{}', version={}, owner='{}'",
+                        table_name,
+                        partition_name,
+                        version,
+                        owner_node_id
+                    );
+                    return Some(owner_node_id);
                 }
-            } else {
-                log::warn!("⚠️  [Cluster] Invalid partition key format found: {}", key);
+                Err(e) => {
+                    log::warn!(
+                        "⚠️  [Cluster] Invalid partition value format for key '{}': {}",
+                        key,
+                        e
+                    );
+                }
             }
         }
 
-        latest_owner
+        None
     }
 
     pub async fn find_partition_routes(&self) -> HashMap<(String, String), (String, u64)> {
@@ -350,24 +377,31 @@ impl ClusterManager {
 
         // Scan all node states for partition keys
         for (_chitchat_id, node_state) in chitchat.node_states() {
-            for (key, owner_node_id) in node_state.key_values() {
+            for (key, value) in node_state.key_values() {
                 if key.starts_with("partition:") {
-                    match parse_partition_key(key) {
-                        Ok((table_name, partition_name, version)) => {
+                    match (parse_partition_key(key), parse_partition_value(value)) {
+                        (Ok((table_name, partition_name)), Ok((version, owner_node_id))) => {
                             routers
                                 .entry((table_name, partition_name))
                                 .and_modify(|(existing_owner, existing_version)| {
                                     if version > *existing_version {
-                                        *existing_owner = owner_node_id.to_string();
+                                        *existing_owner = owner_node_id.clone();
                                         *existing_version = version;
                                     }
                                 })
-                                .or_insert((owner_node_id.to_string(), version));
+                                .or_insert((owner_node_id, version));
                         }
-                        Err(e) => {
+                        (Err(e), _) => {
                             log::warn!(
                                 "⚠️  [Cluster] find_partition_routes Failed to parse partition key '{}': {:?}",
                                 key,
+                                e
+                            );
+                        }
+                        (_, Err(e)) => {
+                            log::warn!(
+                                "⚠️  [Cluster] find_partition_routes Failed to parse partition value '{}': {:?}",
+                                value,
                                 e
                             );
                         }

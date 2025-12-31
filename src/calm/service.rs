@@ -77,8 +77,11 @@ pub trait CalmRpcService {
     /// 加载分区
     async fn load_partition(table_name: String, partition_name: String) -> CoreResult<()>;
 
+    /// 本地删除表元数据（数据节点）
+    async fn drop_table_local(table_name: String) -> CoreResult<()>;
+
     /// 本地删除分区数据
-    async fn drop_partition(table_name: String, partition_name: String) -> CoreResult<()>;
+    async fn drop_partition_local(table_name: String, partition_name: String) -> CoreResult<()>;
 
     /// 本地持久化分区数据
     async fn flush_partition(table_name: String, partition_name: String) -> CoreResult<()>;
@@ -113,8 +116,8 @@ pub trait CalmRpcService {
     /// 删除表（协调节点）
     async fn drop_table(table_name: String) -> CoreResult<()>;
 
-    /// 本地删除表元数据（数据节点）
-    async fn drop_table_local(table_name: String) -> CoreResult<()>;
+    /// 删除表（协调节点）
+    async fn drop_partition(table_name: String, partition_name: String) -> CoreResult<()>;
 
     /// 获取表元数据
     async fn get_table_detail(table_name: String) -> CoreResult<TableDetail>;
@@ -409,7 +412,7 @@ impl CalmRpcService for CalmService {
 
     /// 本地删除分区数据
     #[ddl_macros::local_only]
-    async fn drop_partition(
+    async fn drop_partition_local(
         self,
         _context: Context,
         table_name: String,
@@ -425,6 +428,25 @@ impl CalmRpcService for CalmService {
 
         // 从 engine 中移除分区
         self.engine
+            .remove_partition(&table_name, &partition_name)
+            .await;
+
+        // 从 catalog 中移除分区元数据，失败时仅记录日志
+        if let Err(e) = self
+            .catalog
+            .remove_partition(&table_name, &partition_name)
+            .await
+        {
+            log::warn!(
+                "⚠️  Failed to remove partition '{}/{}' from catalog: {}",
+                table_name,
+                partition_name,
+                e
+            );
+        }
+
+        // 从 gossip 中移除分区
+        self.cluster_manager
             .remove_partition(&table_name, &partition_name)
             .await;
 
@@ -839,7 +861,7 @@ impl CalmRpcService for CalmService {
             let tn = table_name.clone();
             let pn = name.clone();
             tasks.push(async move {
-                cli.drop_partition(tarpc::context::current(), tn.clone(), pn.clone())
+                cli.drop_partition_local(tarpc::context::current(), tn.clone(), pn.clone())
                     .await
                     .map_err(|e| CoreError::Internal(format!("Failed to drop partition {}", e)))
             });
@@ -900,6 +922,49 @@ impl CalmRpcService for CalmService {
 
         log::info!("✅ [CoordNode] Table '{}' dropped successfully", table_name);
         Ok(())
+    }
+
+    #[coordinator_route]
+    async fn drop_partition(
+        self,
+        _: Context,
+        table_name: String,
+        partition_name: String,
+    ) -> CoreResult<()> {
+        let _lock = self.locker.coord_partition_lock.lock().await;
+
+        log::info!(
+            "🗑️  [CoordNode] Starting drop partition '{}/{}'",
+            table_name,
+            partition_name
+        );
+        let table_info = self.catalog.get_or_load_table(&table_name).await?;
+        let owner = table_info
+            .partitions
+            .read()
+            .await
+            .get(&partition_name)
+            .ok_or_else(|| {
+                CoreError::NotExisted(format!(
+                    "Partition '{}/{}' not found",
+                    table_name, partition_name
+                ))
+            })?
+            .owner
+            .clone();
+
+        let cli = new_data_client(&owner).await?;
+
+        cli.drop_partition_local(
+            tarpc::context::current(),
+            table_name.clone(),
+            partition_name.clone(),
+        )
+        .await
+        .flatten_rpc(&format!(
+            "Drop partition '{}/{}' on node '{}'",
+            table_name, partition_name, owner
+        ))
     }
 
     #[doc = " 获取表元数据"]

@@ -832,20 +832,25 @@ impl ClusterManagerRef {
 
     pub async fn publish_partition(&self, table_name: &str, partition_name: &str) {
         if let Some(cm) = &self.0 {
-            let version = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
             log::info!(
-                "📡 [DataNode] Publishing partition '{}/{}' to gossip with version {}",
+                "📡 [DataNode] Publishing partition '{}/{}' to gossip ",
                 table_name,
                 partition_name,
-                version
             );
 
-            cm.put_partition(&table_name, &partition_name, version)
-                .await;
+            cm.put_partition(&table_name, &partition_name).await;
+        }
+    }
+
+    pub async fn remove_partition(&self, table_name: &str, partition_name: &str) {
+        if let Some(cm) = &self.0 {
+            log::info!(
+                "🗑️  [DataNode] Removing partition '{}/{}' from gossip",
+                table_name,
+                partition_name
+            );
+
+            cm.remove_partition(table_name, partition_name).await;
         }
     }
 

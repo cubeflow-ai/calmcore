@@ -26,82 +26,74 @@ pub async fn handle_partition_changed(
         node
     );
 
-    // key 格式已经去掉了前缀，是: "<table_name>:<partition_name>:<version>"
-    // subscribe_event 回调时会自动去掉订阅的前缀 "partition:"
-    // 需要分割成 3 部分
-    let parts: Vec<&str> = key.split(':').collect();
-    if parts.len() >= 3 {
-        let table_name = parts[0];
-        let partition_name = parts[1];
-        let version: u64 = parts[2].parse().unwrap_or(0);
+    // 解析 key: subscribe_event 回调时会自动去掉订阅的前缀 "partition:"
+    // 所以收到的格式是: "table_name:partition_name"
+    let key_parts: Vec<&str> = key.split(':').collect();
+    if key_parts.len() < 2 {
+        log::error!(
+            "⚠️  [{}] Invalid partition key format (expected 'table:partition'): '{}'",
+            node_type,
+            key
+        );
+        return Ok(());
+    }
 
+    let table_name = key_parts[0];
+    let partition_name = key_parts[1];
+
+    // 解析 value: "version:owner_node_id"
+    let value_parts: Vec<&str> = value.split(':').collect();
+    if value_parts.len() < 2 {
+        log::error!(
+            "⚠️  [{}] Invalid partition value format (expected 'version:owner_node_id'): '{}'",
+            node_type,
+            value
+        );
+        return Ok(());
+    }
+
+    let version: u64 = value_parts[0].parse().unwrap_or(0);
+    let owner_node_id = value_parts[1];
+
+    // 检查是否为删除标记
+    if owner_node_id == "deleted" {
         log::info!(
-            "📦 [{}] Partition changed: table={}, partition={}, owner={}, version={}",
+            "🗑️  [{}] Partition deleted: table={}, partition={}, version={}",
             node_type,
             table_name,
             partition_name,
-            node,
             version
         );
 
-        // 更新 catalog 中的分区信息
+        // 从 catalog 中删除分区
         match catalog.get_or_load_table(table_name).await {
             Ok(table_info) => {
                 let mut partitions = table_info.partitions.write().await;
 
-                log::info!(
-                    "📊 [{}] Current partitions for table '{}': {:?}",
-                    node_type,
-                    table_name,
-                    partitions.keys().collect::<Vec<_>>()
-                );
-
-                // 如果分区不存在，或版本更新，则更新
-                let should_update = match partitions.get(partition_name) {
-                    Some(existing) => {
+                // 检查版本，只有更新的 deleted 标记才生效
+                if let Some(existing) = partitions.get(partition_name) {
+                    if existing.updated_at < version {
+                        partitions.remove(partition_name);
                         log::info!(
-                            "📝 [{}] Partition '{}/{}' exists, comparing versions: existing={}, new={}",
+                            "✅ [{}] Removed partition '{}/{}' from catalog (version: {})",
+                            node_type,
+                            table_name,
+                            partition_name,
+                            version
+                        );
+                    } else {
+                        log::warn!(
+                            "⏭️  [{}] Skipped outdated delete for partition '{}/{}' (existing version {} >= delete version {})",
                             node_type,
                             table_name,
                             partition_name,
                             existing.updated_at,
                             version
                         );
-                        existing.updated_at < version
                     }
-                    None => {
-                        log::info!(
-                            "🆕 [{}] New partition detected: {}/{}",
-                            node_type,
-                            table_name,
-                            partition_name
-                        );
-                        true
-                    }
-                };
-
-                if should_update {
-                    let partition_meta = crate::catalog::table_meta::PartitionMeta {
-                        partition_name: partition_name.to_string(),
-                        owner: node.to_string(),
-                        created_at: version,
-                        updated_at: version,
-                    };
-
-                    partitions.insert(partition_name.to_string(), partition_meta);
-
-                    log::info!(
-                        "✅ [{}] Updated partition '{}/{}' -> owner: {}, version: {} (total partitions: {})",
-                        node_type,
-                        table_name,
-                        partition_name,
-                        node,
-                        version,
-                        partitions.len()
-                    );
                 } else {
-                    log::warn!(
-                        "⏭️  [{}] Skipped outdated partition update: {}/{} (existing version is newer)",
+                    log::debug!(
+                        "ℹ️  [{}] Partition '{}/{}' already removed or never existed",
                         node_type,
                         table_name,
                         partition_name
@@ -110,19 +102,97 @@ pub async fn handle_partition_changed(
             }
             Err(e) => {
                 log::error!(
-                    "❌ [{}] Failed to load table '{}' for partition update: {}",
+                    "❌ [{}] Failed to load table '{}' for partition deletion: {}",
                     node_type,
                     table_name,
                     e
                 );
             }
         }
-    } else {
-        log::warn!(
-            "⚠️  [{}] Failed to parse partition key (expected 'table:partition:version'): '{}'",
-            node_type,
-            key
-        );
+        return Ok(());
+    }
+
+    log::info!(
+        "📦 [{}] Partition changed: table={}, partition={}, owner={}, version={}",
+        node_type,
+        table_name,
+        partition_name,
+        owner_node_id,
+        version
+    );
+
+    // 更新 catalog 中的分区信息
+    match catalog.get_or_load_table(table_name).await {
+        Ok(table_info) => {
+            let mut partitions = table_info.partitions.write().await;
+
+            log::info!(
+                "📊 [{}] Current partitions for table '{}': {:?}",
+                node_type,
+                table_name,
+                partitions.keys().collect::<Vec<_>>()
+            );
+
+            // 如果分区不存在，或版本更新，则更新
+            let should_update = match partitions.get(partition_name) {
+                Some(existing) => {
+                    log::info!(
+                        "📝 [{}] Partition '{}/{}' exists, comparing versions: existing={}, new={}",
+                        node_type,
+                        table_name,
+                        partition_name,
+                        existing.updated_at,
+                        version
+                    );
+                    existing.updated_at < version
+                }
+                None => {
+                    log::info!(
+                        "🆕 [{}] New partition detected: {}/{}",
+                        node_type,
+                        table_name,
+                        partition_name
+                    );
+                    true
+                }
+            };
+
+            if should_update {
+                let partition_meta = crate::catalog::table_meta::PartitionMeta {
+                    partition_name: partition_name.to_string(),
+                    owner: owner_node_id.to_string(),
+                    created_at: version,
+                    updated_at: version,
+                };
+
+                partitions.insert(partition_name.to_string(), partition_meta);
+
+                log::info!(
+                    "✅ [{}] Updated partition '{}/{}' -> owner: {}, version: {} (total partitions: {})",
+                    node_type,
+                    table_name,
+                    partition_name,
+                    owner_node_id,
+                    version,
+                    partitions.len()
+                );
+            } else {
+                log::warn!(
+                    "⏭️  [{}] Skipped outdated partition update: {}/{} (existing version is newer)",
+                    node_type,
+                    table_name,
+                    partition_name
+                );
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "❌ [{}] Failed to load table '{}' for partition update: {}",
+                node_type,
+                table_name,
+                e
+            );
+        }
     }
 
     Ok(())

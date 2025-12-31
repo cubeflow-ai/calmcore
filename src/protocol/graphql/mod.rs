@@ -1665,6 +1665,46 @@ impl MutationRoot {
         Ok(true)
     }
 
+    /// 删除分区
+    ///
+    /// 删除表中的指定分区，包括该分区的所有数据和元数据。
+    ///
+    /// # MCP 提示
+    ///
+    /// **参数:**
+    /// - `table_name` - 表名
+    /// - `partition_name` - 分区名
+    /// **返回:** `true`(成功) 或错误
+    ///
+    /// **场景:**
+    /// - 删除过期的时间分区
+    /// - 清理测试数据分区
+    /// - 分区迁移后清理源分区
+    ///
+    /// **示例:**
+    /// ```graphql
+    /// mutation {
+    ///   dropPartition(tableName: "events", partitionName: "2023-01")
+    /// }
+    /// ```
+    async fn drop_partition(
+        &self,
+        ctx: &Context<'_>,
+        table_name: String,
+        partition_name: String,
+    ) -> Result<bool> {
+        let service = ctx.data::<Arc<CalmService>>()?;
+        CalmRpcService::drop_partition(
+            Arc::as_ref(service).clone(),
+            tarpc::context::current(),
+            table_name,
+            partition_name,
+        )
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("Failed to drop partition: {}", e)))?;
+        Ok(true)
+    }
+
     /// 持久化表(强制将表的所有数据写入磁盘)
     ///
     /// 强制将表的所有内存数据刺入磁盘,确保数据持久化。

@@ -333,40 +333,28 @@ impl DistributedDataFusionExecutor {
             my_node_id
         );
 
-        // 🎯 关键：即使本地没有匹配的分区，接收请求的节点也必须注册表
-        // 这样查询规划器才能找到表定义，然后 datafusion-distributed 会从其他节点获取数据
+        // 🎯 关键：即使本地没有匹配的分区，也要使用 UnionTableProvider（而非 EmptyTable）
+        // 因为 UnionTableProvider 包含 partition_owners 信息，LazyPartitionExec 可以根据此路由到正确的远程节点
         if local_partitions.is_empty() {
             log::info!(
-                "ℹ️  No local partitions matched filter for table '{}' on node '{}', registering EmptyTable for schema",
+                "ℹ️  No local partitions matched filter for table '{}' on node '{}', but still registering UnionTableProvider with owner info for remote routing",
                 table_name,
                 my_node_id
             );
-
-            // 从 catalog 获取表的 schema
-            let schema = table_info.table.schema.to_arrow_schema();
-
-            // 注册空表（提供 schema，但无数据）
-            let empty_table = Arc::new(EmptyTable::new(schema));
-            ctx.register_table(table_name, empty_table)
-                .map_err(|e| CoreError::Internal(e.to_string()))?;
-
-            log::info!(
-                "✅ [DistributedExecutor] EmptyTable registered for '{}' on node '{}'",
-                table_name,
-                my_node_id
-            );
-
-            return Ok(());
         }
 
         let local_partition_len = local_partitions.len();
 
-        // 创建 UnionTableProvider (只有非空时才创建)
+        // 从 catalog 获取表的 schema
+        let schema = table_info.table.schema.to_arrow_schema();
+
+        // 创建 UnionTableProvider（支持空的 local_partitions，但保留 partition_owners）
         let union_provider = UnionTableProvider::new(
             local_partitions,
             table_name.to_string(),
             self.engine.clone(),
             partition_owners,
+            schema,
         )?;
 
         // 注册表

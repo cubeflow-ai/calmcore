@@ -5,7 +5,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    calm::{new_data_client, CalmService},
+    calm::{new_data_client, CalmRpcService, CalmService},
     catalog::Catalog,
     cluster::{keys, ClusterManager},
     engine::Engine,
@@ -189,20 +189,18 @@ impl JobService {
             partition
         );
 
-        // 1. 选择新节点
-        let new_node = self.select_node_for_partition().await?;
+        let target_node = self.calm_service.idle_node().await?;
 
-        // 2. 在新节点上创建分区（通过 RPC）
         log::info!(
             "📤 [Coordinator] Creating partition {}/{} on node {}",
             table,
             partition,
-            new_node
+            target_node
         );
 
-        let client = new_data_client(&new_node).await?;
-        client
-            .create_partition(
+        new_data_client(&target_node)
+            .await?
+            .load_partition(
                 tarpc::context::current(),
                 table.to_string(),
                 partition.to_string(),
@@ -215,14 +213,14 @@ impl JobService {
         // 3. 更新 catalog 中的 owner
         self.calm_service
             .catalog()
-            .set_partition_owner(table, partition, &new_node)
+            .set_partition_owner(table, partition, &target_node)
             .await?;
 
         log::info!(
             "✅ [Coordinator] Recovered partition {}/{} to node {}",
             table,
             partition,
-            new_node
+            target_node
         );
 
         Ok(())
@@ -241,11 +239,37 @@ impl JobService {
             if let Some(node_state) = chitchat.node_state(node) {
                 for (key, value_str) in node_state.key_values() {
                     if key.starts_with(keys::PARTITION_PREFIX) {
-                        if let Ok((table, partition, version)) = keys::parse_partition_key(key) {
-                            partition_map
-                                .entry((table, partition))
-                                .or_default()
-                                .push((node.node_id.clone(), version));
+                        // 解析 key: partition:table:partition_name
+                        if let Ok((table, partition)) = keys::parse_partition_key(key) {
+                            // 解析 value: version:owner_node_id
+                            if let Ok((version, owner_node_id)) =
+                                keys::parse_partition_value(value_str)
+                            {
+                                // 跳过已删除的分区
+                                if owner_node_id == "deleted" {
+                                    log::debug!(
+                                        "🗑️  [Coordinator] Skipping deleted partition: {}/{}",
+                                        table,
+                                        partition
+                                    );
+                                    continue;
+                                }
+
+                                partition_map
+                                    .entry((table, partition))
+                                    .or_default()
+                                    .push((owner_node_id, version));
+                            } else {
+                                log::warn!(
+                                    "⚠️  [Coordinator] Failed to parse partition value: '{}'",
+                                    value_str
+                                );
+                            }
+                        } else {
+                            log::warn!(
+                                "⚠️  [Coordinator] Failed to parse partition key: '{}'",
+                                key
+                            );
                         }
                     }
                 }
@@ -317,96 +341,6 @@ impl JobService {
         );
 
         Ok(report)
-    }
-
-    // ==================== 辅助方法 ====================
-
-    /// 选择一个节点来放置分区（负载均衡策略）
-    async fn select_node_for_partition(&self) -> CoreResult<String> {
-        let cluster_manager = self.calm_service.cluster_manager().await?;
-        let available_nodes = cluster_manager.idle_nodes().await;
-
-        if available_nodes.is_empty() {
-            return Err(CoreError::ClusterState("No available nodes".to_string()));
-        }
-
-        // 如果只有一个节点，直接返回
-        if available_nodes.len() == 1 {
-            return Ok(available_nodes[0].clone());
-        }
-
-        log::debug!(
-            "📊 Selecting node from {} available nodes",
-            available_nodes.len()
-        );
-
-        // 获取每个节点的状态信息
-        let mut node_states: Vec<(String, crate::calm::NodeInfo)> = Vec::new();
-
-        for node_id in available_nodes {
-            match new_data_client(&node_id).await {
-                Ok(client) => match client.node_info(tarpc::context::current()).await {
-                    Ok(Ok(node_info)) => {
-                        log::debug!(
-                            "📊 Node '{}': {} partitions, CPU: {:.1}%, Memory: {:.1}%, Load: {:.2}",
-                            node_id,
-                            node_info.partition_count,
-                            node_info.cpu_usage,
-                            node_info.memory_usage,
-                            node_info.load_avg_1min
-                        );
-                        node_states.push((node_id.clone(), node_info));
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!(
-                            "⚠️  Failed to get node info from '{}': {}, skipping",
-                            node_id,
-                            e
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("⚠️  RPC error from node '{}': {}, skipping", node_id, e);
-                    }
-                },
-                Err(e) => {
-                    log::warn!("⚠️  Cannot connect to node '{}': {}, skipping", node_id, e);
-                }
-            }
-        }
-
-        if node_states.is_empty() {
-            return Err(CoreError::ClusterState(
-                "No connectable nodes available".to_string(),
-            ));
-        }
-
-        // 按照负载排序：综合评分 = partition数量*0.4 + CPU*0.3 + 内存*0.2 + 系统负载*10*0.1
-        node_states.sort_by(|(_, a), (_, b)| {
-            let score_a = a.partition_count as f32 * 0.4
-                + a.cpu_usage * 0.3
-                + a.memory_usage * 0.2
-                + a.load_avg_1min * 10.0 * 0.1;
-            let score_b = b.partition_count as f32 * 0.4
-                + b.cpu_usage * 0.3
-                + b.memory_usage * 0.2
-                + b.load_avg_1min * 10.0 * 0.1;
-            score_a
-                .partial_cmp(&score_b)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // 选择负载最低的节点
-        let (selected_node, node_info) = &node_states[0];
-        log::info!(
-            "✅ Selected node '{}' with {} partitions, CPU: {:.1}%, Memory: {:.1}%, Load: {:.2}",
-            selected_node,
-            node_info.partition_count,
-            node_info.cpu_usage,
-            node_info.memory_usage,
-            node_info.load_avg_1min
-        );
-
-        Ok(selected_node.clone())
     }
 
     /// 更新节点状态缓存

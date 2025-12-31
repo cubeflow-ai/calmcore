@@ -585,6 +585,47 @@ impl Catalog {
         }
     }
 
+    /// 删除分区
+    ///
+    /// 从内存缓存和文件系统中删除分区元数据及数据
+    pub async fn remove_partition(&self, table_name: &str, partition_name: &str) -> CoreResult<()> {
+        // 1. 从内存缓存中移除分区元数据
+        let tables = self.tables.read().await;
+        if let Some(table_info) = tables.get(table_name) {
+            let mut partitions = table_info.partitions.write().await;
+            partitions.remove(partition_name);
+            log::debug!(
+                "🗑️  Removed partition '{}/{}' from memory cache",
+                table_name,
+                partition_name
+            );
+        }
+        drop(tables);
+
+        // 2. 删除分区目录（包括所有 segment 文件和 meta.json）
+        let partition_dir = dir::partition_dir(&self.work_dir, table_name, partition_name);
+        if partition_dir.exists() {
+            fs::remove_dir_all(&partition_dir).map_err(|e| {
+                CoreError::IOError(format!(
+                    "Failed to remove partition directory '{}': {}",
+                    partition_dir.display(),
+                    e
+                ))
+            })?;
+            log::debug!(
+                "🗑️  Removed partition directory: {}",
+                partition_dir.display()
+            );
+        }
+
+        log::info!(
+            "✅ Partition '{}/{}' removed successfully",
+            table_name,
+            partition_name
+        );
+        Ok(())
+    }
+
     pub async fn get_table_info(&self, table_name: &str) -> CoreResult<Arc<TableInfo>> {
         let tables = self.tables.read().await;
         match tables.get(table_name) {

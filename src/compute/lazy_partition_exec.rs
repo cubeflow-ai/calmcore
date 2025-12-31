@@ -90,9 +90,20 @@ impl LazyPartitionExec {
             schema.clone()
         };
 
+        // 🎯 关键改进：使用 RoundRobinBatch 而不是 UnknownPartitioning
+        // 这告诉 datafusion-distributed 数据分布在多个 partition 上
+        // 每个 partition 可能在不同的节点，需要并行执行
+        let partitioning = if num_partitions > 1 {
+            // 多个 partition：使用 RoundRobinBatch 表示数据分布
+            Partitioning::RoundRobinBatch(num_partitions)
+        } else {
+            // 单个 partition：使用 UnknownPartitioning
+            Partitioning::UnknownPartitioning(num_partitions)
+        };
+
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(num_partitions),
+            partitioning,
             EmissionType::Final,
             Boundedness::Bounded,
         );
@@ -131,9 +142,16 @@ impl LazyPartitionExec {
             schema.clone()
         };
 
+        // 与 new() 保持一致：多分区时使用 RoundRobinBatch 触发分布式执行
+        let partitioning = if num_partitions > 1 {
+            Partitioning::RoundRobinBatch(num_partitions)
+        } else {
+            Partitioning::UnknownPartitioning(num_partitions)
+        };
+
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(num_partitions),
+            partitioning,
             EmissionType::Final,
             Boundedness::Bounded,
         );
@@ -206,6 +224,82 @@ impl LazyPartitionExec {
         ))
     }
 
+    /// 通过 Flight RPC 从远程节点获取 partition 数据
+    async fn fetch_remote_partition(
+        &self,
+        owner_node_id: &str,
+        partition_name: &str,
+        _context: Arc<TaskContext>,
+    ) -> CoreResult<SendableRecordBatchStream> {
+        use crate::utils::error::CoreError;
+        use arrow_flight::flight_service_client::FlightServiceClient;
+        use arrow_flight::FlightClient;
+        use tonic::transport::Channel;
+
+        // 解析 owner_node_id: "timestamp_host_grpc_port"
+        let parts: Vec<&str> = owner_node_id.split('_').collect();
+        if parts.len() < 4 {
+            return Err(CoreError::Internal(format!(
+                "Invalid owner_node_id format: {}",
+                owner_node_id
+            )));
+        }
+
+        let host = parts[1];
+        let grpc_port = parts[3];
+        let flight_url = format!("http://{}:{}", host, grpc_port);
+
+        log::info!(
+            "🌐 [LazyPartitionExec] Connecting to Flight service at {} for partition '{}'",
+            flight_url,
+            partition_name
+        );
+
+        // 建立 Flight 连接
+        let channel = Channel::from_shared(flight_url.clone())
+            .map_err(|e| CoreError::Internal(format!("Failed to create channel: {}", e)))?
+            .connect()
+            .await
+            .map_err(|e| CoreError::Internal(format!("Failed to connect: {}", e)))?;
+
+        let mut client = FlightServiceClient::new(channel);
+
+        // 构造 Flight Ticket: "table:partition"
+        let ticket_data = format!("{}:{}", self.table_name, partition_name);
+        let ticket = arrow_flight::Ticket {
+            ticket: ticket_data.into_bytes().into(),
+        };
+
+        log::info!(
+            "📡 [LazyPartitionExec] Sending Flight DoGet request for ticket: {}",
+            String::from_utf8_lossy(&ticket.ticket)
+        );
+
+        // 发起 DoGet 请求
+        let response = client
+            .do_get(ticket)
+            .await
+            .map_err(|e| CoreError::Internal(format!("Flight DoGet failed: {}", e)))?;
+
+        let stream = response.into_inner();
+
+        // 将 Flight 响应流转换为 RecordBatchStream
+        use arrow_flight::decode::FlightRecordBatchStream;
+        let flight_stream =
+            FlightRecordBatchStream::new_from_flight_data(stream.map_err(|e| e.into()));
+
+        log::info!(
+            "✅ [LazyPartitionExec] Flight stream established for partition '{}'",
+            partition_name
+        );
+
+        // 包装为 SendableRecordBatchStream
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.output_schema.clone(),
+            Box::pin(flight_stream.map_err(|e| DataFusionError::External(Box::new(e)))),
+        )))
+    }
+
     /// 加载 partition 并创建执行流
     async fn load_and_execute(
         &self,
@@ -251,31 +345,18 @@ impl LazyPartitionExec {
                 my_node_id
             );
 
-            // 3. 如果 owner 不是当前节点，跳过（返回空流）
+            // 3. 如果 owner 不是当前节点，发起 Flight RPC 调用获取数据
             if owner_node_id != &my_node_id {
                 log::info!(
-                    "⏭️  [LazyPartitionExec] Partition '{}' belongs to node '{}', but I am '{}'. Skipping and returning empty stream.",
+                    "🌐 [LazyPartitionExec] Partition '{}' belongs to node '{}', will fetch via Flight RPC",
                     partition_name,
-                    owner_node_id,
-                    my_node_id
+                    owner_node_id
                 );
 
-                // 🔧 FIX: 返回真正的空流（不包含任何 batch），而不是包含一个空 batch
-                // 这样 DataFusion 在合并多个节点的流时不会因为 schema 不匹配而出错
-                use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-                use futures::stream;
-
-                log::info!(
-                    "⚠️  [LazyPartitionExec] Returning empty stream for partition '{}'. Output schema fields: {}, names: {:?}",
-                    partition_name,
-                    self.output_schema.fields().len(),
-                    self.output_schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
-                );
-
-                let empty_stream = stream::empty();
-                let adapter =
-                    RecordBatchStreamAdapter::new(self.output_schema.clone(), empty_stream);
-                return Ok(Box::pin(adapter));
+                // 从 owner_node_id 解析 grpc_port: "timestamp_host_grpc_port"
+                return self
+                    .fetch_remote_partition(owner_node_id, partition_name, context)
+                    .await;
             }
         } else {
             log::warn!(

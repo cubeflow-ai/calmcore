@@ -193,6 +193,7 @@ pub async fn start_node_job(catalog: Arc<Catalog>, cm: Arc<ClusterManager>) -> C
                         log::info!("✅ [DataNode] Coordinator elected: {}", new_coord);
                     }
                 }
+
             }
         }
     }
