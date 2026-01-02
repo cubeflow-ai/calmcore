@@ -76,12 +76,9 @@ impl FlightExecutor {
         // FlightRecordBatchStream 的 schema 只有在收到第一条消息后才会填充，
         // 因此需要在缺失时主动触发一次读取
         if flight_stream.schema().is_none() {
-            let first_batch = flight_stream
-                .next()
-                .await
-                .ok_or_else(|| {
-                    CoreError::Internal("Flight stream ended before schema".to_string())
-                })?;
+            let first_batch = flight_stream.next().await.ok_or_else(|| {
+                CoreError::Internal("Flight stream ended before schema".to_string())
+            })?;
 
             let schema = flight_stream
                 .schema()
@@ -118,8 +115,9 @@ impl FlightExecutor {
         stream: S,
     ) -> CoreResult<SendableRecordBatchStream>
     where
-        S: futures::Stream<Item = Result<datafusion::arrow::record_batch::RecordBatch, FlightError>>
-            + Send
+        S: futures::Stream<
+                Item = Result<datafusion::arrow::record_batch::RecordBatch, FlightError>,
+            > + Send
             + 'static,
     {
         let adapted = stream
