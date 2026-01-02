@@ -1,8 +1,6 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use arrow_flight::{
-    encode::FlightDataEncoderBuilder, FlightClient, FlightDescriptor, PutResult,
-};
+use arrow_flight::{encode::FlightDataEncoderBuilder, FlightClient, FlightDescriptor, PutResult};
 use datafusion::arrow::record_batch::RecordBatch;
 use futures::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -24,7 +22,7 @@ mod job;
 mod flight_actions;
 mod flight_service;
 mod service;
- mod servie_ext;
+mod servie_ext;
 
 // 公开导出 trait 和 client
 pub use service::{CalmRpcService, CalmRpcServiceClient};
@@ -494,6 +492,27 @@ impl CalmService {
             .map_err(|e| CoreError::Internal(format!("Failed to execute query: {}", e)))?;
 
         Ok(stream)
+    }
+
+    /// 执行本地 SQL 查询并返回流（不进行 Federation）
+    pub async fn execute_local_query_stream(
+        &self,
+        sql: &str,
+    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
+        log::info!("🚀 [CalmService] Executing LOCAL query: {}", sql);
+
+        // 如果有 ClusterManager，使用 FederatedQueryExecutor 的 execute_local
+        if let Some(cm) = self.cluster_manager.as_ref() {
+            use crate::compute::federation::FederatedQueryExecutor;
+
+            let executor =
+                FederatedQueryExecutor::new(self.catalog.clone(), self.engine.clone(), cm.clone());
+
+            return executor.execute_local(sql).await;
+        }
+
+        // 单机模式下，execute_query_stream 本身就是 local 的
+        self.execute_query_stream(sql).await
     }
 
     /// 插入数据到表

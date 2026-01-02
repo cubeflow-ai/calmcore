@@ -23,7 +23,7 @@ sha1 = "0.10"
 # parquet = "54.3.1"
 datafusion = "51.0.0"
 datafusion-proto = "51.0.0"
-datafusion-federation = "0.4.12" # 用于联邦查询
+datafusion-federation = { version = "0.4.12", features = ["sql"] } # 用于联邦查询
 sqlparser = "0.59" # SQL 解析
 async-trait = "0.1"
 bytes = "1.9"

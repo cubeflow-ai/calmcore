@@ -277,6 +277,14 @@ impl ClusterManager {
         &self.node_id
     }
 
+    /// 从 node_id 获取节点的 gRPC (Arrow Flight) 地址
+    ///
+    /// node_id 格式: `timestamp_host_tarpc_port_flight_port`
+    /// 返回 `http://host:flight_port` 格式的地址
+    pub fn get_node_grpc_addr(&self, node_id: &str) -> Option<String> {
+        keys::parse_flight_address_from_node_id(node_id).map(|addr| format!("http://{}", addr))
+    }
+
     /// =========================================== nodes operations ===========================================
 
     /// 获取所有在线节点

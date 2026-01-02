@@ -7,8 +7,9 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::Session;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::datasource::{TableProvider, TableType};
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
+use datafusion::logical_expr::{Expr, LogicalPlanBuilder, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::sql::unparser::plan_to_sql;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -73,107 +74,67 @@ impl TableProvider for RemoteTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // 构造 SELECT 子句
-        let select_clause = if let Some(proj) = projection {
-            let schema = self.schema();
-            let fields: Vec<String> = proj
-                .iter()
-                .map(|i| schema.field(*i).name().clone())
-                .collect();
-            fields.join(", ")
-        } else {
-            "*".to_string()
-        };
+        // 使用 DataFusion 官方的 plan_to_sql() 来生成 SQL
+        // 注意：不要在 SQL 中包含 _partition 条件！
+        // 远程节点作为 partition owner，自然只会扫描它拥有的分区
 
-        // 构造 WHERE 子句（filter pushdown）
-        let where_clause = if !filters.is_empty() {
-            let filter_strs: Vec<String> = filters
-                .iter()
-                .filter_map(|expr| Self::expr_to_sql(expr).ok())
-                .collect();
+        // 1. 构建 LogicalPlan（从 TableScan 开始）
+        let mut plan_builder = LogicalPlanBuilder::scan(
+            self.table_name.clone(),
+            datafusion::datasource::provider_as_source(Arc::new(
+                datafusion::datasource::empty::EmptyTable::new(self.schema.clone()),
+            )),
+            None,
+        )?;
 
-            if !filter_strs.is_empty() {
-                format!(" WHERE {}", filter_strs.join(" AND "))
-            } else {
-                String::new()
+        // 2. 应用用户的 filters（不包含 _partition）
+        if !filters.is_empty() {
+            for filter in filters {
+                plan_builder = plan_builder.filter(filter.clone())?;
             }
-        } else {
-            String::new()
-        };
-
-        // 构造完整 SQL
-        let mut sql = format!(
-            "SELECT {} FROM {}{}",
-            select_clause, self.table_name, where_clause
-        );
-
-        if let Some(n) = limit {
-            sql = format!("{} LIMIT {}", sql, n);
         }
 
+        // 3. 应用 projection
+        if let Some(proj) = projection {
+            let exprs: Vec<Expr> = proj
+                .iter()
+                .map(|i| {
+                    Expr::Column(datafusion::common::Column::from(
+                        self.schema.field(*i).name(),
+                    ))
+                })
+                .collect();
+            plan_builder = plan_builder.project(exprs)?;
+        }
+
+        // 4. 应用 limit
+        if let Some(n) = limit {
+            plan_builder = plan_builder.limit(0, Some(n))?;
+        }
+
+        let logical_plan = plan_builder.build()?;
+
+        // 5. 使用 DataFusion 官方的 unparser 将 LogicalPlan 转回 SQL
+        let ast = plan_to_sql(&logical_plan)?;
+        let sql = ast.to_string();
+
         log::debug!(
-            "[RemoteTableProvider] Generated SQL for partitions {:?}: {}",
+            "[RemoteTableProvider] Generated SQL (via plan_to_sql) for remote node {} (partitions: {:?}): {}",
+            self.executor.node_id(),
             self.partition_names,
             sql
         );
 
         // 创建 RemoteScanExec
-        Ok(Arc::new(RemoteScanExec {
-            table_name: self.table_name.clone(),
-            partition_ids: self.partition_names.clone(),
-            schema: self.schema.clone(),
+        // partition_names 仅用于日志记录，远程节点会自动扫描它拥有的所有分区
+        Ok(Arc::new(RemoteScanExec::new(
+            self.table_name.clone(),
+            self.partition_names.clone(),
+            self.schema.clone(),
             sql,
-            projection: projection.cloned(),
-            executor: self.executor.clone(),
-        }))
-    }
-}
-
-impl RemoteTableProvider {
-    /// 将 DataFusion Expr 转换为 SQL WHERE 条件（简化版本）
-    fn expr_to_sql(expr: &Expr) -> DataFusionResult<String> {
-        use datafusion::logical_expr::Operator;
-        use datafusion::scalar::ScalarValue;
-
-        match expr {
-            Expr::BinaryExpr(binary_expr) => {
-                let left = Self::expr_to_sql(binary_expr.left.as_ref())?;
-                let right = Self::expr_to_sql(binary_expr.right.as_ref())?;
-                let op = match binary_expr.op {
-                    Operator::Eq => "=",
-                    Operator::NotEq => "!=",
-                    Operator::Lt => "<",
-                    Operator::LtEq => "<=",
-                    Operator::Gt => ">",
-                    Operator::GtEq => ">=",
-                    Operator::And => "AND",
-                    Operator::Or => "OR",
-                    _ => {
-                        return Err(datafusion::error::DataFusionError::NotImplemented(format!(
-                            "Operator {:?} not supported in filter pushdown",
-                            binary_expr.op
-                        )))
-                    }
-                };
-                Ok(format!("{} {} {}", left, op, right))
-            }
-            Expr::Column(col) => Ok(col.name.clone()),
-            Expr::Literal(scalar, _metadata) => match scalar {
-                ScalarValue::Utf8(Some(s)) => Ok(format!("'{}'", s.replace("'", "''"))),
-                ScalarValue::Int64(Some(i)) => Ok(i.to_string()),
-                ScalarValue::UInt64(Some(u)) => Ok(u.to_string()),
-                ScalarValue::Float64(Some(f)) => Ok(f.to_string()),
-                ScalarValue::Boolean(Some(b)) => Ok(b.to_string()),
-                _ => Err(datafusion::error::DataFusionError::NotImplemented(format!(
-                    "Scalar value {:?} not supported in filter pushdown",
-                    scalar
-                ))),
-            },
-            _ => Err(datafusion::error::DataFusionError::NotImplemented(format!(
-                "Expression {:?} not supported in filter pushdown",
-                expr
-            ))),
-        }
+            projection.cloned(),
+            self.executor.clone(),
+        )))
     }
 }
 

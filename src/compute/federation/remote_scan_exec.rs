@@ -1,9 +1,11 @@
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    SendableRecordBatchStream,
 };
 use std::any::Any;
 use std::fmt;
@@ -21,6 +23,41 @@ pub struct RemoteScanExec {
     pub sql: String,
     pub projection: Option<Vec<usize>>,
     pub executor: Arc<FlightExecutor>,
+    properties: PlanProperties,
+}
+
+impl RemoteScanExec {
+    /// 创建新的 RemoteScanExec
+    pub fn new(
+        table_name: String,
+        partition_ids: Vec<String>,
+        schema: SchemaRef,
+        sql: String,
+        projection: Option<Vec<usize>>,
+        executor: Arc<FlightExecutor>,
+    ) -> Self {
+        // 创建 PlanProperties
+        let partitioning = Partitioning::UnknownPartitioning(1);
+        let boundedness = Boundedness::Bounded;
+        let emission_type = EmissionType::Incremental;
+
+        let properties = PlanProperties::new(
+            datafusion::physical_expr::EquivalenceProperties::new(schema.clone()),
+            partitioning,
+            emission_type,
+            boundedness,
+        );
+
+        Self {
+            table_name,
+            partition_ids,
+            schema,
+            sql,
+            projection,
+            executor,
+            properties,
+        }
+    }
 }
 
 impl std::fmt::Debug for RemoteScanExec {
@@ -42,6 +79,7 @@ impl Clone for RemoteScanExec {
             sql: self.sql.clone(),
             projection: self.projection.clone(),
             executor: self.executor.clone(),
+            properties: self.properties.clone(),
         }
     }
 }
@@ -60,8 +98,7 @@ impl ExecutionPlan for RemoteScanExec {
     }
 
     fn properties(&self) -> &PlanProperties {
-        // 简化：使用默认属性
-        unimplemented!("properties() called on RemoteScanExec")
+        &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

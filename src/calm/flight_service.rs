@@ -132,18 +132,42 @@ impl ArrowFlightService for CalmFlightService {
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let ticket = request.into_inner();
 
-        // 简单的 SQL 字符串
-        let sql = String::from_utf8(ticket.ticket.to_vec())
+        let ticket_str = String::from_utf8(ticket.ticket.to_vec())
             .map_err(|e| Status::invalid_argument(format!("Invalid UTF-8 in ticket: {}", e)))?;
 
-        log::info!("🛩️  [Flight Service] Executing SQL query: {}", sql);
+        // 严格解析 JSON Ticket
+        let json: serde_json::Value = serde_json::from_str(&ticket_str)
+            .map_err(|e| Status::invalid_argument(format!("Invalid JSON ticket: {}", e)))?;
+
+        let sql = json
+            .get("sql")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Status::invalid_argument("Missing 'sql' field in ticket"))?
+            .to_string();
+
+        let is_internal = json
+            .get("internal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        log::info!(
+            "🛩️  [Flight Service] Executing SQL query (internal={}): {}",
+            is_internal,
+            sql
+        );
 
         // 执行查询
-        let stream = self
-            .calm_service
-            .execute_query_stream(&sql)
-            .await
-            .map_err(|e| Status::internal(format!("Query execution failed: {}", e)))?;
+        let stream = if is_internal {
+            self.calm_service
+                .execute_local_query_stream(&sql)
+                .await
+                .map_err(|e| Status::internal(format!("Local query execution failed: {}", e)))?
+        } else {
+            self.calm_service
+                .execute_query_stream(&sql)
+                .await
+                .map_err(|e| Status::internal(format!("Query execution failed: {}", e)))?
+        };
 
         // 获取 schema
         let schema = stream.schema();
