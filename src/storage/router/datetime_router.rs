@@ -223,7 +223,7 @@ impl DatetimeRouter {
         for (row_idx, partition_name) in partition_names.iter().enumerate() {
             partition_indices
                 .entry(partition_name.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(row_idx);
         }
 

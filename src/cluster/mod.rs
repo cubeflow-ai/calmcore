@@ -191,18 +191,13 @@ impl ClusterManager {
 
         // 从配置获取两个端口
         // internal_port: tarpc 控制面端口
-        // grpc_port: Flight 数据面基础端口
-        //   - grpc_port: 自定义 Flight（do_put + SQL）
-        //   - grpc_port+1: datafusion-distributed Flight（分布式查询）
+        // grpc_port: Arrow Flight 数据面端口（用于联邦查询）
         let tarpc_port = cluster_config.internal_port;
         let custom_flight_port = cluster_config.distributed.grpc_port.ok_or_else(|| {
             CoreError::ConfigError(
                 "grpc_port must be configured in cluster.distributed".to_string(),
             )
         })?;
-
-        // node_id 中的 flight_port 指向 custom Flight（用于 do_put 和 SQL）
-        // ChannelResolver 会自动 +1 连接到 distributed Flight
 
         // node_id format: timestamp_host_tarpc_port_flight_port
         let host = config
@@ -226,7 +221,7 @@ impl ClusterManager {
         );
 
         let gossip =
-            GossipManager::new(node_id.clone(), &cluster_config, gossip_listen_addr).await?;
+            GossipManager::new(node_id.clone(), cluster_config, gossip_listen_addr).await?;
 
         let chitchat = gossip.chitchat();
 
@@ -376,7 +371,7 @@ impl ClusterManager {
         let mut routers = HashMap::new();
 
         // Scan all node states for partition keys
-        for (_chitchat_id, node_state) in chitchat.node_states() {
+        for node_state in chitchat.node_states().values() {
             for (key, value) in node_state.key_values() {
                 if key.starts_with("partition:") {
                     match (parse_partition_key(key), parse_partition_value(value)) {

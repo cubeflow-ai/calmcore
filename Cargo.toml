@@ -21,9 +21,10 @@ itertools = "0.14.0"
 rayon = "1.11"
 sha1 = "0.10"
 # parquet = "54.3.1"
-datafusion = "51.0.0" # 升级以支持 datafusion-distributed
-datafusion-distributed = { git = "https://github.com/datafusion-contrib/datafusion-distributed.git", commit = "b7e5555b0dbbea3c77d1dc47f5d07cdda87517df" } # 用于分布式查询
-datafusion-proto = "51.0.0" # 用于 PhysicalExtensionCodec
+datafusion = "51.0.0"
+datafusion-proto = "51.0.0"
+datafusion-federation = "0.4.12" # 用于联邦查询
+sqlparser = "0.59" # SQL 解析
 async-trait = "0.1"
 bytes = "1.9"
 serde_json = "1.0.114"
@@ -61,7 +62,7 @@ async-graphql = "7"
 async-graphql-poem = "7"
 
 
-# Arrow Flight for datafusion-distributed
+# Arrow Flight for distributed queries
 tonic = "0.14"
 arrow-flight = "57"
 prost = "0.13"
@@ -72,7 +73,7 @@ toml = "0.8"
 base64 = "0.22"
 color-eyre = "0.6"                                            # for better error reporting with backtraces
 reqwest = { version = "0.12", features = ["json", "stream"] }
-url = "2.5"                                                   # for datafusion-distributed
+url = "2.5"
 sysinfo = "0.33"                                              # for system metrics
 
 [dev-dependencies]

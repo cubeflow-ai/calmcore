@@ -315,7 +315,7 @@ fn parse_painless_script(script: &str) -> Result<String, String> {
     // 检查是否是字符串拼接（包含 + '|' +）
     if script.contains(" + '") || script.contains(" + \"") {
         // 构建 CONCAT 表达式
-        let concat_parts: Vec<String> = fields.iter().map(|f| f.clone()).collect();
+        let concat_parts: Vec<String> = fields.iter().cloned().collect();
 
         // 从脚本中提取分隔符
         let separators = extract_separators(script);

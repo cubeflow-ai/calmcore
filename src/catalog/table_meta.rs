@@ -1,8 +1,6 @@
 /// Table 元数据定义
-use crate::{schema::Schema, utils::error::CoreResult};
+use crate::schema::Schema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::path::{Path, PathBuf};
 
 /// 表的元数据
 #[derive(Debug, Clone, Serialize, Deserialize)]

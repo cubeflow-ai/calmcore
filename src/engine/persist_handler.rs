@@ -89,7 +89,7 @@ impl Engine {
         let mut error_count = 0;
 
         for partition_name in &partition_names {
-            match self.persist_partition(table_name, &partition_name).await {
+            match self.persist_partition(table_name, partition_name).await {
                 Ok(_) => {
                     success_count += 1;
                     log::info!(

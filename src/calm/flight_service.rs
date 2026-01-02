@@ -132,32 +132,7 @@ impl ArrowFlightService for CalmFlightService {
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let ticket = request.into_inner();
 
-        // datafusion-distributed 会发送序列化的 DoGet protobuf
-        // 我们需要同时支持：
-        // 1. datafusion-distributed 的分布式查询协议（bytes 以特定格式开始）
-        // 2. 简单的 SQL 字符串（向后兼容）
-
-        // 尝试判断是否是分布式查询请求
-        // datafusion-distributed 的 DoGet 是 protobuf 编码
-        // 如果以 0x08 或 0x0a 开始（protobuf field tag），可能是分布式计划
-        let is_distributed = !ticket.ticket.is_empty()
-            && (ticket.ticket[0] == 0x08 || ticket.ticket[0] == 0x0a || ticket.ticket[0] == 0x10);
-
-        if is_distributed {
-            log::info!("🛩️  [Flight Service] Detected distributed query request (protobuf)");
-            // 这里我们需要手动处理分布式请求
-            // 由于 datafusion-distributed 的内部类型不公开，我们需要：
-            // 1. 解析 protobuf
-            // 2. 反序列化物理计划
-            // 3. 执行计划
-            // 但这需要访问私有 API，暂时返回 unimplemented
-            return Err(Status::unimplemented(
-                "Distributed query via Flight do_get not yet fully integrated. \
-                 datafusion-distributed needs its own ArrowFlightEndpoint.",
-            ));
-        }
-
-        // Fallback: 简单的 SQL 字符串
+        // 简单的 SQL 字符串
         let sql = String::from_utf8(ticket.ticket.to_vec())
             .map_err(|e| Status::invalid_argument(format!("Invalid UTF-8 in ticket: {}", e)))?;
 
@@ -307,7 +282,7 @@ impl ArrowFlightService for CalmFlightService {
         &self,
         request: Request<Action>,
     ) -> Result<Response<Self::DoActionStream>, Status> {
-        use super::flight_actions::{FlightAction, FlightActionResponse};
+        use super::flight_actions::FlightAction;
 
         let action = request.into_inner();
 

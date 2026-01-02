@@ -2,20 +2,18 @@
 //!
 //! 合并 DataService 和 MetaService 的所有功能到一个服务中
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf};
 
 use crate::{
     calm::{
-        new_data_client, CalmService, ClusterManagerRef, PartitionDetail, SegmentDetail,
+        new_data_client, CalmService, PartitionDetail, SegmentDetail,
         TableDetail,
     },
-    catalog::{table_meta::PartitionStrategy, Catalog, TableMeta},
-    cluster::{keys, ClusterManager},
-    engine::Engine,
+    catalog::{table_meta::PartitionStrategy, TableMeta},
+    cluster::keys,
     schema::Schema,
     utils::error::{CoreError, CoreResult},
 };
-use datafusion::arrow::compute::kernels::partition;
 use ddl_macros::coordinator_route;
 use itertools::Itertools;
 use tarpc::context::Context;
@@ -975,9 +973,7 @@ impl CalmRpcService for CalmService {
         let partition_list = table_info
             .partitions
             .read()
-            .await
-            .iter()
-            .map(|(_, p)| (p.partition_name.clone(), p.owner.clone()))
+            .await.values().map(|p| (p.partition_name.clone(), p.owner.clone()))
             .collect_vec();
 
         let mut partitions = HashMap::new();

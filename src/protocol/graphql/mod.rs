@@ -1108,7 +1108,7 @@ impl QueryRoot {
         let service = ctx.data::<Arc<CalmService>>()?;
 
         let table_detail = match CalmRpcService::get_table_detail(
-            Arc::as_ref(&service).clone(),
+            Arc::as_ref(service).clone(),
             tarpc::context::current(),
             name.clone(),
         )
@@ -1271,7 +1271,7 @@ impl QueryRoot {
         let service = ctx.data::<Arc<CalmService>>()?;
 
         let node_info =
-            CalmRpcService::node_info(Arc::as_ref(&service).clone(), tarpc::context::current())
+            CalmRpcService::node_info(Arc::as_ref(service).clone(), tarpc::context::current())
                 .await
                 .map_err(|e| {
                     async_graphql::Error::new(format!("Failed to get node info: {}", e))
@@ -1324,7 +1324,7 @@ impl QueryRoot {
         let service = ctx.data::<Arc<CalmService>>()?;
 
         let node_infos =
-            CalmRpcService::list_node(Arc::as_ref(&service).clone(), tarpc::context::current())
+            CalmRpcService::list_node(Arc::as_ref(service).clone(), tarpc::context::current())
                 .await
                 .map_err(|e| {
                     async_graphql::Error::new(format!("Failed to get node list: {}", e))
@@ -1597,7 +1597,7 @@ impl MutationRoot {
 
         // 直接调用 CalmService 的 create_table 方法
         CalmRpcService::create_table(
-            Arc::as_ref(&service).clone(),
+            Arc::as_ref(service).clone(),
             tarpc::context::current(),
             schema,
             partition_strategy,

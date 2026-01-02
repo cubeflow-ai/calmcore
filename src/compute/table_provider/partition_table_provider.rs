@@ -347,7 +347,7 @@ async fn process_partition_segments(
                 doc_count,
                 segment.get_deleted(),
             );
-            scanners.push((seg_id.clone(), segment.start, scanner));
+            scanners.push((*seg_id, segment.start, scanner));
         }
         scanners
     };

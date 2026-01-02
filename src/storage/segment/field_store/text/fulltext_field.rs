@@ -516,9 +516,9 @@ impl IndexWriter for FullTextField {
                 // Add to posting list
                 let doc_positions = term_postings
                     .entry(term.clone())
-                    .or_insert_with(HashMap::new)
+                    .or_default()
                     .entry(doc_id)
-                    .or_insert_with(Vec::new);
+                    .or_default();
 
                 doc_positions.push(position);
 

@@ -543,7 +543,7 @@ async fn get_document(
     let partition = server
         .calm_service
         .engine()
-        .get_partition(&index, &partition_id)
+        .get_partition(&index, partition_id)
         .await
         .ok_or_else(|| internal_error("Partition not found".to_string()))?;
 
@@ -721,7 +721,7 @@ async fn bulk_operation_impl(
                 // 按索引分组
                 docs_by_index
                     .entry(index_name.to_string())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((doc_id, doc));
             }
             _ => {
@@ -1730,14 +1730,14 @@ fn convert_es_sort_to_sql(sort: &Value) -> Option<String> {
         log::error!("⚠️  [convert_es_sort_to_sql] Sort is neither array nor object");
     }
 
-    let result = if order_clauses.is_empty() {
+    
+
+    if order_clauses.is_empty() {
         None
     } else {
         let result_str = order_clauses.join(", ");
         Some(result_str)
-    };
-
-    result
+    }
 }
 
 /// 格式化 SQL 值

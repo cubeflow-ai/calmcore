@@ -1,7 +1,7 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use arrow_flight::{
-    encode::FlightDataEncoderBuilder, FlightClient, FlightData, FlightDescriptor, PutResult,
+    encode::FlightDataEncoderBuilder, FlightClient, FlightDescriptor, PutResult,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use futures::{stream, StreamExt, TryStreamExt};
@@ -24,7 +24,7 @@ mod job;
 mod flight_actions;
 mod flight_service;
 mod service;
-pub(self) mod servie_ext;
+ mod servie_ext;
 
 // 公开导出 trait 和 client
 pub use service::{CalmRpcService, CalmRpcServiceClient};
@@ -79,6 +79,12 @@ pub struct NodeInfo {
 pub struct Locker {
     partition_lock: Mutex<()>,
     coord_partition_lock: Mutex<()>,
+}
+
+impl Default for Locker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Locker {
@@ -170,9 +176,7 @@ impl CalmService {
 
         log::info!("Running in cluster mode");
 
-        // 从配置文件获取两个端口
-        // internal_port: tarpc 控制面端口
-        // grpc_port: Arrow Flight 数据面端口
+        // 从配置文件获取端口
         let cluster_config = conf
             .cluster
             .as_ref()
@@ -185,9 +189,9 @@ impl CalmService {
             )
         })?;
 
-        // 🔧 双协议方案：tarpc RPC (DDL/DML) + Arrow Flight (查询)
+        // 启动集群服务
 
-        // 1. 启动 tarpc RPC 服务器（控制平面）
+        // 1. 启动 tarpc RPC 服务器
         let rpc_addr = format!("0.0.0.0:{}", tarpc_port);
         {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -204,17 +208,10 @@ impl CalmService {
 
             rx.await
                 .map_err(|_| CoreError::Internal("RPC server failed to start".to_string()))?;
-            log::info!(
-                "✅ tarpc RPC server (control plane) started on {}",
-                rpc_addr
-            );
+            log::info!("✅ tarpc RPC server started on {}", rpc_addr);
         }
 
-        // 2. 启动两个 Arrow Flight 服务器（数据平面）
-        // - 自定义 Flight：do_put（插入）+ SQL do_get
-        // - datafusion-distributed Flight：分布式查询 do_get
-
-        // 2.1 自定义 Flight 服务（主要用于 do_put）
+        // 2. 启动 Arrow Flight 服务器
         let custom_flight_addr = format!("0.0.0.0:{}", flight_port);
         let custom_addr = custom_flight_addr
             .parse::<std::net::SocketAddr>()
@@ -237,96 +234,6 @@ impl CalmService {
             log::info!(
                 "✅ Custom Arrow Flight server (do_put + SQL) started on {}",
                 custom_flight_addr
-            );
-        }
-
-        // 2.2 datafusion-distributed Flight 服务（用于分布式查询）
-        let distributed_flight_port = flight_port + 1; // 使用下一个端口
-        let distributed_flight_addr = format!("0.0.0.0:{}", distributed_flight_port);
-
-        {
-            use datafusion_distributed::{ArrowFlightEndpoint, DistributedExt};
-            use tonic::transport::Server;
-
-            let calm_clone = self.clone();
-            let flight_endpoint = ArrowFlightEndpoint::try_new(
-                move |_ctx: datafusion_distributed::DistributedSessionBuilderContext| {
-                    let calm_service = calm_clone.clone();
-                    async move {
-                        use crate::compute::{
-                            CalmChannelResolver, EngineExtension, LazyPartitionCodec,
-                        };
-                        use datafusion::execution::SessionStateBuilder;
-                        use datafusion::prelude::SessionConfig;
-
-                        let channel_resolver = CalmChannelResolver::new_distributed(
-                            calm_service.cluster_manager.as_ref().unwrap().clone(),
-                        )
-                        .await;
-
-                        // 获取本地节点 ID
-                        let my_node_id = calm_service
-                            .cluster_manager
-                            .as_ref()
-                            .map(|cm| cm.node_id().to_string())
-                            .unwrap_or_else(|| "standalone".to_string());
-
-                        // 🎯 创建 SessionConfig 并注入 Engine 和 node_id
-                        let config = SessionConfig::default()
-                            .with_extension(calm_service.engine.clone())
-                            .with_extension(Arc::new(my_node_id.clone()));
-
-                        log::info!(
-                            "✅ [Distributed Flight] Injected Engine and node_id '{}' into SessionConfig",
-                            my_node_id
-                        );
-
-                        // 构建 SessionState
-                        let state = SessionStateBuilder::new()
-                            .with_config(config)
-                            .with_default_features()
-                            .with_distributed_channel_resolver(channel_resolver)
-                            .with_physical_optimizer_rule(Arc::new(
-                                datafusion_distributed::DistributedPhysicalOptimizerRule,
-                            ))
-                            .with_distributed_user_codec(LazyPartitionCodec)
-                            .build();
-
-                        Ok(state)
-                    }
-                },
-            )
-            .map_err(|e| {
-                CoreError::Internal(format!(
-                    "Failed to create distributed Flight endpoint: {}",
-                    e
-                ))
-            })?;
-
-            let dist_addr = distributed_flight_addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e| {
-                    CoreError::ConfigError(format!("Invalid distributed Flight address: {}", e))
-                })?;
-
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                tx.send(()).ok();
-                if let Err(e) = Server::builder()
-                    .add_service(flight_endpoint.into_flight_server())
-                    .serve(dist_addr)
-                    .await
-                {
-                    log::error!("❌ Distributed Flight server error: {}", e);
-                }
-            });
-
-            rx.await.map_err(|_| {
-                CoreError::Internal("Distributed Flight server failed to start".to_string())
-            })?;
-            log::info!(
-                "✅ Distributed Arrow Flight server (datafusion-distributed) started on {}",
-                distributed_flight_addr
             );
         }
 
@@ -554,31 +461,43 @@ impl CalmService {
         Ok(())
     }
 
-    /// 执行 SQL 查询并返回流（使用分布式查询执行器）
+    /// 执行 SQL 查询并返回流
     pub async fn execute_query_stream(
         &self,
         sql: &str,
     ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
-        use crate::compute::DistributedDataFusionExecutor;
-
         log::info!("🚀 [CalmService] Executing query: {}", sql);
 
-        let executor = DistributedDataFusionExecutor::new(
-            self.engine.clone(),
-            self.catalog.clone(),
-            self.cluster_manager.0.clone(),
-        );
+        use datafusion::prelude::*;
 
-        executor.execute_sql_stream(sql).await
+        // 如果有 ClusterManager，使用 FederatedQueryExecutor
+        if let Some(cm) = self.cluster_manager.as_ref() {
+            use crate::compute::federation::FederatedQueryExecutor;
+
+            let executor =
+                FederatedQueryExecutor::new(self.catalog.clone(), self.engine.clone(), cm.clone());
+
+            return executor.execute(sql).await;
+        }
+
+        // 否则回退到单机模式（仅用于 INFORMATION_SCHEMA 等系统表）
+        let ctx = SessionContext::new();
+
+        let df = ctx
+            .sql(sql)
+            .await
+            .map_err(|e| CoreError::Internal(format!("Failed to parse SQL: {}", e)))?;
+
+        let stream = df
+            .execute_stream()
+            .await
+            .map_err(|e| CoreError::Internal(format!("Failed to execute query: {}", e)))?;
+
+        Ok(stream)
     }
 
-    /// 插入数据到表（使用 Router 自动路由）
+    /// 插入数据到表
     ///
-    /// # 参数
-    /// - table_name: 表名
-    /// - batch: RecordBatch 数据（已经从 JSON/其他格式转换好）
-    ///
-    /// # 说明
     /// 内部自动路由到各个分区，本地直接插入，远程通过 Flight do_put
     pub async fn insert_data(
         &self,
@@ -615,13 +534,9 @@ impl CalmService {
             routed_batches.len()
         );
 
-        // 获取分区路由信息（集群模式）
+        let table = self.catalog.get_or_load_table(table_name).await?;
+        let my_node_id = self.cluster_manager.node_id_without_none().to_string();
 
-        let table = self.catalog.get_or_load_table(&table_name).await?;
-
-        let my_node_id = self.cluster_manager.node_id_without_none().to_string(); // 🔥 转换为 String，拥有所有权
-
-        // 🔥 关键：在循环外先克隆需要的组件，避免生命周期问题
         let self_for_tasks = self.clone();
         let catalog_for_loop = self.catalog.clone();
 
@@ -644,12 +559,6 @@ impl CalmService {
                         table_name
                     );
                     if !table.table.partition_strategy.should_precreate_partitions() {
-                        log::info!(
-                                    "📦 [CalmService] Partition '{}/{}' does not exist locally, requesting creation from coordinator",
-                                    table_name,
-                                    partition_name
-                                );
-
                         let partition_meta = self_for_tasks
                             .clone()
                             .create_partition(
@@ -660,48 +569,28 @@ impl CalmService {
                             .await?;
 
                         let partition_owner = partition_meta.owner.clone();
-                        log::info!(
-                                    "✅ [CalmService] Partition '{}/{}' created on node '{}', updating local catalog",
-                                    table_name,
-                                    partition_name,
-                                    partition_meta.owner
-                                );
 
-                        // 🔥 关键：只更新本地 catalog，不尝试加载（partition 可能在其他节点）
                         catalog_for_loop
-                            .update_partition_meta(&table_name, partition_meta)
+                            .update_partition_meta(table_name, partition_meta)
                             .await?;
 
                         partition_owner
                     } else {
-                        // 去中央结点询问这个parititon的位置
                         let table_detail = self_for_tasks
                             .clone()
                             .get_table_detail(tarpc::context::current(), table_name.to_string())
                             .await?;
 
-                        log::info!(
-                                    "📦 [CalmService] Partition '{}/{}' does not exist locally, checking with coordinator",
-                                    table_name,
-                                    partition_name
-                                );
-
-                        let partition_owner = table_detail.partitions.get(&partition_name).map(|p| p.owner.clone()).ok_or_else(||{
-                                    log::error!(
-                                        "❌ [CalmService] Partition '{}/{}' does not exist according to coordinator",
-                                        table_name,
-                                        partition_name
-                                    );
-                                    CoreError::NotExisted(
-                                        format!("Partition '{}/{}' does not exist and should be pre-created", table_name, partition_name)
-                                    )
-                                })?;
-                        log::info!(
-                                    "📡 [CalmService] Coordinator indicates partition '{}/{}' is owned by node '{}'",
-                                    table_name,
-                                    partition_name,
-                                    partition_owner
-                                );
+                        let partition_owner = table_detail
+                            .partitions
+                            .get(&partition_name)
+                            .map(|p| p.owner.clone())
+                            .ok_or_else(|| {
+                                CoreError::NotExisted(format!(
+                                    "Partition '{}/{}' does not exist and should be pre-created",
+                                    table_name, partition_name
+                                ))
+                            })?;
 
                         catalog_for_loop
                             .force_update_table_detail(table_detail)
@@ -717,34 +606,13 @@ impl CalmService {
             let partition_name = partition_name.to_string();
             let is_remote = !owner_node.eq(&my_node_id);
 
-            log::info!(
-                "🔍 [CalmService] Partition '{}': owner={:?}, my_node_id={:?}, is_remote={}",
-                partition_name,
-                owner_node,
-                my_node_id,
-                is_remote
-            );
-
             let handle = tokio::spawn(async move {
                 let rows = batch.num_rows();
 
                 if is_remote {
-                    log::debug!(
-                        "📡 [CalmService] Forwarding {} rows to remote partition '{}' on node '{}'",
-                        rows,
-                        partition_name,
-                        owner_node,
-                    );
-
                     self_clone
                         .flight_do_put(&owner_node, &table_name, &partition_name, batch)
                         .await?;
-
-                    log::debug!(
-                        "✅ [CalmService] Successfully sent {} rows to remote partition '{}'",
-                        rows,
-                        partition_name
-                    );
                 } else {
                     self_clone
                         .engine
@@ -757,7 +625,6 @@ impl CalmService {
             tasks.push(handle);
         }
 
-        // // 等待所有任务完成并统计结果
         let mut total_inserted = 0;
 
         for task in tasks {
@@ -766,7 +633,6 @@ impl CalmService {
                     total_inserted += rows;
                 }
                 Ok(Err(e)) => {
-                    log::error!("❌ [CalmService] Partition insert failed: {}", e);
                     return Err(e);
                 }
                 Err(e) => {
@@ -838,7 +704,7 @@ impl ClusterManagerRef {
                 partition_name,
             );
 
-            cm.put_partition(&table_name, &partition_name).await;
+            cm.put_partition(table_name, partition_name).await;
         }
     }
 

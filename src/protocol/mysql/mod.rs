@@ -3,7 +3,7 @@ mod insert_handler;
 use crate::calm::CalmService;
 use crate::schema::field::FieldOption;
 use crate::schema::Schema;
-use datafusion::arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array};
+use datafusion::arrow::array::{ArrayRef, RecordBatch, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use msql_srv::*;
 use sha1::{Digest, Sha1};
@@ -138,13 +138,13 @@ fn verify_mysql_native_password(password: &str, auth_response: &[u8], scramble: 
 
     // 2. SHA1(SHA1(password))
     let mut hasher = Sha1::new();
-    hasher.update(&stage1);
+    hasher.update(stage1);
     let stage2 = hasher.finalize();
 
     // 3. SHA1(scramble + SHA1(SHA1(password)))
     let mut hasher = Sha1::new();
     hasher.update(scramble);
-    hasher.update(&stage2);
+    hasher.update(stage2);
     let stage3 = hasher.finalize();
 
     // 4. XOR(SHA1(password), SHA1(scramble + SHA1(SHA1(password))))
@@ -247,7 +247,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
 
             // 直接调用 natural_order_executor 的流式版本
             // 使用 channel 传输数据，避免全部加载到内存
-            return tokio::task::block_in_place(|| {
+            tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     use crate::compute::natural_order_executor::NaturalOrderExecutor;
 
@@ -340,7 +340,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                         }
                     }
                 })
-            });
+            })
         } else {
             log::debug!("📦 [MySQL] Standard execute (flags={})", flags);
             results.error(
@@ -502,7 +502,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                         }
 
                         log::info!("✅ Successfully flushed {} tables", success_count);
-                        return results.completed(0, 0);
+                        results.completed(0, 0)
                     } else if parts.len() >= 3 {
                         // FLUSH TABLES table_name [, table_name2, ...]
                         // 提取所有表名 (跳过 FLUSH TABLES)
@@ -548,10 +548,10 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                         }
 
                         log::info!("✅ Successfully flushed {} tables", table_names.len());
-                        return results.completed(0, 0);
+                        results.completed(0, 0)
                     } else {
-                        return results
-                            .error(ErrorKind::ER_PARSE_ERROR, b"Invalid FLUSH TABLES syntax");
+                        results
+                            .error(ErrorKind::ER_PARSE_ERROR, b"Invalid FLUSH TABLES syntax")
                     }
                 })
             });
@@ -653,11 +653,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                 None
             } else if let Some(after_from) = rest.strip_prefix("from ") {
                 Some(after_from.trim().to_string())
-            } else if let Some(after_in) = rest.strip_prefix("in ") {
-                Some(after_in.trim().to_string())
-            } else {
-                None
-            };
+            } else { rest.strip_prefix("in ").map(|after_in| after_in.trim().to_string()) };
 
             let schema = Arc::new(ArrowSchema::new(vec![
                 Field::new("Table", DataType::Utf8, false),

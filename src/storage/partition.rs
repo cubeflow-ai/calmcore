@@ -1,7 +1,6 @@
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
 };
@@ -1033,7 +1032,7 @@ impl Partition {
                 "📍 [Partition::scan_all] Got lock, {} docs in current segment",
                 current_segment.doc_count()
             );
-            let doc_count = current_segment.doc_count() as u32;
+            let doc_count = current_segment.doc_count();
             if doc_count > 0 {
                 let doc_ids: Vec<u32> = (0..doc_count).collect();
 

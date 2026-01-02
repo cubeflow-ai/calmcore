@@ -64,14 +64,6 @@ fn default_suspect_timeout_secs() -> u64 {
     10
 }
 
-fn default_vote_timeout_secs() -> u64 {
-    10
-}
-
-fn default_min_cluster_size() -> usize {
-    3
-}
-
 impl Default for ClusterSettings {
     fn default() -> Self {
         Self {
@@ -160,21 +152,9 @@ impl ClusterSettings {
 /// 分布式查询配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributedSettings {
-    /// 查询超时时间（毫秒）
-    #[serde(default = "default_query_timeout_ms")]
-    pub query_timeout_ms: u64,
-
-    /// Shuffle 缓冲区大小（行数）
-    #[serde(default = "default_shuffle_buffer_size")]
-    pub shuffle_buffer_size: usize,
-
-    /// 最大并发查询数
-    #[serde(default = "default_max_concurrent_queries")]
-    pub max_concurrent_queries: usize,
-
-    /// 节点间通信端口（RPC）
-    #[serde(default = "default_rpc_port")]
-    pub rpc_port: u16,
+    /// gRPC 服务端口（用于 Arrow Flight，None 表示自动分配）
+    #[serde(default)]
+    pub grpc_port: Option<u16>,
 
     /// 连接超时时间（毫秒）
     #[serde(default = "default_connect_timeout_ms")]
@@ -183,26 +163,6 @@ pub struct DistributedSettings {
     /// 请求超时时间（毫秒）
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
-
-    /// gRPC 服务端口（用于分布式查询和 RPC，None 表示自动分配）
-    #[serde(default)]
-    pub grpc_port: Option<u16>,
-}
-
-fn default_query_timeout_ms() -> u64 {
-    30_000
-}
-
-fn default_shuffle_buffer_size() -> usize {
-    10_000
-}
-
-fn default_max_concurrent_queries() -> usize {
-    100
-}
-
-fn default_rpc_port() -> u16 {
-    7947
 }
 
 fn default_connect_timeout_ms() -> u64 {
@@ -216,13 +176,9 @@ fn default_request_timeout_ms() -> u64 {
 impl Default for DistributedSettings {
     fn default() -> Self {
         Self {
-            query_timeout_ms: default_query_timeout_ms(),
-            shuffle_buffer_size: default_shuffle_buffer_size(),
-            max_concurrent_queries: default_max_concurrent_queries(),
-            rpc_port: default_rpc_port(),
+            grpc_port: None,
             connect_timeout_ms: default_connect_timeout_ms(),
             request_timeout_ms: default_request_timeout_ms(),
-            grpc_port: None,
         }
     }
 }

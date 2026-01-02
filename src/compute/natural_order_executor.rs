@@ -176,11 +176,7 @@ impl NaturalOrderExecutor {
                 };
 
                 // 3. 提取 WHERE 子句
-                let where_clause = if let Some(selection) = &select.selection {
-                    Some(format!("{}", selection))
-                } else {
-                    None
-                };
+                let where_clause = select.selection.as_ref().map(|selection| format!("{}", selection));
 
                 // 4. 解析 LIMIT 和 OFFSET - 使用 sqlparser 的 LimitClause
                 let (limit, offset) = if let Some(limit_clause) = &query.limit_clause {

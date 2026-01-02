@@ -35,7 +35,7 @@ impl BitmapUnionLeaf {
 }
 
 impl UnionLeafSerializer<roaring::RoaringBitmap> for BitmapUnionLeaf {
-    fn add_value<'a>(&self, value: &'a roaring::RoaringBitmap) {
+    fn add_value(&self, value: &roaring::RoaringBitmap) {
         let mut guard = self.union_bitmap.lock().unwrap();
         *guard = &*guard | value;
     }

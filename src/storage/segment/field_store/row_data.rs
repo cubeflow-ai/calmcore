@@ -181,7 +181,7 @@ impl ParquetRowDataReader {
         // Read batches from the selected RowGroup
         let read_start = std::time::Instant::now();
         let mut batches = Vec::new();
-        while let Some(batch_result) = reader.next() {
+        for batch_result in reader {
             if let Ok(batch) = batch_result {
                 batches.push(batch);
             }
@@ -264,7 +264,7 @@ impl ParquetRowDataReader {
         let mut remaining_to_read = limit_rows;
 
         // Read batches, skipping until we reach skip_rows
-        while let Some(batch_result) = reader.next() {
+        for batch_result in reader {
             let batch = batch_result.ok()?;
             let batch_rows = batch.num_rows();
 
@@ -460,10 +460,8 @@ impl ParquetRowDataReader {
 
             // Collect all batches from this RowGroup
             let mut batches = Vec::new();
-            for batch_result in reader {
-                if let Ok(batch) = batch_result {
-                    batches.push(batch);
-                }
+            for batch in reader.flatten() {
+                batches.push(batch);
             }
 
             if !batches.is_empty() {

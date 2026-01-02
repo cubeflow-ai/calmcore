@@ -1,14 +1,12 @@
 //! 元数据管理模块 - 处理表和分区的元数据操作
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use datafusion::arrow::compute::kernels::partition;
 
-use crate::catalog::{dir, table_meta, Catalog, PartitionStrategy, TableMeta};
 use crate::partition::Partition;
 use crate::schema::Schema;
-use crate::utils::error::{CoreError, CoreResult};
+use crate::utils::error::CoreResult;
 
 use super::Engine;
 

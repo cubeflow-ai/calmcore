@@ -10,7 +10,7 @@
 //! - **State Propagation**: Key-value state propagation across all nodes
 //! - **Event Broadcasting**: Cluster events via tokio broadcast channels
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,10 +22,8 @@ use chitchat::{
 use tokio::sync::Mutex;
 
 use crate::config::cluster::ClusterSettings;
-use crate::config::Config;
 use crate::utils::error::{CoreError, CoreResult};
 
-use crate::cluster::keys::*;
 
 pub struct GossipManager {
     chitchat_handle: ChitchatHandle,
@@ -136,7 +134,7 @@ impl GossipManager {
         let guard = chitchat.lock().await;
 
         // Then check other nodes' states
-        for (_chitchat_id, node_state) in guard.node_states() {
+        for node_state in guard.node_states().values() {
             if let Some(value) = node_state.get(key) {
                 return Some(value.to_string());
             }
@@ -150,7 +148,7 @@ impl GossipManager {
         let mut values = Vec::new();
 
         // Check all nodes' states
-        for (_chitchat_id, node_state) in guard.node_states() {
+        for node_state in guard.node_states().values() {
             if let Some(value) = node_state.get(key) {
                 values.push(value.to_string());
             }
@@ -164,7 +162,7 @@ impl GossipManager {
         let mut result = HashMap::new();
 
         // Check all nodes' states
-        for (_chitchat_id, node_state) in guard.node_states() {
+        for node_state in guard.node_states().values() {
             for (key, value) in node_state.key_values() {
                 if key.starts_with(prefix) {
                     result.insert(key.to_string(), value.to_string());

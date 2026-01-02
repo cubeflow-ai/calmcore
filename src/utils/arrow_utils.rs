@@ -69,7 +69,7 @@ pub fn json_to_record_arrow(
 
     // 使用 Arrow JSON Reader 解析
     let cursor = Cursor::new(buffer);
-    let mut reader = ReaderBuilder::new(arrow_schema.clone())
+    let reader = ReaderBuilder::new(arrow_schema.clone())
         .build(cursor)
         .map_err(|e| CoreError::Internal(format!("Failed to create JSON reader: {}", e)))?;
 

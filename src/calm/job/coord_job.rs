@@ -1,14 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
-use async_graphql::Data;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     calm::{new_data_client, CalmRpcService, CalmService},
-    catalog::Catalog,
-    cluster::{keys, ClusterManager},
-    engine::Engine,
+    cluster::keys,
     utils::error::{CoreError, CoreResult},
 };
 
@@ -419,7 +416,7 @@ pub async fn start_coord_job(calm_service: Arc<CalmService>) -> CoreResult<()> {
                 match event {
                     CoordClusterEvent::PartitionChanged { key, value, node } => {
                         if let Err(e) = crate::calm::job::handle_partition_changed(
-                            &job_service.calm_service.catalog(),
+                            job_service.calm_service.catalog(),
                             &key,
                             &value,
                             &node,
@@ -434,9 +431,7 @@ pub async fn start_coord_job(calm_service: Arc<CalmService>) -> CoreResult<()> {
             // 监听节点成员变化
             Some(live_nodes_map) = live_nodes_stream.next() => {
                 // 从 (&ChitchatId, &NodeState) 提取 node_id
-                let live_nodes: Vec<String> = live_nodes_map
-                    .iter()
-                    .map(|(id, _)| id.node_id.clone())
+                let live_nodes: Vec<String> = live_nodes_map.keys().map(|id| id.node_id.clone())
                     .collect();
 
                 log::info!("👥 [Coordinator] Live nodes changed: {} nodes", live_nodes.len());

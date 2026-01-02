@@ -7,7 +7,7 @@ use datafusion::arrow::array::{Array, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::catalog::{dir, PartitionStrategy};
+use crate::catalog::PartitionStrategy;
 use crate::utils::error::{CoreError, CoreResult};
 
 use super::utils::take_rows;
@@ -260,7 +260,7 @@ impl RangeRouter {
         for (row_idx, partition_name) in partition_names.iter().enumerate() {
             groups
                 .entry(partition_name.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(row_idx);
         }
 

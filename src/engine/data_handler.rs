@@ -1,14 +1,10 @@
 //! 数据操作模块 - 处理数据的插入、查询和加载
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use datafusion::arrow::record_batch::RecordBatch;
 
-use crate::catalog::{PartitionStrategy, TableMeta};
-use crate::partition::Partition;
-use crate::schema::Schema;
+use crate::catalog::TableMeta;
 use crate::utils::error::{CoreError, CoreResult};
 
 use super::Engine;

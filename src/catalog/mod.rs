@@ -226,7 +226,7 @@ impl Catalog {
     /// 删除表
     pub async fn drop_table(&self, table_name: &str) -> CoreResult<()> {
         // 从缓存中移除
-        let _meta = {
+        {
             let mut tables = self.tables.write().await;
             tables.remove(table_name);
         };
