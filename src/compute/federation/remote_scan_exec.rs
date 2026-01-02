@@ -128,10 +128,14 @@ impl ExecutionPlan for RemoteScanExec {
         let executor = self.executor.clone();
         let sql = self.sql.clone();
         let schema = self.schema.clone();
+        let partitions = self.partition_ids.clone();
 
         // 创建异步流
         let stream = futures::stream::once(async move {
-            match executor.execute_sql(&sql).await {
+            match executor
+                .execute_sql_with_partitions(&sql, &partitions)
+                .await
+            {
                 Ok(stream) => Ok(stream),
                 Err(e) => {
                     let err = datafusion::error::DataFusionError::External(Box::new(e));

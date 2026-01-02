@@ -12,6 +12,7 @@ use tonic::transport::Channel as TonicChannel;
 use crate::{
     catalog::{Catalog, TableMeta},
     cluster::{keys, ClusterManager},
+    compute::{NormalizedSql, SqlNormalizer},
     engine::Engine,
     utils::error::{CoreError, CoreResult},
 };
@@ -464,25 +465,69 @@ impl CalmService {
         &self,
         sql: &str,
     ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
-        log::info!("🚀 [CalmService] Executing query: {}", sql);
+        self.execute_query_stream_with_options(sql, None, false)
+            .await
+    }
 
+    /// 执行本地 SQL 查询并返回流（不进行 Federation）
+    pub async fn execute_local_query_stream(
+        &self,
+        sql: &str,
+    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
+        self.execute_query_stream_with_options(sql, None, true)
+            .await
+    }
+
+    /// 仅用于 Arrow Flight 内部调用，强制指定分区
+    pub async fn execute_local_query_stream_with_partitions(
+        &self,
+        sql: &str,
+        partition_names: &[String],
+    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
+        self.execute_query_stream_with_options(sql, Some(partition_names), true)
+            .await
+    }
+
+    async fn execute_query_stream_with_options(
+        &self,
+        sql: &str,
+        partition_hint: Option<&[String]>,
+        local_only: bool,
+    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
+        log::info!(
+            "🚀 [CalmService] Executing{} query: {}",
+            if local_only { " LOCAL" } else { "" },
+            sql
+        );
+
+        let normalized = SqlNormalizer::normalize(sql)?;
+        self.execute_normalized_query(&normalized, partition_hint, local_only)
+            .await
+    }
+
+    async fn execute_normalized_query(
+        &self,
+        normalized: &NormalizedSql,
+        partition_hint: Option<&[String]>,
+        local_only: bool,
+    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
         use datafusion::prelude::*;
 
-        // 如果有 ClusterManager，使用 FederatedQueryExecutor
         if let Some(cm) = self.cluster_manager.as_ref() {
             use crate::compute::federation::FederatedQueryExecutor;
 
             let executor =
                 FederatedQueryExecutor::new(self.catalog.clone(), self.engine.clone(), cm.clone());
 
-            return executor.execute(sql).await;
+            return executor
+                .execute_with_partitions(normalized, partition_hint, local_only)
+                .await;
         }
 
-        // 否则回退到单机模式（仅用于 INFORMATION_SCHEMA 等系统表）
+        // 单机模式下直接使用 DataFusion 执行改写后的 SQL
         let ctx = SessionContext::new();
-
         let df = ctx
-            .sql(sql)
+            .sql(&normalized.rewritten_sql)
             .await
             .map_err(|e| CoreError::Internal(format!("Failed to parse SQL: {}", e)))?;
 
@@ -492,27 +537,6 @@ impl CalmService {
             .map_err(|e| CoreError::Internal(format!("Failed to execute query: {}", e)))?;
 
         Ok(stream)
-    }
-
-    /// 执行本地 SQL 查询并返回流（不进行 Federation）
-    pub async fn execute_local_query_stream(
-        &self,
-        sql: &str,
-    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
-        log::info!("🚀 [CalmService] Executing LOCAL query: {}", sql);
-
-        // 如果有 ClusterManager，使用 FederatedQueryExecutor 的 execute_local
-        if let Some(cm) = self.cluster_manager.as_ref() {
-            use crate::compute::federation::FederatedQueryExecutor;
-
-            let executor =
-                FederatedQueryExecutor::new(self.catalog.clone(), self.engine.clone(), cm.clone());
-
-            return executor.execute_local(sql).await;
-        }
-
-        // 单机模式下，execute_query_stream 本身就是 local 的
-        self.execute_query_stream(sql).await
     }
 
     /// 插入数据到表

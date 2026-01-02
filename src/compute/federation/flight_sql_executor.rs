@@ -21,16 +21,23 @@ pub struct FlightSQLExecutor {
     grpc_addr: String,
     flight_executor: Arc<FlightExecutor>,
     catalog: Arc<Catalog>,
+    partition_names: Option<Vec<String>>,
 }
 
 impl FlightSQLExecutor {
-    pub fn new(node_id: String, grpc_addr: String, catalog: Arc<Catalog>) -> Self {
+    pub fn new(
+        node_id: String,
+        grpc_addr: String,
+        catalog: Arc<Catalog>,
+        partition_names: Option<Vec<String>>,
+    ) -> Self {
         let flight_executor = Arc::new(FlightExecutor::new(node_id.clone(), grpc_addr.clone()));
         Self {
             node_id,
             grpc_addr,
             flight_executor,
             catalog,
+            partition_names,
         }
     }
 }
@@ -62,13 +69,19 @@ impl SQLExecutor for FlightSQLExecutor {
             query
         );
 
+        let partition_hint = self.partition_names.clone();
         // 使用 tokio 的 block_in_place 在同步上下文中执行异步代码
         let stream = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.flight_executor
-                    .execute_sql(query)
-                    .await
-                    .map_err(|e| DataFusionError::External(Box::new(e)))
+            tokio::runtime::Handle::current().block_on(async move {
+                let result = if let Some(names) = partition_hint.as_ref() {
+                    self.flight_executor
+                        .execute_sql_with_partitions(query, names)
+                        .await
+                } else {
+                    self.flight_executor.execute_sql(query).await
+                };
+
+                result.map_err(|e| DataFusionError::External(Box::new(e)))
             })
         })?;
 

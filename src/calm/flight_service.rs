@@ -150,18 +150,41 @@ impl ArrowFlightService for CalmFlightService {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let partition_hint: Option<Vec<String>> = json
+            .get("partition_names")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|value| value.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|partitions| !partitions.is_empty());
+
         log::info!(
-            "🛩️  [Flight Service] Executing SQL query (internal={}): {}",
+            "🛩️  [Flight Service] Executing SQL query (internal={}, partitions={:?}): {}",
             is_internal,
+            partition_hint,
             sql
         );
 
         // 执行查询
         let stream = if is_internal {
-            self.calm_service
-                .execute_local_query_stream(&sql)
-                .await
-                .map_err(|e| Status::internal(format!("Local query execution failed: {}", e)))?
+            if let Some(partitions) = partition_hint.as_ref() {
+                self.calm_service
+                    .execute_local_query_stream_with_partitions(&sql, partitions)
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "Local query execution failed (partitions): {}",
+                            e
+                        ))
+                    })?
+            } else {
+                self.calm_service
+                    .execute_local_query_stream(&sql)
+                    .await
+                    .map_err(|e| Status::internal(format!("Local query execution failed: {}", e)))?
+            }
         } else {
             self.calm_service
                 .execute_query_stream(&sql)
