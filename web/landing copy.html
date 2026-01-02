@@ -1,0 +1,1184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CalmCore - Distributed HTAP Database</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+        :root {
+            --primary: #6366f1;
+            --secondary: #a855f7;
+            --accent: #22d3ee;
+            --bg: #030712;
+            --card: rgba(15, 23, 42, 0.78);
+            --muted: #94a3b8;
+            --border: rgba(255, 255, 255, 0.12);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: 'Space Grotesk', 'Noto Sans SC', sans-serif;
+            background: var(--bg);
+            color: #f8fafc;
+            min-height: 100vh;
+        }
+
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 140px 32px 120px;
+        }
+
+        .site-header {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 18px 32px;
+            background: rgba(3, 7, 18, 0.9);
+            border-bottom: 1px solid var(--border);
+            backdrop-filter: blur(18px);
+        }
+
+        .brand {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+        }
+
+        .site-nav {
+            display: flex;
+            gap: 20px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .site-nav a {
+            opacity: 0.8;
+            transition: opacity 0.2s ease;
+        }
+
+        .site-nav a:hover {
+            opacity: 1;
+        }
+
+        .lang-switch {
+            display: inline-flex;
+            gap: 6px;
+            padding: 4px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.9);
+        }
+
+        .lang-switch button {
+            border: none;
+            background: transparent;
+            color: #cbd5e1;
+            font-weight: 600;
+            padding: 6px 14px;
+            border-radius: 999px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+        }
+
+        .lang-switch button.active {
+            background: linear-gradient(120deg, var(--primary), var(--secondary));
+            color: #fff;
+        }
+
+        body.lang-cn .text-en {
+            display: none;
+        }
+
+        body.lang-en .text-cn {
+            display: none;
+        }
+
+        .section {
+            margin-top: 120px;
+        }
+
+        .section-title {
+            font-size: 40px;
+            margin: 0 0 16px;
+            text-align: center;
+        }
+
+        .subtitle {
+            display: block;
+            font-size: 18px;
+            color: var(--muted);
+            margin-top: 6px;
+        }
+
+        .hero {
+            margin-top: 80px;
+        }
+
+        .hero-shell {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 48px;
+            align-items: stretch;
+        }
+
+        .hero-content {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .hero-tag {
+            display: inline-flex;
+            padding: 6px 14px;
+            border-radius: 999px;
+            border: 1px solid rgba(99, 102, 241, 0.4);
+            color: var(--accent);
+            font-size: 13px;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            width: fit-content;
+        }
+
+        .hero-title {
+            font-size: 52px;
+            line-height: 1.1;
+            margin: 0;
+        }
+
+        .hero-subtitle {
+            font-size: 18px;
+            color: var(--muted);
+            margin: 0;
+        }
+
+        .cta-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .cta-primary,
+        .cta-secondary {
+            padding: 14px 26px;
+            border-radius: 999px;
+            font-weight: 600;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .cta-primary {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border: none;
+        }
+
+        .cta-secondary {
+            border: 1px solid var(--border);
+            color: var(--muted);
+        }
+
+        .hero-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 16px;
+        }
+
+        .metric-card {
+            padding: 18px;
+            border-radius: 18px;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.8);
+        }
+
+        .metric-label {
+            font-size: 13px;
+            letter-spacing: 0.1em;
+            color: var(--muted);
+            text-transform: uppercase;
+        }
+
+        .metric-value {
+            font-size: 26px;
+            font-weight: 700;
+            margin-top: 8px;
+        }
+
+        .hero-visual {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .hero-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+        }
+
+        .hero-panel {
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 24px;
+            background: radial-gradient(circle at top, rgba(99, 102, 241, 0.15), transparent), var(--card);
+        }
+
+        .hero-badge {
+            font-size: 12px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--accent);
+        }
+
+        .hero-panel h3 {
+            margin: 12px 0 10px;
+            font-size: 18px;
+        }
+
+        .hero-panel p {
+            margin: 0;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .hero-network {
+            position: relative;
+            border-radius: 26px;
+            border: 1px solid rgba(99, 102, 241, 0.4);
+            padding: 32px;
+            overflow: hidden;
+            background: radial-gradient(circle at 30% 20%, rgba(59, 130, 246, 0.25), transparent 60%), radial-gradient(circle at 80% 0%, rgba(45, 212, 191, 0.2), transparent 55%), linear-gradient(135deg, rgba(2, 6, 23, 0.9), rgba(2, 10, 30, 0.96));
+        }
+
+        #heroCanvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            opacity: 0.7;
+        }
+
+        .node-dot {
+            position: relative;
+            z-index: 2;
+            padding: 14px 18px;
+            border: 1px solid rgba(148, 163, 184, 0.4);
+            border-radius: 16px;
+            background: rgba(2, 6, 23, 0.8);
+            color: #e2e8f0;
+            display: inline-flex;
+            flex-direction: column;
+            margin-bottom: 12px;
+        }
+
+        .node-status {
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .hero-node-band {
+            text-align: center;
+            padding: 10px 0;
+            font-size: 13px;
+            letter-spacing: 0.1em;
+            color: var(--muted);
+        }
+
+        .hero-network-bottom {
+            display: flex;
+            justify-content: center;
+        }
+
+        .storage-card {
+            border-radius: 24px;
+            border: 1px solid var(--border);
+            padding: 24px;
+            width: 100%;
+            background: linear-gradient(120deg, rgba(34, 211, 238, 0.18), rgba(99, 102, 241, 0.12));
+        }
+
+        .storage-icon {
+            font-size: 24px;
+        }
+
+        .storage-title {
+            font-weight: 600;
+            margin: 12px 0 8px;
+        }
+
+        .storage-desc {
+            margin: 0 0 16px;
+            color: var(--muted);
+        }
+
+        .storage-meta {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            font-size: 12px;
+            letter-spacing: 0.1em;
+        }
+
+        .about-card {
+            border-radius: 32px;
+            border: 1px solid var(--border);
+            padding: 40px;
+            background: var(--card);
+        }
+
+        .about-intro p {
+            margin: 0 0 32px;
+            color: var(--muted);
+            font-size: 17px;
+        }
+
+        .about-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+        }
+
+        .about-highlight {
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 24px;
+            background: rgba(15, 23, 42, 0.9);
+        }
+
+        .about-badge {
+            display: inline-flex;
+            padding: 4px 12px;
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.4);
+            font-size: 12px;
+            letter-spacing: 0.08em;
+        }
+
+        .about-highlight h3 {
+            margin: 12px 0 10px;
+            font-size: 18px;
+        }
+
+        .about-highlight p {
+            margin: 0;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 18px;
+        }
+
+        .feature-item {
+            border-radius: 22px;
+            border: 1px solid var(--border);
+            padding: 26px;
+            background: rgba(4, 6, 20, 0.92);
+            min-height: 200px;
+        }
+
+        .feature-icon {
+            font-size: 26px;
+        }
+
+        .feature-tag {
+            display: inline-flex;
+            padding: 2px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(99, 102, 241, 0.4);
+            font-size: 11px;
+            letter-spacing: 0.12em;
+            margin-bottom: 10px;
+        }
+
+        .feature-title {
+            margin: 10px 0 8px;
+            font-size: 18px;
+        }
+
+        .feature-item p {
+            margin: 0;
+            font-size: 14px;
+            color: var(--muted);
+        }
+
+        .arch-visual-card {
+            position: relative;
+            border-radius: 32px;
+            padding: 36px;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: radial-gradient(circle at 20% 20%, rgba(59, 130, 246, 0.25), transparent 60%), radial-gradient(circle at 80% 0%, rgba(45, 212, 191, 0.2), transparent 55%), linear-gradient(150deg, rgba(4, 8, 30, 0.95), rgba(3, 16, 32, 0.92));
+            box-shadow: 0 40px 90px -60px rgba(2, 6, 23, 0.9);
+            overflow: hidden;
+        }
+
+        .arch-visual-card svg {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .arch-caption {
+            margin-top: 20px;
+            text-align: center;
+            color: rgba(226, 232, 240, 0.8);
+            font-size: 15px;
+            letter-spacing: 0.05em;
+        }
+
+        .tech-stack-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+        }
+
+        .tech-layer {
+            border-radius: 24px;
+            border: 1px solid var(--border);
+            padding: 28px;
+            background: rgba(3, 7, 18, 0.92);
+        }
+
+        .tech-badge {
+            font-size: 12px;
+            letter-spacing: 0.15em;
+            color: var(--accent);
+        }
+
+        .tech-layer h3 {
+            margin: 12px 0;
+            font-size: 20px;
+        }
+
+        .tech-layer p {
+            margin: 0 0 16px;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .tech-pill-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .tech-pill {
+            border-radius: 999px;
+            padding: 4px 14px;
+            border: 1px solid rgba(148, 163, 184, 0.4);
+            font-size: 12px;
+            letter-spacing: 0.08em;
+        }
+
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 28px;
+            text-align: center;
+            color: var(--muted);
+        }
+
+        @media (max-width: 768px) {
+            .site-header {
+                flex-direction: column;
+                gap: 16px;
+            }
+
+            .hero-title {
+                font-size: 38px;
+            }
+
+            .hero-shell {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body class="lang-cn">
+    <header class="site-header">
+        <div class="brand">CalmCore</div>
+        <nav class="site-nav">
+            <a href="#hero"><span class="text-cn">首页</span><span class="text-en">Overview</span></a>
+            <a href="#about"><span class="text-cn">关于</span><span class="text-en">About</span></a>
+            <a href="#features"><span class="text-cn">特性</span><span class="text-en">Features</span></a>
+            <a href="#architecture"><span class="text-cn">架构</span><span class="text-en">Architecture</span></a>
+            <a href="#tech-stack"><span class="text-cn">技术栈</span><span class="text-en">Stack</span></a>
+        </nav>
+        <div class="lang-switch">
+            <button data-lang="cn" class="active">中文</button>
+            <button data-lang="en">EN</button>
+        </div>
+    </header>
+
+    <main>
+        <section class="hero" id="hero">
+            <div class="hero-shell">
+                <div class="hero-content">
+                    <div class="hero-tag">
+                        <span class="text-cn">Partition Owner · CubeFS · Arrow Flight</span>
+                        <span class="text-en">Partition Owner · CubeFS · Arrow Flight</span>
+                    </div>
+                    <h1 class="hero-title">
+                        <span class="text-cn">CalmCore · 分布式 HTAP 引擎</span>
+                        <span class="text-en">CalmCore · Distributed HTAP Engine</span>
+                    </h1>
+                    <p class="hero-subtitle">
+                        <span class="text-cn">单写入者的 Partition Owner 模型结合 CubeFS/S3 共享存储、Chitchat Gossip 与 Arrow
+                            Flight，让节点完全无状态，写入精准命中 Owner，读查询跨区秒级汇聚。</span>
+                        <span class="text-en">The Partition Owner model with CubeFS/S3 shared storage, Chitchat gossip,
+                            and Arrow Flight keeps compute nodes stateless, pins every write on the correct owner, and
+                            gathers distributed scans within seconds.</span>
+                    </p>
+                    <div class="cta-row">
+                        <a class="cta-primary" href="#architecture">
+                            <span class="text-cn">查看部署拓扑</span>
+                            <span class="text-en">Explore Topology</span>
+                        </a>
+                        <a class="cta-secondary" href="#about">
+                            <span class="text-cn">了解架构理念</span>
+                            <span class="text-en">Architecture Notes</span>
+                        </a>
+                    </div>
+                    <div class="hero-metrics">
+                        <div class="metric-card">
+                            <div class="metric-label">Owner</div>
+                            <div class="metric-value">
+                                <span class="text-cn">单写入</span>
+                                <span class="text-en">Single Writer</span>
+                            </div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Storage</div>
+                            <div class="metric-value">CubeFS / S3</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Flight</div>
+                            <div class="metric-value">
+                                <span class="text-cn">联邦推理</span>
+                                <span class="text-en">Federated Pushdown</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="hero-visual">
+                    <div class="hero-grid">
+                        <article class="hero-panel">
+                            <div class="hero-badge">Partition Owner</div>
+                            <h3>
+                                <span class="text-cn">单写入者 · 精准所有权</span>
+                                <span class="text-en">Single Writer · Exact Ownership</span>
+                            </h3>
+                            <p>
+                                <span class="text-cn">`Engine::insert_batch` 仅运行在当前 Owner，上下线由 Gossip 自动切换。</span>
+                                <span class="text-en">`Engine::insert_batch` runs only on the active owner and gossip
+                                    instantly reassigns ownership.</span>
+                            </p>
+                        </article>
+                        <article class="hero-panel">
+                            <div class="hero-badge">Protocols</div>
+                            <h3>
+                                <span class="text-cn">GraphQL + MySQL + ES</span>
+                                <span class="text-en">GraphQL + MySQL + ES</span>
+                            </h3>
+                            <p>
+                                <span class="text-cn">GraphQL 负责 DDL，MySQL/ES 负责写入检索，保持同一数据面。</span>
+                                <span class="text-en">GraphQL drives DDL while MySQL/ES share the same ingestion and
+                                    search plane.</span>
+                            </p>
+                        </article>
+                        <article class="hero-panel">
+                            <div class="hero-badge">Federation</div>
+                            <h3>
+                                <span class="text-cn">Arrow Flight 联邦查询</span>
+                                <span class="text-en">Arrow Flight Federation</span>
+                            </h3>
+                            <p>
+                                <span class="text-cn">算子跨节点下推，结果在秒级聚合，避免额外网关。</span>
+                                <span class="text-en">Operators push down across nodes and return in seconds without
+                                    extra gateways.</span>
+                            </p>
+                        </article>
+                    </div>
+                    <div class="hero-network">
+                        <canvas id="heroCanvas"></canvas>
+                        <div class="node-dot">
+                            <strong><span class="text-cn">节点 01</span><span class="text-en">Node 01</span></strong>
+                            <span class="node-status"><span class="text-cn">Owner · 写入</span><span class="text-en">Owner
+                                    · Writes</span></span>
+                        </div>
+                        <div class="node-dot">
+                            <strong><span class="text-cn">节点 02</span><span class="text-en">Node 02</span></strong>
+                            <span class="node-status"><span class="text-cn">Follower · 查询</span><span
+                                    class="text-en">Follower · Queries</span></span>
+                        </div>
+                        <div class="node-dot">
+                            <strong><span class="text-cn">节点 03</span><span class="text-en">Node 03</span></strong>
+                            <span class="node-status"><span class="text-cn">Flight 推理</span><span class="text-en">Flight
+                                    Executor</span></span>
+                        </div>
+                    </div>
+                    <div class="hero-node-band">
+                        <span class="text-cn">所有节点同构 · Gossip 自动感知 · 横向扩展实时生效</span>
+                        <span class="text-en">Homogeneous nodes · Gossip auto-discovers · Scale-out applies
+                            instantly</span>
+                    </div>
+                    <div class="hero-network-bottom">
+                        <div class="storage-card">
+                            <div class="storage-icon">🌀</div>
+                            <div class="storage-title">
+                                <span class="text-cn">CubeFS 共享存储 · 持久化一切数据</span>
+                                <span class="text-en">CubeFS Shared Storage · Persist Everything</span>
+                            </div>
+                            <p class="storage-desc">
+                                <span class="text-cn">统一数据湖底座覆盖热数据、列式段与全文索引，自动版本化与多副本保障一致。</span>
+                                <span class="text-en">A unified lake spans hot data, columnar segments, and full-text
+                                    indexes with auto-versioning and multi-replica safety.</span>
+                            </p>
+                            <div class="storage-meta">
+                                <span>Parquet</span>
+                                <span>Segment Files</span>
+                                <span>Posting Index</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="about" class="section">
+            <h2 class="section-title">
+                <span class="text-cn">关于 CalmCore</span>
+                <span class="subtitle text-en">What is CalmCore?</span>
+            </h2>
+            <div class="about-card">
+                <div class="about-content">
+                    <div class="about-intro">
+                        <p>
+                            <span class="text-cn">CalmCore 是面向实时业务与分析的分布式 HTAP 数据库，依托 Partition Owner 模型、CubeFS 共享存储与
+                                Chitchat Gossip 协调，实现“单写入者 + 全节点读取”的一致性语义，以及秒级的算力扩缩容。GraphQL DDL 负责模式治理，MySQL 与
+                                Elasticsearch 协议承担数据写入与检索，配合 Arrow Flight 联邦查询让计算层保持完全无状态。</span>
+                            <span class="text-en">CalmCore is a distributed HTAP database built on the Partition Owner
+                                model, CubeFS shared storage, and Chitchat gossip coordination. Single-writer semantics
+                                with universal readers keep elasticity snappy while GraphQL governs schema,
+                                MySQL/Elasticsearch handle ingestion and lookup, and Arrow Flight orchestrates stateless
+                                federated analytics.</span>
+                        </p>
+                    </div>
+                    <div class="about-grid">
+                        <article class="about-highlight">
+                            <div class="about-badge">Partition Owner</div>
+                            <h3>
+                                <span class="text-cn">单写入者 · 精准所有权</span>
+                                <span class="text-en">Single Writer · Precise Ownership</span>
+                            </h3>
+                            <p>
+                                <span class="text-cn">每个分区由唯一 Owner 执行 `Engine::insert_batch`，Gossip
+                                    自动探测所有权变更，杜绝双写与脑裂。</span>
+                                <span class="text-en">A single owner runs `Engine::insert_batch` per partition while
+                                    gossip-driven ownership changes prevent split-brain writes.</span>
+                            </p>
+                        </article>
+                        <article class="about-highlight">
+                            <div class="about-badge">Shared Storage</div>
+                            <h3>
+                                <span class="text-cn">CubeFS + 无状态算力</span>
+                                <span class="text-en">CubeFS + Stateless Compute</span>
+                            </h3>
+                            <p>
+                                <span class="text-cn">所有节点通过 CubeFS/S3 读取统一数据湖，热数据、列式段与索引统一存储，节点可随用随起。</span>
+                                <span class="text-en">Every node reads the same CubeFS/S3 lake for hot segments,
+                                    columnar files, and indexes so compute capacity is just spin-up time.</span>
+                            </p>
+                        </article>
+                        <article class="about-highlight">
+                            <div class="about-badge">Multi-Protocol</div>
+                            <h3>
+                                <span class="text-cn">GraphQL + MySQL + ES</span>
+                                <span class="text-en">GraphQL + MySQL + ES</span>
+                            </h3>
+                            <p>
+                                <span class="text-cn">GraphQL 负责建模，MySQL 与 Elasticsearch 负责写入和检索，Arrow Flight
+                                    联邦执行查询语句。</span>
+                                <span class="text-en">GraphQL drives DDL while MySQL and Elasticsearch endpoints ingest
+                                    and query data, and Arrow Flight pushes distributed scans.</span>
+                            </p>
+                        </article>
+                        <article class="about-highlight">
+                            <div class="about-badge">HTAP Engine</div>
+                            <h3>
+                                <span class="text-cn">Rust + DataFusion 51</span>
+                                <span class="text-en">Rust-native HTAP</span>
+                            </h3>
+                            <p>
+                                <span class="text-cn">Rust 引擎同时提供事务写入、批量分析、全文检索与向量算子，一份数据覆盖 OLTP/OLAP。</span>
+                                <span class="text-en">The Rust engine blends transactional inserts, analytical scans,
+                                    full-text, and vector operators so one dataset powers OLTP and OLAP.</span>
+                            </p>
+                        </article>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="features" class="section">
+            <h2 class="section-title">
+                <span class="text-cn">核心特性</span>
+                <span class="subtitle text-en">Core Capabilities</span>
+            </h2>
+            <div class="features-grid">
+                <article class="feature-item">
+                    <div class="feature-icon">🚀</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">Rust 原生执行引擎</span>
+                        <span class="text-en">Rust-Native Engine</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">基于 Rust + DataFusion 51，提供无 GC 暂停的极致性能，兼具批处理与流式算子。</span>
+                        <span class="text-en">Rust with DataFusion 51 delivers zero-GC jitter, blending batch and
+                            streaming operators for predictable performance.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-tag">
+                        <span class="text-cn">云原生</span>
+                        <span class="text-en">Cloud Native</span>
+                    </div>
+                    <div class="feature-icon">🌐</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">存算分离</span>
+                        <span class="text-en">Compute-Storage Separation</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">CubeFS/S3 共享存储层配合无状态节点，实现秒级横向扩缩容。</span>
+                        <span class="text-en">Shared CubeFS/S3 storage with stateless nodes enables rapid horizontal
+                            elasticity and graceful failover.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-icon">🔌</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">Gossip 协调</span>
+                        <span class="text-en">Gossip Coordination</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">Chitchat 0.9 去中心化协议完成心跳、所有权和拓扑同步，无主节点瓶颈。</span>
+                        <span class="text-en">Chitchat 0.9 gossip handles heartbeats, partition ownership, and topology
+                            updates without master nodes.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-icon">📊</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">统一 HTAP</span>
+                        <span class="text-en">Unified HTAP</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">同一份数据同时服务事务写入与分析查询，避免 ETL 延迟。</span>
+                        <span class="text-en">One copy of data serves transactional writes and analytical scans,
+                            eliminating ETL lag.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-icon">🧭</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">智能路由</span>
+                        <span class="text-en">Intelligent Routing</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">支持 PK Hash、字段 Hash、范围与自定义路由，精准命中分区。</span>
+                        <span class="text-en">PK hash, field hash, range, and custom routing target the correct
+                            partition to minimize cross-node hops.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-tag">
+                        <span class="text-cn">Owner</span>
+                        <span class="text-en">Owner</span>
+                    </div>
+                    <div class="feature-icon">🧩</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">Partition Owner 模型</span>
+                        <span class="text-en">Partition Owner Model</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">每个分区仅一个写入者，Gossip 自动切换 Owner，消除并发冲突。</span>
+                        <span class="text-en">Exactly one writer per partition with gossip-driven failover removes write
+                            conflicts while preserving strong consistency.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-tag">
+                        <span class="text-cn">主键点查</span>
+                        <span class="text-en">PK Lookup</span>
+                    </div>
+                    <div class="feature-icon">🔑</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">主键更新与点查</span>
+                        <span class="text-en">Primary Key Upsert</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">Router 统一编排主键级写入、更新与毫秒级点查，保证一致性语义。</span>
+                        <span class="text-en">The router orchestrates deterministic primary-key writes, updates, and
+                            millisecond point lookups with strict consistency.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-icon">🔍</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">全文搜索</span>
+                        <span class="text-en">Full-Text Search</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">统一倒排架构支持短语、模糊、相似度检索，并提供算子下推。</span>
+                        <span class="text-en">A unified posting-list architecture powers phrase, fuzzy, and relevance
+                            search with operator pushdown.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-icon">🧬</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">向量检索</span>
+                        <span class="text-en">Vector Search</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">内置高维向量索引，支撑 AI 语义检索与个性化推荐。</span>
+                        <span class="text-en">Native vector indexing fuels AI semantic retrieval and personalization use
+                            cases.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-icon">🛰️</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">Arrow Flight 联邦查询</span>
+                        <span class="text-en">Arrow Flight Federation</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">分布式查询执行器跨节点下推算子，秒级汇聚 HTAP 结果。</span>
+                        <span class="text-en">A distributed Flight executor pushes operators to partitions and
+                            aggregates HTAP results in seconds.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-icon">📈</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">可观测与背压</span>
+                        <span class="text-en">Observability & Backpressure</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">指标、追踪与磁盘水位实时暴露，Router 根据负载触发背压与限流。</span>
+                        <span class="text-en">Metrics, tracing, and disk watermarks surface in real time while the
+                            router applies load-aware backpressure and throttling.</span>
+                    </p>
+                </article>
+                <article class="feature-item">
+                    <div class="feature-icon">🕸️</div>
+                    <h3 class="feature-title">
+                        <span class="text-cn">图分析</span>
+                        <span class="text-en">Graph Analytics</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">图算子支持路径分析与关联洞察，服务风控、推荐等复杂关系场景。</span>
+                        <span class="text-en">Graph-aware operators enable path analysis and relationship insights for
+                            risk, recommendation, and knowledge graphs.</span>
+                    </p>
+                </article>
+            </div>
+        </section>
+
+        <section id="architecture" class="section">
+            <h2 class="section-title">
+                <span class="text-cn">灵活部署架构</span>
+                <span class="subtitle text-en">Flexible Deployment Topologies</span>
+            </h2>
+            <div class="arch-visual-card">
+                <svg viewBox="0 0 640 320" role="img" aria-labelledby="archVisualTitle">
+                    <title id="archVisualTitle">CalmCore nodes communicating above CubeFS storage</title>
+                    <defs>
+                        <linearGradient id="nodeCore" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#60a5fa" />
+                            <stop offset="100%" stop-color="#34d399" />
+                        </linearGradient>
+                        <linearGradient id="nodeHalo" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="rgba(96,165,250,0.25)" />
+                            <stop offset="100%" stop-color="rgba(45,212,191,0.2)" />
+                        </linearGradient>
+                        <linearGradient id="storageFill" x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stop-color="rgba(14,165,233,0.4)" />
+                            <stop offset="100%" stop-color="rgba(6,78,59,0.25)" />
+                        </linearGradient>
+                        <linearGradient id="linkGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                            <stop offset="0%" stop-color="#818cf8" />
+                            <stop offset="100%" stop-color="#22d3ee" />
+                        </linearGradient>
+                        <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+                            <feGaussianBlur stdDeviation="8" result="blur" />
+                            <feMerge>
+                                <feMergeNode in="blur" />
+                                <feMergeNode in="SourceGraphic" />
+                            </feMerge>
+                        </filter>
+                    </defs>
+                    <rect x="40" y="220" width="560" height="70" rx="28" fill="url(#storageFill)"
+                        stroke="rgba(148,163,184,0.35)" />
+                    <text x="320" y="255" text-anchor="middle" fill="rgba(226,232,240,0.9)" font-size="16">CubeFS ·
+                        S3</text>
+                    <g stroke="url(#linkGradient)" stroke-opacity="0.7" stroke-width="1.8" stroke-linecap="round">
+                        <path d="M110 150 C150 200 220 220 320 220" fill="none" />
+                        <path d="M530 150 C490 200 420 220 320 220" fill="none" />
+                        <path d="M200 140 C240 190 280 205 320 205" fill="none" />
+                        <path d="M440 140 C400 190 360 205 320 205" fill="none" />
+                        <path d="M320 80 C260 120 240 150 240 170" fill="none" />
+                        <path d="M320 80 C380 120 400 150 400 170" fill="none" />
+                        <path d="M190 90 Q320 40 450 90" fill="none" />
+                        <path d="M150 120 Q320 20 490 120" fill="none" />
+                    </g>
+                    <g fill="url(#nodeHalo)" filter="url(#glow)">
+                        <circle cx="150" cy="140" r="38" />
+                        <circle cx="240" cy="120" r="34" />
+                        <circle cx="320" cy="90" r="30" />
+                        <circle cx="400" cy="120" r="34" />
+                        <circle cx="490" cy="140" r="38" />
+                        <circle cx="220" cy="180" r="32" />
+                        <circle cx="420" cy="180" r="32" />
+                    </g>
+                    <g fill="rgba(2,6,23,0.95)" stroke="url(#nodeCore)" stroke-width="2.2">
+                        <circle cx="150" cy="140" r="20" />
+                        <circle cx="240" cy="120" r="18" />
+                        <circle cx="320" cy="90" r="16" />
+                        <circle cx="400" cy="120" r="18" />
+                        <circle cx="490" cy="140" r="20" />
+                        <circle cx="220" cy="180" r="16" />
+                        <circle cx="420" cy="180" r="16" />
+                    </g>
+                    <g fill="#0f172a">
+                        <rect x="140" y="232" width="20" height="12" rx="3" />
+                        <rect x="220" y="240" width="20" height="12" rx="3" />
+                        <rect x="300" y="232" width="20" height="12" rx="3" />
+                        <rect x="380" y="240" width="20" height="12" rx="3" />
+                        <rect x="460" y="232" width="20" height="12" rx="3" />
+                    </g>
+                </svg>
+            </div>
+            <p class="arch-caption">
+                <span class="text-cn">多节点通过高速链路互联，所有写入直接落在 CubeFS/S3 共享存储，随时横向伸缩。</span>
+                <span class="text-en">Stateless nodes speak over high-speed links while CubeFS/S3 underneath carries
+                    every write, enabling instant scale-out.</span>
+            </p>
+        </section>
+
+        <section id="tech-stack" class="section">
+            <h2 class="section-title">
+                <span class="text-cn">技术栈</span>
+                <span class="subtitle text-en">Technology Stack</span>
+            </h2>
+            <div class="tech-stack-grid">
+                <article class="tech-layer">
+                    <span class="tech-badge">Engine Layer</span>
+                    <h3>
+                        <span class="text-cn">引擎层 · Parquet + Arrow + 倒排索引</span>
+                        <span class="text-en">Engine · Parquet + Arrow + Inverted Index</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">Rust + DataFusion 51 将批/流数据统一为 Apache Arrow 批次并持久化到 Parquet
+                            段文件，同时维护倒排索引与列式元数据，驱动主键、全文、向量算子。</span>
+                        <span class="text-en">Rust with DataFusion 51 normalizes batch and streaming data into Apache
+                            Arrow batches, persists them as Parquet segments, and keeps unified posting indexes so PK,
+                            full-text, and vector operators share the same engine.</span>
+                    </p>
+                    <div class="tech-pill-row">
+                        <span class="tech-pill">Rust</span>
+                        <span class="tech-pill">DataFusion 51</span>
+                        <span class="tech-pill">Apache Arrow</span>
+                        <span class="tech-pill">Parquet</span>
+                        <span class="tech-pill">Posting Index</span>
+                    </div>
+                </article>
+                <article class="tech-layer">
+                    <span class="tech-badge">Protocol Layer</span>
+                    <h3>
+                        <span class="text-cn">协议层 · GraphQL / MySQL / Elasticsearch</span>
+                        <span class="text-en">Protocols · GraphQL / MySQL / Elasticsearch</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">GraphQL 专注 DDL 与模型治理，MySQL 协议承载写入与点查，Elasticsearch API 提供全文与聚合检索，Arrow
+                            Flight 负责联邦查询下推。</span>
+                        <span class="text-en">GraphQL handles DDL and schema control, the MySQL protocol ingests data
+                            and serves point lookups, the Elasticsearch API powers search and aggregations, and Arrow
+                            Flight fans out federated queries.</span>
+                    </p>
+                    <div class="tech-pill-row">
+                        <span class="tech-pill">GraphQL DDL</span>
+                        <span class="tech-pill">MySQL Protocol</span>
+                        <span class="tech-pill">Elasticsearch API</span>
+                        <span class="tech-pill">Arrow Flight</span>
+                    </div>
+                </article>
+                <article class="tech-layer">
+                    <span class="tech-badge">Cluster Layer</span>
+                    <h3>
+                        <span class="text-cn">集群层 · Gossip + CubeFS + 无状态算力</span>
+                        <span class="text-en">Cluster · Gossip + CubeFS + Stateless Compute</span>
+                    </h3>
+                    <p>
+                        <span class="text-cn">Chitchat Gossip 广播分区 Owner、健康度与拓扑，CubeFS 共享存储让节点即启即用，Persist Handler 与
+                            Federation 保证写入持久化与跨节点执行。</span>
+                        <span class="text-en">Chitchat gossip broadcasts partition ownership, health, and topology,
+                            CubeFS shared storage keeps every node stateless, and persist/federation services ensure
+                            durability plus cross-node execution.</span>
+                    </p>
+                    <div class="tech-pill-row">
+                        <span class="tech-pill">Chitchat Gossip</span>
+                        <span class="tech-pill">CubeFS</span>
+                        <span class="tech-pill">Persist Handler</span>
+                        <span class="tech-pill">Federation</span>
+                        <span class="tech-pill">Tokio Runtime</span>
+                    </div>
+                </article>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>
+            <span class="text-cn">&copy; 2025 CalmCore · 保留所有权利</span>
+            <span class="text-en">&copy; 2025 CalmCore · All rights reserved.</span>
+        </p>
+    </footer>
+
+    <script>
+        const bodyEl = document.body;
+        const langButtons = document.querySelectorAll('.lang-switch button');
+
+        function setLanguage(lang) {
+            bodyEl.classList.remove('lang-cn', 'lang-en');
+            bodyEl.classList.add(`lang-${lang}`);
+            langButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.lang === lang));
+            localStorage.setItem('calmcore-lang', lang);
+        }
+
+        const storedLang = localStorage.getItem('calmcore-lang');
+        setLanguage(storedLang === 'en' || storedLang === 'cn' ? storedLang : 'cn');
+
+        langButtons.forEach((btn) => {
+            btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
+        });
+
+        function initNetworkCanvas(canvasId, config = {}) {
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            const container = canvas.parentElement;
+            let width = 0;
+            let height = 0;
+            const maxParticles = config.particles || 12;
+            const connectDistance = config.distance || 150;
+            let particles = [];
+
+            function resize() {
+                width = container.clientWidth;
+                height = container.clientHeight;
+                canvas.width = width;
+                canvas.height = height;
+            }
+
+            class Particle {
+                constructor() {
+                    this.reset();
+                }
+
+                reset() {
+                    this.x = Math.random() * width;
+                    this.y = Math.random() * height;
+                    this.vx = (Math.random() - 0.5) * 0.5;
+                    this.vy = (Math.random() - 0.5) * 0.5;
+                    this.alpha = 0;
+                    this.targetAlpha = 0.3 + Math.random() * 0.5;
+                }
+
+                update() {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    if (this.x < 0 || this.x > width) this.vx *= -1;
+                    if (this.y < 0 || this.y > height) this.vy *= -1;
+                    if (this.alpha < this.targetAlpha) this.alpha += 0.008;
+                }
+
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(34, 211, 238, ${this.alpha})`;
+                    ctx.fill();
+                }
+            }
+
+            function createParticles() {
+                particles = [];
+                for (let i = 0; i < maxParticles; i += 1) {
+                    particles.push(new Particle());
+                }
+            }
+
+            function draw() {
+                ctx.clearRect(0, 0, width, height);
+                particles.forEach((p) => p.update());
+
+                for (let i = 0; i < particles.length; i += 1) {
+                    for (let j = i + 1; j < particles.length; j += 1) {
+                        const p1 = particles[i];
+                        const p2 = particles[j];
+                        const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+
+                        if (dist < connectDistance) {
+                            const strength = (1 - dist / connectDistance) * Math.min(p1.alpha, p2.alpha);
+                            ctx.strokeStyle = `rgba(99, 102, 241, ${strength * 0.8})`;
+                            ctx.lineWidth = 0.8;
+                            ctx.beginPath();
+                            ctx.moveTo(p1.x, p1.y);
+                            ctx.lineTo(p2.x, p2.y);
+                            ctx.stroke();
+                        }
+                    }
+                }
+
+                particles.forEach((p) => p.draw());
+                requestAnimationFrame(draw);
+            }
+
+            resize();
+            createParticles();
+            draw();
+
+            window.addEventListener('resize', () => {
+                resize();
+                createParticles();
+            });
+        }
+
+        window.addEventListener('load', () => {
+            initNetworkCanvas('heroCanvas', { particles: 16, distance: 190 });
+        });
+    </script>
+</body>
+
+</html>
