@@ -8,6 +8,8 @@ mod intrnal_field {
     pub const PARTITION_FIELD: &str = "_partition";
 }
 
+pub use intrnal_field::{DOC_ID_FIELD, PARTITION_FIELD};
+
 /// Segment 持久化策略配置
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistPolicy {

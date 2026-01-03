@@ -1,5 +1,6 @@
 use crate::{
     calm::{new_data_client, CalmService, NodeInfo},
+    cluster::keys,
     utils::error::{CoreError, CoreResult},
 };
 
@@ -20,6 +21,13 @@ impl CalmService {
         let mut node_states: Vec<NodeInfo> = Vec::new();
 
         for node_id in available_nodes {
+            if node_id == keys::SINGLE_NODE_CLUSTER_ID {
+                let mut local_info = self.local_node_info().await?;
+                local_info.node_id = node_id;
+                node_states.push(local_info);
+                continue;
+            }
+
             match new_data_client(&node_id).await {
                 Ok(client) => match client.node_info(tarpc::context::current()).await {
                     Ok(Ok(node_info)) => {

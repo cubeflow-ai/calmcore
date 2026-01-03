@@ -2,6 +2,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use arrow_flight::{encode::FlightDataEncoderBuilder, FlightClient, FlightDescriptor, PutResult};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::datasource::empty::EmptyTable;
 use futures::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
@@ -12,7 +13,10 @@ use tonic::transport::Channel as TonicChannel;
 use crate::{
     catalog::{Catalog, TableMeta},
     cluster::{keys, ClusterManager},
-    compute::{NormalizedSql, SqlNormalizer},
+    compute::{
+        udf::fulltext_udf::{register_fulltext_udfs, wrap_stream_with_scores},
+        NormalizedSql, SqlNormalizer, UnionTableProvider,
+    },
     engine::Engine,
     utils::error::{CoreError, CoreResult},
 };
@@ -526,6 +530,16 @@ impl CalmService {
 
         // 单机模式下直接使用 DataFusion 执行改写后的 SQL
         let ctx = SessionContext::new();
+        let fulltext_context = register_fulltext_udfs(&ctx);
+        if normalized.needs_score_column {
+            fulltext_context.clear_scores();
+        }
+        self.register_local_tables_for_session(
+            &ctx,
+            &normalized.rewritten_sql,
+            normalized.needs_score_column,
+        )
+        .await?;
         let df = ctx
             .sql(&normalized.rewritten_sql)
             .await
@@ -535,8 +549,122 @@ impl CalmService {
             .execute_stream()
             .await
             .map_err(|e| CoreError::Internal(format!("Failed to execute query: {}", e)))?;
+        let stream = if normalized.needs_score_column {
+            wrap_stream_with_scores(stream, fulltext_context.clone())
+        } else {
+            stream
+        };
 
         Ok(stream)
+    }
+
+    async fn register_local_tables_for_session(
+        &self,
+        ctx: &datafusion::prelude::SessionContext,
+        sql: &str,
+        needs_internal_id: bool,
+    ) -> CoreResult<()> {
+        let table_names = Self::extract_table_names_from_sql(sql)?;
+
+        for table_name in table_names {
+            self.register_single_local_table(ctx, &table_name, needs_internal_id)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn register_single_local_table(
+        &self,
+        ctx: &datafusion::prelude::SessionContext,
+        table_name: &str,
+        needs_internal_id: bool,
+    ) -> CoreResult<()> {
+        let table_info = self.catalog.get_or_load_table(table_name).await?;
+        let schema = table_info.table.schema.to_arrow_schema();
+
+        let partition_names = self.engine.list_partitions(table_name).await;
+        let mut partitions = Vec::new();
+
+        for partition_name in partition_names {
+            match self.engine.get_partition(table_name, &partition_name).await {
+                Some(partition) => partitions.push(partition),
+                None => log::warn!(
+                    "[CalmService] Partition '{}' for table '{}' not found locally",
+                    partition_name,
+                    table_name
+                ),
+            }
+        }
+
+        if partitions.is_empty() {
+            log::debug!(
+                "[CalmService] No local partitions found for table '{}', registering empty table",
+                table_name
+            );
+            let empty_table = EmptyTable::new(schema);
+            ctx.register_table(table_name, Arc::new(empty_table))
+                .map_err(|e| {
+                    CoreError::Internal(format!(
+                        "Failed to register empty table '{}': {}",
+                        table_name, e
+                    ))
+                })?;
+            return Ok(());
+        }
+
+        let provider = UnionTableProvider::new(
+            partitions,
+            table_name.to_string(),
+            self.engine.clone(),
+            schema,
+            needs_internal_id,
+        )?;
+
+        ctx.register_table(table_name, Arc::new(provider))
+            .map_err(|e| {
+                CoreError::Internal(format!("Failed to register table '{}': {}", table_name, e))
+            })?;
+
+        Ok(())
+    }
+
+    fn extract_table_names_from_sql(sql: &str) -> CoreResult<Vec<String>> {
+        use sqlparser::ast::{SetExpr, Statement, TableFactor};
+        use sqlparser::dialect::GenericDialect;
+        use sqlparser::parser::Parser;
+
+        let dialect = GenericDialect {};
+        let statements = Parser::parse_sql(&dialect, sql)
+            .map_err(|e| CoreError::Internal(format!("Failed to parse SQL: {}", e)))?;
+
+        let mut table_names = Vec::new();
+
+        for statement in statements {
+            if let Statement::Query(query) = statement {
+                if let SetExpr::Select(select) = query.body.as_ref() {
+                    for table_with_joins in &select.from {
+                        if let TableFactor::Table { name, .. } = &table_with_joins.relation {
+                            let table_name = name.to_string();
+                            if !table_names.contains(&table_name) {
+                                table_names.push(table_name);
+                            }
+                        }
+
+                        for join in &table_with_joins.joins {
+                            if let TableFactor::Table { name, .. } = &join.relation {
+                                let table_name = name.to_string();
+                                if !table_names.contains(&table_name) {
+                                    table_names.push(table_name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(table_names)
     }
 
     /// 插入数据到表

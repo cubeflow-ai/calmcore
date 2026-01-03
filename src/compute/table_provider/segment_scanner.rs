@@ -6,6 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use crate::compute::udf::fulltext_udf::register_fulltext_udfs;
 use crate::segment::{IndexReader, RowDataStore};
 use datafusion::scalar::ScalarValue;
 use datafusion::{
@@ -28,6 +29,10 @@ pub(crate) struct SegmentScanner {
     doc_count: u32,
     /// 有效文档的 bitmap (doc_count - del)，预先计算避免每次都重新生成
     valid_docs: RoaringBitmap,
+    emit_internal_id: bool,
+    internal_id_index: Option<usize>,
+    data_field_count: usize,
+    segment_start: u64,
 }
 
 impl std::fmt::Debug for SegmentScanner {
@@ -45,6 +50,8 @@ impl SegmentScanner {
         index_readers: HashMap<String, Box<dyn IndexReader>>,
         doc_count: u32,
         del: RoaringBitmap,
+        emit_internal_id: bool,
+        segment_start: u64,
     ) -> Self {
         // Commented for cleaner logs
         // println!("[DEBUG] SegmentScanner::new() called");
@@ -55,13 +62,31 @@ impl SegmentScanner {
         valid_docs.insert_range(0..doc_count);
         valid_docs -= &del;
 
-        // 直接使用原始schema,不需要添加 _internal_id
+        let total_fields = schema.fields().len();
+        let internal_id_index = if emit_internal_id {
+            if total_fields == 0 {
+                panic!("Schema must contain fields before appending _internal_id");
+            }
+            Some(total_fields - 1)
+        } else {
+            None
+        };
+        let data_field_count = if emit_internal_id {
+            total_fields.saturating_sub(1)
+        } else {
+            total_fields
+        };
+
         Self {
             schema: schema.clone(),
             raw_data,
             index_readers,
             doc_count,
             valid_docs,
+            emit_internal_id,
+            internal_id_index,
+            data_field_count,
+            segment_start,
         }
     }
 
@@ -419,6 +444,7 @@ impl SegmentScanner {
         };
 
         let ctx = SessionContext::new();
+        let _fulltext_context = register_fulltext_udfs(&ctx);
         let df_schema = batch.schema().to_dfschema_ref().map_err(|e| {
             CoreError::Internal(format!("Failed to convert schema to DFSchema: {}", e))
         })?;
@@ -567,6 +593,12 @@ impl SegmentScanner {
             return self.create_empty_batch();
         }
 
+        let include_internal_id = should_emit_internal_id_for_projection(
+            self.emit_internal_id,
+            self.internal_id_index,
+            None,
+        );
+
         log::debug!(
             "📖 [read_docs_by_ids] Requested {} doc_ids: first={}, last={}, doc_count={}",
             doc_ids.len(),
@@ -649,22 +681,20 @@ impl SegmentScanner {
                     doc_ids_in_batch.last().unwrap()
                 );
 
-                let indices: Vec<u32> = doc_ids_in_batch
-                    .iter()
-                    .filter_map(|doc_id| {
-                        let relative_idx = doc_id - batch_key;
-                        // 边界检查：确保索引在 batch 范围内
-                        if relative_idx < batch_size {
-                            Some(relative_idx)
-                        } else {
-                            log::error!(
-                                "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
-                                doc_id, batch_key, relative_idx, batch_size
-                            );
-                            None
-                        }
-                    })
-                    .collect();
+                let mut indices: Vec<u32> = Vec::new();
+                let mut selected_doc_ids: Vec<u32> = Vec::new();
+                for doc_id in doc_ids_in_batch.iter() {
+                    let relative_idx = doc_id - batch_key;
+                    if relative_idx < batch_size {
+                        indices.push(relative_idx);
+                        selected_doc_ids.push(*doc_id);
+                    } else {
+                        log::error!(
+                            "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
+                            doc_id, batch_key, relative_idx, batch_size
+                        );
+                    }
+                }
 
                 if indices.is_empty() {
                     log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
@@ -686,7 +716,7 @@ impl SegmentScanner {
                 let indices_array = UInt32Array::from(indices);
                 let mut columns = Vec::new();
 
-                for i in 0..self.schema.fields().len() {
+                for i in 0..self.data_field_count {
                     let column = batch.column(i);
                     let taken = take(column, &indices_array, None).map_err(|e| {
                         CoreError::Internal(format!(
@@ -695,6 +725,13 @@ impl SegmentScanner {
                         ))
                     })?;
                     columns.push(taken);
+                }
+
+                if include_internal_id {
+                    columns.push(build_internal_id_array(
+                        self.segment_start,
+                        &selected_doc_ids,
+                    ));
                 }
 
                 let selected_batch = RecordBatch::try_new(self.schema.clone(), columns)
@@ -747,6 +784,14 @@ impl SegmentScanner {
             projection
         );
 
+        let include_internal_id = should_emit_internal_id_for_projection(
+            self.emit_internal_id,
+            self.internal_id_index,
+            Some(projection),
+        );
+        let storage_projection =
+            storage_projection_indices(Some(projection), self.internal_id_index);
+
         // 查找 doc_ids 对应的 batch_key
         let lookup_start = std::time::Instant::now();
         let batch_doc_map = self.raw_data.batch_lookup_doc_ids(doc_ids);
@@ -764,9 +809,10 @@ impl SegmentScanner {
         let batch_read_start = std::time::Instant::now();
         let source_batches = if batch_doc_map.len() <= 5 {
             let batch_keys: Vec<u32> = batch_doc_map.keys().copied().collect();
-            let result = self
-                .raw_data
-                .get_batch_with_projection(&batch_keys, Some(projection));
+            let result = self.raw_data.get_batch_with_projection(
+                &batch_keys,
+                storage_projection.as_ref().map(|v| v.as_slice()),
+            );
             log::debug!(
                 "      ⏱️  [read_docs] batch_read ({} RowGroups, {} cols): {:?}",
                 batch_keys.len(),
@@ -790,10 +836,10 @@ impl SegmentScanner {
                 b.clone()
             } else {
                 // 单独读取时也应用投影
-                match self
-                    .raw_data
-                    .get_with_projection(&batch_key, Some(projection))
-                {
+                match self.raw_data.get_with_projection(
+                    &batch_key,
+                    storage_projection.as_ref().map(|v| v.as_slice()),
+                ) {
                     Some(b) => b,
                     None => {
                         log::warn!("⚠️  Batch not found for key={}", batch_key);
@@ -804,21 +850,28 @@ impl SegmentScanner {
 
             {
                 let batch_size = batch.num_rows() as u32;
-                let indices: Vec<u32> = doc_ids_in_batch
-                    .iter()
-                    .filter_map(|doc_id| {
-                        let relative_idx = doc_id - batch_key;
-                        if relative_idx < batch_size {
-                            Some(relative_idx)
-                        } else {
-                            log::error!(
-                                "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
-                                doc_id, batch_key, relative_idx, batch_size
-                            );
-                            None
-                        }
-                    })
-                    .collect();
+                let mut rows_with_ids: Vec<(u32, u32)> = Vec::new();
+                for doc_id in doc_ids_in_batch.iter() {
+                    let relative_idx = doc_id - batch_key;
+                    if relative_idx < batch_size {
+                        rows_with_ids.push((relative_idx, *doc_id));
+                    } else {
+                        log::error!(
+                            "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
+                            doc_id, batch_key, relative_idx, batch_size
+                        );
+                    }
+                }
+
+                if rows_with_ids.is_empty() {
+                    log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
+                    continue;
+                }
+
+                rows_with_ids.sort_unstable_by_key(|(row_idx, _)| *row_idx);
+                let indices: Vec<u32> = rows_with_ids.iter().map(|(row_idx, _)| *row_idx).collect();
+                let doc_ids_for_rows: Vec<u32> =
+                    rows_with_ids.iter().map(|(_, doc_id)| *doc_id).collect();
 
                 if indices.is_empty() {
                     log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
@@ -830,17 +883,38 @@ impl SegmentScanner {
                 use datafusion::arrow::compute::take;
 
                 let indices_array = UInt32Array::from(indices);
-                let mut columns = Vec::new();
-
-                for i in 0..batch.num_columns() {
-                    let column = batch.column(i);
+                let mut data_columns = Vec::new();
+                for column in batch.columns() {
                     let taken = take(column, &indices_array, None).map_err(|e| {
                         CoreError::Internal(format!(
                             "Failed to take rows from batch {}: {}",
                             batch_key, e
                         ))
                     })?;
-                    columns.push(taken);
+                    data_columns.push(taken);
+                }
+
+                let mut data_iter = data_columns.into_iter();
+                let internal_id_column = if include_internal_id {
+                    Some(build_internal_id_array(
+                        self.segment_start,
+                        &doc_ids_for_rows,
+                    ))
+                } else {
+                    None
+                };
+                let mut columns = Vec::new();
+                for idx in projection {
+                    if self
+                        .internal_id_index
+                        .is_some_and(|internal_idx| internal_idx == *idx)
+                    {
+                        if let Some(array) = internal_id_column.as_ref() {
+                            columns.push(array.clone());
+                        }
+                    } else if let Some(col) = data_iter.next() {
+                        columns.push(col);
+                    }
                 }
 
                 let selected_batch = RecordBatch::try_new(projected_schema.clone(), columns)
@@ -1108,6 +1182,7 @@ impl SegmentScanner {
 
         // 创建临时 session context 用于表达式转换
         let session_ctx = SessionContext::new();
+        let _fulltext_context = register_fulltext_udfs(&session_ctx);
         let df_schema = input.schema().clone().to_dfschema().ok()?;
 
         log::debug!("🔧 [wrap_with_filter] DFSchema: {:?}", df_schema);
@@ -1885,4 +1960,60 @@ impl futures::Stream for SegmentStream {
             Err(e) => Poll::Ready(Some(Err(e))),
         }
     }
+}
+
+fn should_emit_internal_id_for_projection(
+    emit_internal_id: bool,
+    internal_id_index: Option<usize>,
+    projection: Option<&[usize]>,
+) -> bool {
+    if !emit_internal_id {
+        return false;
+    }
+
+    match projection {
+        Some(indices) => internal_id_index
+            .map(|internal_idx| indices.iter().any(|idx| *idx == internal_idx))
+            .unwrap_or(false),
+        None => true,
+    }
+}
+
+fn storage_projection_indices(
+    projection: Option<&[usize]>,
+    internal_id_index: Option<usize>,
+) -> Option<Vec<usize>> {
+    projection.map(|indices| {
+        if let Some(internal_idx) = internal_id_index {
+            indices
+                .iter()
+                .filter(|&&idx| idx != internal_idx)
+                .cloned()
+                .collect()
+        } else {
+            indices.to_vec()
+        }
+    })
+}
+
+fn build_internal_id_array(
+    segment_start: u64,
+    doc_ids: &[u32],
+) -> datafusion::arrow::array::ArrayRef {
+    use datafusion::arrow::array::{ArrayRef, UInt32Builder};
+
+    let mut builder = UInt32Builder::with_capacity(doc_ids.len());
+    for doc_id in doc_ids {
+        if (*doc_id as u64) < segment_start {
+            log::warn!(
+                "⚠️  doc_id={} is less than segment_start={} when building _internal_id column",
+                doc_id,
+                segment_start
+            );
+        }
+
+        builder.append_value(*doc_id);
+    }
+
+    Arc::new(builder.finish()) as ArrayRef
 }

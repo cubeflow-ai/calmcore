@@ -1,33 +1,32 @@
 //! Full-text search UDF (User Defined Functions) for SQL queries
 //!
 //! Provides:
-//! 1. text(field, query, boost) - Text query with BM25 scoring
-//! 2. phrase(field, query, boost, slop) - Phrase query with proximity
-//! 3. _score virtual column - Query relevance score
+//! 1. `text(field, query, boost)` - Text query returning boolean mask
+//! 2. `phrase(field, query, boost, slop)` - Phrase query with optional slop
+//! 3. `_score` helper utilities (future work)
 //!
-//! SQL Examples:
-//! ```sql
-//! -- Simple text query
-//! SELECT * FROM docs WHERE text(content, 'rust programming', 1.0) ORDER BY _score DESC LIMIT 10;
-//!
-//! -- Phrase query with slop
-//! SELECT * FROM docs WHERE phrase(content, 'rust programming', 1.0, 2) ORDER BY _score DESC;
-//!
-//! -- Boolean combination
-//! SELECT * FROM docs
-//! WHERE text(content, 'rust', 2.0) OR text(content, 'python', 1.0)
-//! ORDER BY _score DESC;
-//! ```
+//! The current implementation focuses on wiring the UDFs into DataFusion so
+//! that SQL queries using the `text()` / `phrase()` helpers can be planned and
+//! executed without hitting "Invalid function" errors. Scoring is currently a
+//! simple heuristic (boost value per match). More advanced BM25 scoring can be
+//! layered on top once the storage layer exposes doc_id aligned metadata.
 
-use datafusion::arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray};
-use datafusion::arrow::datatypes::{DataType, Field};
+use datafusion::arrow::array::{
+    Array, ArrayRef, BooleanBuilder, Float32Array, LargeStringArray, StringArray,
+};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::logical_expr::{ScalarUDF, Signature, Volatility};
-use datafusion::physical_plan::ColumnarValue;
+use datafusion::logical_expr::{create_udf, ScalarUDF, Volatility};
+use datafusion::physical_plan::{ColumnarValue, RecordBatchStream, SendableRecordBatchStream};
+use datafusion::prelude::SessionContext;
+use datafusion::scalar::ScalarValue;
+use futures::Stream;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use crate::segment::field_store::text::FullTextField;
-use crate::utils::error::CoreResult;
 
 /// Context for full-text search execution
 /// Stores the index and maintains document scores
@@ -72,209 +71,396 @@ impl FullTextContext {
 }
 
 /// Create text() UDF for text queries
-///
-/// Signature: text(field: String, query: String, boost: Float32) -> Boolean
-///
-/// Example:
-/// ```sql
-/// SELECT * FROM docs WHERE text(content, 'rust programming', 1.5)
-/// ```
 pub fn create_text_udf(context: Arc<FullTextContext>) -> ScalarUDF {
-    let text_fn = move |args: &[ColumnarValue]| -> DataFusionResult<ColumnarValue> {
-        // Parse arguments
-        let field_name = match &args[0] {
-            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Utf8(Some(s))) => s.clone(),
-            _ => {
+    let fun = Arc::new(
+        move |args: &[ColumnarValue]| -> DataFusionResult<ColumnarValue> {
+            if args.len() != 3 {
                 return Err(DataFusionError::Execution(
-                    "text() field must be string".into(),
-                ))
+                    "text(field, query, boost) expects exactly 3 arguments".into(),
+                ));
             }
-        };
 
-        let query_text = match &args[1] {
-            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Utf8(Some(s))) => s.clone(),
-            _ => {
-                return Err(DataFusionError::Execution(
-                    "text() query must be string".into(),
-                ))
+            let field_values = string_column_from_arg(&args[0], "field")?;
+            let query_text = scalar_string_from_arg(&args[1], "query")?;
+            let boost = scalar_f32_from_arg(&args[2], 1.0, "boost")?;
+            let query_terms = tokenize(&query_text);
+
+            let mut builder = BooleanBuilder::with_capacity(field_values.len());
+            for (row_idx, maybe_value) in field_values.iter().enumerate() {
+                if let Some(value) = maybe_value {
+                    let matches = match_text(value, &query_terms);
+                    builder.append_value(matches);
+                    if matches {
+                        context.add_score(row_idx as u32, boost);
+                    }
+                } else {
+                    builder.append_value(false);
+                }
             }
-        };
 
-        let boost = match &args[2] {
-            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Float32(Some(b))) => *b,
-            _ => 1.0,
-        };
+            Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        },
+    );
 
-        // Get index for field
-        let indexes = context.indexes.read().unwrap();
-        let index = indexes.get(&field_name).ok_or_else(|| {
-            DataFusionError::Execution(format!("No index found for field '{}'", field_name))
-        })?;
-
-        // Execute text query
-        let matching_docs = index
-            .term_query(&query_text)
-            .ok_or_else(|| DataFusionError::Execution("Query returned no results".into()))?;
-
-        // Calculate BM25 scores for matching documents
-        let field_stats = index.get_field_stats();
-        let k1 = 1.2;
-        let b = 0.75;
-
-        for doc_id in matching_docs.iter() {
-            // Simple BM25 score (simplified version)
-            // In production, you'd need doc length and term frequency
-            let score = boost; // Placeholder - implement proper BM25
-            context.add_score(doc_id, score);
-        }
-
-        // Return boolean array indicating matches
-        // Note: This is a simplified version. In production, you need access to actual doc_ids
-        let result = BooleanArray::from(vec![true]); // Placeholder
-        Ok(ColumnarValue::Array(Arc::new(result)))
-    };
-
-    ScalarUDF::new(
-        &format!("text_{}", field_name),
-        &Signature::exact(
-            vec![DataType::Utf8, DataType::Float32],
-            Volatility::Immutable,
-        ),
-        &Arc::new(DataType::Boolean),
-        &Arc::new(text_func),
+    create_udf(
+        "text",
+        vec![DataType::Utf8, DataType::Utf8, DataType::Float32],
+        DataType::Boolean,
+        Volatility::Immutable,
+        fun,
     )
 }
 
 /// Create phrase() UDF for phrase queries
-///
-/// Signature: phrase(field: String, query: String, boost: Float32, slop: Int32) -> Boolean
-///
-/// Example:
-/// ```sql
-/// SELECT * FROM docs WHERE phrase(content, 'rust programming', 1.0, 2)
-/// ```
 pub fn create_phrase_udf(context: Arc<FullTextContext>) -> ScalarUDF {
-    let phrase_fn = move |args: &[ColumnarValue]| -> DataFusionResult<ColumnarValue> {
-        // Parse arguments
-        let field_name = match &args[0] {
-            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Utf8(Some(s))) => s.clone(),
-            _ => {
+    let fun = Arc::new(
+        move |args: &[ColumnarValue]| -> DataFusionResult<ColumnarValue> {
+            if args.len() != 4 {
                 return Err(DataFusionError::Execution(
-                    "phrase() field must be string".into(),
-                ))
+                    "phrase(field, query, boost, slop) expects exactly 4 arguments".into(),
+                ));
             }
-        };
 
-        let query_text = match &args[1] {
-            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Utf8(Some(s))) => s.clone(),
-            _ => {
-                return Err(DataFusionError::Execution(
-                    "phrase() query must be string".into(),
-                ))
+            let field_values = string_column_from_arg(&args[0], "field")?;
+            let phrase_text = scalar_string_from_arg(&args[1], "query")?;
+            let boost = scalar_f32_from_arg(&args[2], 1.0, "boost")?;
+            let _slop = scalar_i32_from_arg(&args[3], 0, "slop")?;
+
+            let mut builder = BooleanBuilder::with_capacity(field_values.len());
+            let needle = phrase_text.to_lowercase();
+            for (row_idx, maybe_value) in field_values.iter().enumerate() {
+                if let Some(value) = maybe_value {
+                    let haystack = value.to_lowercase();
+                    let matches = haystack.contains(&needle);
+                    builder.append_value(matches);
+                    if matches {
+                        context.add_score(row_idx as u32, boost * 1.5);
+                    }
+                } else {
+                    builder.append_value(false);
+                }
             }
-        };
 
-        let boost = match &args[2] {
-            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Float32(Some(b))) => *b,
-            _ => 1.0,
-        };
+            Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        },
+    );
 
-        let slop = match &args[3] {
-            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Int32(Some(s))) => *s as u32,
-            _ => 0,
-        };
-
-        // Get index for field
-        let indexes = context.indexes.read().unwrap();
-        let index = indexes.get(&field_name).ok_or_else(|| {
-            DataFusionError::Execution(format!("No index found for field '{}'", field_name))
-        })?;
-
-        // Execute phrase query
-        let terms: Vec<&str> = query_text.split_whitespace().collect();
-        let matching_docs = index
-            .phrase_query(&terms, slop)
-            .ok_or_else(|| DataFusionError::Execution("Query returned no results".into()))?;
-
-        // Calculate scores for matching documents
-        for doc_id in matching_docs.iter() {
-            // Phrase queries typically get a higher base score
-            let score = boost * 1.5; // Placeholder
-            context.add_score(doc_id, score);
-        }
-
-        // Return boolean array
-        let result = BooleanArray::from(vec![true]); // Placeholder
-        Ok(ColumnarValue::Array(Arc::new(result)))
-    };
-
-    ScalarUDF::new(
-        &format!("phrase_{}", field_name),
-        &Signature::exact(
-            vec![DataType::Utf8, DataType::Float32, DataType::Int32],
-            Volatility::Immutable,
-        ),
-        &Arc::new(DataType::Boolean),
-        &Arc::new(phrase_func),
+    create_udf(
+        "phrase",
+        vec![
+            DataType::Utf8,
+            DataType::Utf8,
+            DataType::Float32,
+            DataType::Int32,
+        ],
+        DataType::Boolean,
+        Volatility::Immutable,
+        fun,
     )
+}
+
+/// Register both text() and phrase() UDFs on the provided context and return the shared FT context
+pub fn register_fulltext_udfs(ctx: &SessionContext) -> Arc<FullTextContext> {
+    let ft_context = Arc::new(FullTextContext::new());
+    ctx.register_udf(create_text_udf(ft_context.clone()));
+    ctx.register_udf(create_phrase_udf(ft_context.clone()));
+    ft_context
+}
+
+fn string_column_from_arg(arg: &ColumnarValue, label: &str) -> DataFusionResult<StringArray> {
+    match arg {
+        ColumnarValue::Array(array) => match array.data_type() {
+            DataType::Utf8 => array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .cloned()
+                .ok_or_else(|| {
+                    DataFusionError::Execution(format!(
+                        "Failed to downcast {} argument to StringArray",
+                        label
+                    ))
+                }),
+            DataType::LargeUtf8 => array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .map(|arr| {
+                    let owned: Vec<Option<String>> =
+                        arr.iter().map(|v| v.map(|s| s.to_string())).collect();
+                    StringArray::from(owned)
+                })
+                .ok_or_else(|| {
+                    DataFusionError::Execution(format!(
+                        "Failed to downcast {} argument to LargeStringArray",
+                        label
+                    ))
+                }),
+            other => Err(DataFusionError::Execution(format!(
+                "{} column must be Utf8, got {:?}",
+                label, other
+            ))),
+        },
+        ColumnarValue::Scalar(ScalarValue::Utf8(Some(value)))
+        | ColumnarValue::Scalar(ScalarValue::LargeUtf8(Some(value))) => {
+            Ok(StringArray::from(vec![Some(value.to_string())]))
+        }
+        ColumnarValue::Scalar(ScalarValue::Utf8(None))
+        | ColumnarValue::Scalar(ScalarValue::LargeUtf8(None))
+        | ColumnarValue::Scalar(ScalarValue::Null) => {
+            Ok(StringArray::from(vec![Option::<String>::None]))
+        }
+        other => Err(DataFusionError::Execution(format!(
+            "{} column must be Utf8, got {:?}",
+            label, other
+        ))),
+    }
+}
+
+fn scalar_string_from_arg(arg: &ColumnarValue, label: &str) -> DataFusionResult<String> {
+    match arg {
+        ColumnarValue::Scalar(ScalarValue::Utf8(Some(value))) => Ok(value.clone()),
+        ColumnarValue::Scalar(ScalarValue::LargeUtf8(Some(value))) => Ok(value.clone()),
+        ColumnarValue::Scalar(ScalarValue::Utf8(None))
+        | ColumnarValue::Scalar(ScalarValue::LargeUtf8(None))
+        | ColumnarValue::Scalar(ScalarValue::Null) => Err(DataFusionError::Execution(format!(
+            "{} cannot be NULL",
+            label
+        ))),
+        ColumnarValue::Array(array) => match array.data_type() {
+            DataType::Utf8 => {
+                let string_array = array
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| DataFusionError::Execution(format!("{} must be Utf8", label)))?;
+                if string_array.is_empty() {
+                    return Err(DataFusionError::Execution(format!(
+                        "{} column must have at least one value",
+                        label
+                    )));
+                }
+                Ok(string_array.value(0).to_string())
+            }
+            DataType::LargeUtf8 => {
+                let string_array = array
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(format!("{} must be LargeUtf8", label))
+                    })?;
+                if string_array.is_empty() {
+                    return Err(DataFusionError::Execution(format!(
+                        "{} column must have at least one value",
+                        label
+                    )));
+                }
+                Ok(string_array.value(0).to_string())
+            }
+            other => Err(DataFusionError::Execution(format!(
+                "{} must be Utf8, got {:?}",
+                label, other
+            ))),
+        },
+        other => Err(DataFusionError::Execution(format!(
+            "{} must be Utf8, got {:?}",
+            label, other
+        ))),
+    }
+}
+
+fn scalar_f32_from_arg(arg: &ColumnarValue, default: f32, label: &str) -> DataFusionResult<f32> {
+    match arg {
+        ColumnarValue::Scalar(ScalarValue::Float32(Some(v))) => Ok(*v),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(v))) => Ok(*v as f32),
+        ColumnarValue::Scalar(ScalarValue::Int64(Some(v))) => Ok(*v as f32),
+        ColumnarValue::Scalar(ScalarValue::Int32(Some(v))) => Ok(*v as f32),
+        ColumnarValue::Scalar(ScalarValue::Float32(None))
+        | ColumnarValue::Scalar(ScalarValue::Float64(None))
+        | ColumnarValue::Scalar(ScalarValue::Int64(None))
+        | ColumnarValue::Scalar(ScalarValue::Int32(None))
+        | ColumnarValue::Scalar(ScalarValue::Null) => Ok(default),
+        ColumnarValue::Array(_) => Err(DataFusionError::Execution(format!(
+            "{} must be a scalar value",
+            label
+        ))),
+        other => Err(DataFusionError::Execution(format!(
+            "Unsupported {} scalar {:?}",
+            label, other
+        ))),
+    }
+}
+
+fn scalar_i32_from_arg(arg: &ColumnarValue, default: i32, label: &str) -> DataFusionResult<i32> {
+    match arg {
+        ColumnarValue::Scalar(ScalarValue::Int32(Some(v))) => Ok(*v),
+        ColumnarValue::Scalar(ScalarValue::Int64(Some(v))) => Ok(*v as i32),
+        ColumnarValue::Scalar(ScalarValue::UInt32(Some(v))) => Ok(*v as i32),
+        ColumnarValue::Scalar(ScalarValue::UInt64(Some(v))) => Ok(*v as i32),
+        ColumnarValue::Scalar(ScalarValue::Int32(None))
+        | ColumnarValue::Scalar(ScalarValue::Int64(None))
+        | ColumnarValue::Scalar(ScalarValue::UInt32(None))
+        | ColumnarValue::Scalar(ScalarValue::UInt64(None))
+        | ColumnarValue::Scalar(ScalarValue::Null) => Ok(default),
+        ColumnarValue::Array(_) => Err(DataFusionError::Execution(format!(
+            "{} must be a scalar",
+            label
+        ))),
+        other => Err(DataFusionError::Execution(format!(
+            "Unsupported {} scalar {:?}",
+            label, other
+        ))),
+    }
+}
+
+fn tokenize(input: &str) -> Vec<String> {
+    input
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn match_text(value: &str, tokens: &[String]) -> bool {
+    if tokens.is_empty() {
+        return false;
+    }
+    let haystack = value.to_lowercase();
+    tokens.iter().all(|token| haystack.contains(token))
 }
 
 /// Virtual _score column
 ///
-/// This is injected into query results when ORDER BY _score is detected
-///
-/// Implementation approach:
-/// 1. Detect "ORDER BY _score" in SQL parser
-/// 2. Execute full-text queries and populate scores in context
-/// 3. Add _score column to result set from context.doc_scores
+/// This is injected into query results when ORDER BY _score is detected.
+/// Scores are aligned with the physical row order in each RecordBatch.
 pub fn add_score_column(
-    batch: &datafusion::arrow::record_batch::RecordBatch,
+    batch: &RecordBatch,
     context: &FullTextContext,
-    doc_id_column: &str,
-) -> DataFusionResult<datafusion::arrow::record_batch::RecordBatch> {
-    // Extract doc_ids from the batch
-    let doc_id_array = batch
-        .column_by_name(doc_id_column)
-        .ok_or_else(|| DataFusionError::Execution(format!("Column '{}' not found", doc_id_column)))?
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::UInt32Array>()
-        .ok_or_else(|| DataFusionError::Execution("doc_id column must be UInt32".into()))?;
-
-    // Build score array
-    let scores: Vec<f32> = doc_id_array
-        .iter()
-        .map(|doc_id| context.get_score(doc_id.unwrap_or(0)))
+) -> DataFusionResult<RecordBatch> {
+    // Build score array by aligning with the row positions inside this batch
+    let scores: Vec<f32> = (0..batch.num_rows())
+        .map(|row_idx| context.get_score(row_idx as u32))
         .collect();
 
     let score_array = Float32Array::from(scores);
 
     // Add _score column to batch
     let mut fields = batch.schema().fields().to_vec();
-    fields.push(Field::new("_score", DataType::Float32, false));
+    fields.push(Arc::new(Field::new("_score", DataType::Float32, false)));
 
     let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
     columns.push(Arc::new(score_array));
 
     let new_schema = Arc::new(datafusion::arrow::datatypes::Schema::new(fields));
-    datafusion::arrow::record_batch::RecordBatch::try_new(new_schema, columns)
+    RecordBatch::try_new(new_schema, columns)
         .map_err(|e| DataFusionError::Execution(format!("Failed to add _score column: {}", e)))
+}
+
+/// Wrap a `SendableRecordBatchStream` so each batch gains a `_score` column.
+pub fn wrap_stream_with_scores(
+    inner: SendableRecordBatchStream,
+    context: Arc<FullTextContext>,
+) -> SendableRecordBatchStream {
+    let schema = append_score_schema(&inner.schema());
+    Box::pin(ScoreAugmentedStream::new(inner, context, schema))
+}
+
+fn append_score_schema(base: &SchemaRef) -> SchemaRef {
+    let mut fields: Vec<datafusion::arrow::datatypes::Field> =
+        base.fields().iter().map(|f| f.as_ref().clone()).collect();
+    fields.push(Field::new("_score", DataType::Float32, false));
+    Arc::new(Schema::new_with_metadata(fields, base.metadata().clone()))
+}
+
+struct ScoreAugmentedStream {
+    inner: SendableRecordBatchStream,
+    context: Arc<FullTextContext>,
+    schema: SchemaRef,
+}
+
+impl Unpin for ScoreAugmentedStream {}
+
+impl ScoreAugmentedStream {
+    fn new(
+        inner: SendableRecordBatchStream,
+        context: Arc<FullTextContext>,
+        schema: SchemaRef,
+    ) -> Self {
+        Self {
+            inner,
+            context,
+            schema,
+        }
+    }
+}
+
+impl Stream for ScoreAugmentedStream {
+    type Item = DataFusionResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_mut().get_mut();
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                let result = add_score_column(&batch, &this.context);
+                this.context.clear_scores();
+                Poll::Ready(Some(result))
+            }
+            Poll::Ready(Some(Err(err))) => {
+                this.context.clear_scores();
+                Poll::Ready(Some(Err(err.into())))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl RecordBatchStream for ScoreAugmentedStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::array::{ArrayRef, StringArray};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::MemTable;
+    use std::sync::Arc;
 
-    #[test]
-    fn test_fulltext_context() {
-        let context = FullTextContext::new();
+    #[tokio::test]
+    async fn text_udf_filters_rows() {
+        let ctx = SessionContext::new();
+        register_fulltext_udfs(&ctx);
 
-        // Test score accumulation
-        context.add_score(1, 1.5);
-        context.add_score(1, 0.5);
-        assert_eq!(context.get_score(1), 2.0);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "message",
+            DataType::Utf8,
+            true,
+        )]));
+        let columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![
+            Some("system ok"),
+            Some("error detected"),
+            Some("panic unreachable"),
+        ])) as ArrayRef];
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        ctx.register_table("logs", Arc::new(table)).unwrap();
 
-        // Test clear
-        context.clear_scores();
-        assert_eq!(context.get_score(1), 0.0);
+        let df = ctx
+            .sql("SELECT message FROM logs WHERE text(message, 'error', 1.0)")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "error detected");
     }
 }

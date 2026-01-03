@@ -20,6 +20,9 @@ pub struct NormalizedSql {
 
     /// 提取出的分区过滤条件
     pub partition_filters: PartitionFilters,
+
+    /// 是否需要注入 `_score` 虚拟列
+    pub needs_score_column: bool,
 }
 
 /// 分区过滤条件
@@ -167,11 +170,19 @@ impl SqlNormalizer {
         // 🔧 修复 Timestamp 字段类型不匹配问题
         rewritten_sql = Self::fix_timestamp_comparisons(&rewritten_sql);
 
+        let needs_score_column = Self::detect_score_usage(&rewritten_sql);
+
         Ok(NormalizedSql {
             statement,
             rewritten_sql,
             partition_filters,
+            needs_score_column,
         })
+    }
+
+    /// 检测 SQL 中是否引用了 `_score` 虚拟列
+    fn detect_score_usage(sql: &str) -> bool {
+        sql.to_lowercase().contains("_score")
     }
 
     /// 提取 _partition 过滤条件
@@ -444,6 +455,7 @@ mod tests {
         assert!(result.rewritten_sql.contains("ORDER BY age DESC"));
         assert!(result.rewritten_sql.contains("LIMIT 10"));
         assert!(!result.partition_filters.has_filter);
+        assert!(!result.needs_score_column);
     }
 
     #[test]
@@ -560,5 +572,17 @@ mod tests {
         assert!(matched.contains(&"20240101".to_string()));
         assert!(matched.contains(&"20240201".to_string()));
         assert!(matched.contains(&"20240202".to_string()));
+    }
+
+    #[test]
+    fn test_fulltext_functions_survive_normalization() {
+        let sql =
+            "SELECT id, message FROM logs WHERE text(message, 'error', 1.0) ORDER BY _score DESC";
+        let result = SqlNormalizer::normalize(sql).unwrap();
+
+        assert!(result.rewritten_sql.contains("text"));
+        assert!(result.rewritten_sql.contains("_score"));
+        assert!(!result.partition_filters.has_filter);
+        assert!(result.needs_score_column);
     }
 }

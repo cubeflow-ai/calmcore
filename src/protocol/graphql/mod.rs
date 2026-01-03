@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use async_graphql::http::GraphiQLSource;
 use async_graphql::{Context, EmptySubscription, Json, Object, Result, Schema, SimpleObject};
 use poem::{
-    get, handler, listener::TcpListener, middleware::Cors, post, EndpointExt, Route, Server,
+    get, handler, listener::TcpListener, middleware::Cors, post, EndpointExt, IntoResponse, Route,
+    Server,
 };
 use serde_json::Value as JsonValue;
 
@@ -13,6 +15,9 @@ use crate::{
 };
 
 /// GraphQL Schema for database operations
+///
+/// ⚠️ async-graphql 会自动将 Rust 字段(蛇形命名)转换为 GraphQL 的 camelCase。
+/// 文档和示例均使用 camelCase,例如 `fieldType`, `primaryKey`, `partitionStrategy`。
 pub type CalmGraphQLSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 
 /// 创建 GraphQL Schema
@@ -48,11 +53,11 @@ pub fn create_schema(service: Arc<CalmService>) -> CalmGraphQLSchema {
 /// **示例:**
 /// ```graphql
 /// fields: [
-///   { name: "user_id", field_type: U64 }      # 用户 ID
-///   { name: "age", field_type: I8 }           # 年龄 0-120
-///   { name: "balance", field_type: F64 }      # 金额
-///   { name: "active", field_type: BOOLEAN }   # 是否激活
-///   { name: "created_at", field_type: TIMESTAMP, format: "iso8601" }
+///   { name: "user_id", fieldType: U64 }      # 用户 ID
+///   { name: "age", fieldType: I8 }           # 年龄 0-120
+///   { name: "balance", fieldType: F64 }      # 金额
+///   { name: "active", fieldType: BOOLEAN }   # 是否激活
+///   { name: "created_at", fieldType: TIMESTAMP, format: "iso8601" }
 /// ]
 /// ```
 #[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq)]
@@ -115,11 +120,11 @@ pub enum FieldTypeEnum {
 /// query {
 ///   table(name: "users") {
 ///     name              # 表名
-///     partition_count   # 分区数
-///     primary_key       # 主键字段
+///     partitionCount   # 分区数
+///     primaryKey       # 主键字段
 ///     fields {          # 字段列表
 ///       name
-///       field_type
+///       fieldType
 ///       indexed
 ///     }
 ///   }
@@ -145,7 +150,7 @@ pub struct Table {
 ///
 /// **字段说明:**
 /// - `name`: 字段名
-/// - `field_type`: 字段类型字符串 ("keyword", "i64", "f64", "timestamp" 等)
+/// - `fieldType`: 字段类型字符串 ("keyword", "i64", "f64", "timestamp" 等)
 /// - `indexed`: 是否建立索引 (true=可查询/排序, false=仅存储)
 #[derive(SimpleObject)]
 pub struct Field {
@@ -172,25 +177,26 @@ pub struct Field {
 /// **示例:**
 /// ```graphql
 /// # Hash 分区 - 推荐用于 ID
-/// partition_strategy: {
-///   strategy_type: HASH
-///   field: "user_id"
-///   num_partitions: 4
+/// partitionStrategy: {
+///   hash: {
+///     field: "user_id"
+///     numPartitions: 4
+///   }
 /// }
 ///
 /// # Range 分区 - 推荐用于时间
-/// partition_strategy: {
-///   strategy_type: RANGE
-///   field: "timestamp"
-///   ranges: [
-///     { partition_id: 0, start: {int_value: 0}, end: {int_value: 1704067200000} }
-///     { partition_id: 1, start: {int_value: 1704067200000}, end: {int_value: 1735689600000} }
-///   ]
+/// partitionStrategy: {
+///   range: {
+///     field: "timestamp"
+///     start: 0
+///     step: 86400000
+///     numPartitions: 8
+///   }
 /// }
 ///
 /// # 无分区 - 小表
-/// partition_strategy: {
-///   strategy_type: NONE
+/// partitionStrategy: {
+///   none: {}
 /// }
 /// ```
 #[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq)]
@@ -240,20 +246,20 @@ pub enum TimeGranularityType {
 /// # MCP 提示
 ///
 /// **三选一填写:**
-/// - `int_value`: 有符号整数 (如负数、普通整数)
-/// - `uint_value`: 无符号整数 (如时间戳、ID)
-/// - `string_value`: 字符串 (如日期字符串)
+/// - `intValue`: 有符号整数 (如负数、普通整数)
+/// - `uintValue`: 无符号整数 (如时间戳、ID)
+/// - `stringValue`: 字符串 (如日期字符串)
 ///
 /// **时间戳示例(毫秒):**
 /// ```graphql
-/// start: { int_value: 1704067200000 }  # 2024-01-01 00:00:00 UTC
-/// end: { int_value: 1735689600000 }    # 2025-01-01 00:00:00 UTC
+/// start: { intValue: 1704067200000 }  # 2024-01-01 00:00:00 UTC
+/// end: { intValue: 1735689600000 }    # 2025-01-01 00:00:00 UTC
 /// ```
 ///
 /// **字符串示例:**
 /// ```graphql
-/// start: { string_value: "2024-01-01" }
-/// end: { string_value: "2025-01-01" }
+/// start: { stringValue: "2024-01-01" }
+/// end: { stringValue: "2025-01-01" }
 /// 分区策略配置
 ///
 /// 定义数据如何在多个分区中分布,影响查询性能和并行度。
@@ -262,10 +268,11 @@ pub enum TimeGranularityType {
 ///
 /// **Hash 分区(推荐):**
 /// ```graphql
-/// partition_strategy: {
-///   strategy_type: HASH
-///   field: "user_id"        # 分区字段(通常是主键)
-///   num_partitions: 4       # 分区数量(建议 2-16)
+/// partitionStrategy: {
+///   hash: {
+///     field: "user_id"        # 分区字段(通常是主键)
+///     numPartitions: 4       # 分区数量(建议 2-16)
+///   }
 /// }
 /// ```
 /// - 适合: ID 类字段(user_id, order_id)
@@ -274,21 +281,14 @@ pub enum TimeGranularityType {
 ///
 /// **Range 分区:**
 /// ```graphql
-/// partition_strategy: {
-///   strategy_type: RANGE
-///   field: "created_at"     # 时间戳字段
-///   ranges: [
-///     {
-///       partition_id: 0
-///       start: { int_value: 0 }
-///       end: { int_value: 1704067200000 }  # 2024-01-01
-///     }
-///     {
-///       partition_id: 1
-///       start: { int_value: 1704067200000 }
-///       end: { int_value: 9999999999999 }
-///     }
-///   ]
+/// partitionStrategy: {
+///   range: {
+///     field: "created_at"     # 时间戳字段
+///     start: 1704067200000     # 起始毫秒
+///     step: 86400000          # 1天范围
+///     numPartitions: 365      # 365 个分区
+///     parallelism: 1
+///   }
 /// }
 /// ```
 /// - 适合: 时序数据(日志、订单)
@@ -297,12 +297,13 @@ pub enum TimeGranularityType {
 ///
 /// **DatetimeRange 分区(时序数据优化):**
 /// ```graphql
-/// partition_strategy: {
-///   strategy_type: DATETIMERANGE
-///   field: "event_time"           # Timestamp 类型字段
-///   time_granularity: DAY          # 按天分区
-///   timezone: "UTC"                # 可选: UTC 或本地时区
-///   datetime_parallelism: 2        # 可选: 每天创建 2 个并行分区
+/// partitionStrategy: {
+///   datetimeRange: {
+///     field: "event_time"      # Timestamp 类型字段
+///     granularity: DAY          # 按天分区
+///     timezone: "UTC"          # 可选: UTC 或本地时区
+///     parallelism: 2            # 可选: 每个时间段创建 2 个并行分区
+///   }
 /// }
 /// ```
 /// - 适合: 时间序列数据(日志、监控、IoT)
@@ -312,10 +313,10 @@ pub enum TimeGranularityType {
 ///
 /// **None 分区(小表):**
 /// ```graphql
-/// partition_strategy: {
-///   strategy_type: NONE
+/// partitionStrategy: {
+///   none: {}
 /// }
-/// # 或直接使用: partition_count: 1
+/// # 或直接使用: partitionCount: 1
 /// ```
 /// - 适合: <100万行的表
 /// - 优点: 简单,无分区开销
@@ -548,8 +549,8 @@ pub enum PartitionStrategyInput {
 /// # MCP 提示
 ///
 /// **默认值(适合大多数场景):**
-/// - `max_docs_per_segment`: 100,000 文档
-/// - `max_segment_age_secs`: 300 秒 (5分钟)
+/// - `maxDocsPerSegment`: 100,000 文档
+/// - `maxSegmentAgeSecs`: 300 秒 (5分钟)
 ///
 /// **场景建议:**
 /// - **高吞吐写入**(日志、监控): max_docs=500000, max_age=600(10分钟)
@@ -558,9 +559,9 @@ pub enum PartitionStrategyInput {
 ///
 /// **示例:**
 /// ```graphql
-/// persist_policy: {
-///   max_docs_per_segment: 100000    # 10万文档持久化
-///   max_segment_age_secs: 300       # 5分钟持久化
+/// persistPolicy: {
+///   maxDocsPerSegment: 100000    # 10万文档持久化
+///   maxSegmentAgeSecs: 300       # 5分钟持久化
 /// }
 /// ```
 #[derive(async_graphql::InputObject)]
@@ -584,9 +585,9 @@ pub struct PersistPolicyInput {
 ///
 /// **推荐配置:**
 /// - `description`: 表描述,帮助团队理解
-/// - `primary_key`: 主键字段,用于去重和分区
-/// - `partition_strategy`: 分区配置（不指定则默认 None）
-/// - `store_source`: 是否存储原始 JSON (默认 true)
+/// - `primaryKey`: 主键字段,用于去重和分区
+/// - `partitionStrategy`: 分区配置（不指定则默认 None）
+/// - `storeSource`: 是否存储原始 JSON (默认 true)
 ///
 /// **快速开始模板 (PKHash 分区):**
 /// ```graphql
@@ -594,7 +595,7 @@ pub struct PersistPolicyInput {
 ///   createTable(input: {
 ///     name: "users"                          # 表名
 ///     description: "用户信息表"               # 表描述
-///     primary_key: "user_id"                 # 主键
+///     primaryKey: "user_id"                 # 主键
 ///     partitionStrategy: {                   # PKHash 分区 (最简单)
 ///       pkHash: { numPartitions: 4 }
 ///     }
@@ -602,22 +603,22 @@ pub struct PersistPolicyInput {
 ///     fields: [                              # 字段定义
 ///       {
 ///         name: "user_id"
-///         field_type: U64
+///         fieldType: U64
 ///         description: "用户 ID"
 ///         nullable: false                    # 必填
 ///       }
 ///       {
 ///         name: "username"
-///         field_type: KEYWORD
+///         fieldType: KEYWORD
 ///         description: "用户名"
-///         case_sensitive: false              # 不区分大小写
+///         caseSensitive: false              # 不区分大小写
 ///         nullable: false
 ///       }
 ///       {
 ///         name: "age"
-///         field_type: I8
+///         fieldType: I8
 ///         description: "年龄"
-///         default_value: "18"                # 默认值
+///         defaultValue: "18"                # 默认值
 ///         nullable: true                     # 可选
 ///       }
 ///     ]
@@ -652,7 +653,7 @@ pub struct PersistPolicyInput {
 ///   createTable(input: {
 ///     name: "logs"
 ///     description: "日志表,按天分区"
-///     primary_key: "log_id"
+///     primaryKey: "log_id"
 ///     
 ///     partitionStrategy: {
 ///       datetimeRange: {
@@ -663,9 +664,9 @@ pub struct PersistPolicyInput {
 ///       }
 ///     }
 ///     
-///     persist_policy: {
-///       max_docs_per_segment: 500000         # 50万文档持久化
-///       max_segment_age_secs: 600            # 10分钟持久化
+///     persistPolicy: {
+///       maxDocsPerSegment: 500000         # 50万文档持久化
+///       maxSegmentAgeSecs: 600            # 10分钟持久化
 ///     }
 ///     
 ///     fields: [...]
@@ -679,7 +680,7 @@ pub struct PersistPolicyInput {
 ///   createTable(input: {
 ///     name: "orders"
 ///     description: "订单表,按时间戳范围分区"
-///     primary_key: "order_id"
+///     primaryKey: "order_id"
 ///     
 ///     partitionStrategy: {
 ///       range: {
@@ -789,20 +790,20 @@ pub struct CreateTableInput {
 ///
 /// **必填字段:**
 /// - `name`: 字段名 (小写字母、数字、下划线)
-/// - `field_type`: 字段类型 (参考 FieldTypeEnum)
+/// - `fieldType`: 字段类型 (参考 FieldTypeEnum)
 ///
 /// **推荐配置:**
 /// - `description`: 字段含义和用途
 /// - `nullable`: 是否必填 (false=必填, true=可选)
 /// - `indexed`: 是否索引 (true=可查询, false=仅存储)
-/// - `default_value`: 默认值,插入时未提供则自动填充
+/// - `defaultValue`: 默认值,插入时未提供则自动填充
 ///
 /// **字段模板:**
 /// ```graphql
 /// # ID 字段
 /// {
 ///   name: "user_id"
-///   field_type: U64
+///   fieldType: U64
 ///   description: "用户唯一标识符"
 ///   indexed: true      # 必须索引,用于查询
 ///   nullable: false    # 必填
@@ -811,37 +812,37 @@ pub struct CreateTableInput {
 /// # 文本字段(不区分大小写)
 /// {
 ///   name: "email"
-///   field_type: KEYWORD
+///   fieldType: KEYWORD
 ///   description: "用户邮箱"
 ///   indexed: true
-///   case_sensitive: false   # 不区分大小写
+///   caseSensitive: false   # 不区分大小写
 ///   nullable: false
 /// }
 ///
 /// # 数组字段
 /// {
 ///   name: "tags"
-///   field_type: KEYWORD
+///   fieldType: KEYWORD
 ///   description: "用户标签列表"
 ///   indexed: true
-///   is_array: true          # 数组类型
+///   isArray: true          # 数组类型
 ///   nullable: true          # 可选
 /// }
 ///
 /// # 整数字段(带默认值)
 /// {
 ///   name: "age"
-///   field_type: I8
+///   fieldType: I8
 ///   description: "用户年龄"
 ///   indexed: true
-///   default_value: "18"     # 默认 18
+///   defaultValue: "18"     # 默认 18
 ///   nullable: true
 /// }
 ///
 /// # 时间戳字段
 /// {
 ///   name: "created_at"
-///   field_type: TIMESTAMP
+///   fieldType: TIMESTAMP
 ///   description: "创建时间"
 ///   indexed: true
 ///   format: "iso8601"       # ISO 8601 格式
@@ -1239,7 +1240,7 @@ impl QueryRoot {
     ///
     /// **字段说明:**
     /// - `node_id`: 节点唯一标识符
-    /// - `partition_count`: 当前节点上的分区数量
+    /// - `partitionCount`: 当前节点上的分区数量
     /// - `cpu_usage`: CPU 使用率 (0-100)
     /// - `memory_usage`: 内存使用率 (0-100)
     /// - `total_memory`: 总内存 (bytes)
@@ -1259,7 +1260,7 @@ impl QueryRoot {
     /// # 返回示例:
     /// # {
     /// #   "node_id": "20231225120530123_127.0.0.1_52000_52001",
-    /// #   "partition_count": 16,
+    /// #   "partitionCount": 16,
     /// #   "cpu_usage": 45.3,
     /// #   "memory_usage": 62.1,
     /// #   "total_memory": 17179869184,
@@ -1302,7 +1303,7 @@ impl QueryRoot {
     /// # [
     /// #   {
     /// #     "node_id": "20231225120530123_127.0.0.1_52000_52001",
-    /// #     "partition_count": 16,
+    /// #     "partitionCount": 16,
     /// #     "cpu_usage": 45.3,
     /// #     "memory_usage": 62.1,
     /// #     "total_memory": 17179869184,
@@ -1311,7 +1312,7 @@ impl QueryRoot {
     /// #   },
     /// #   {
     /// #     "node_id": "20231225120530124_127.0.0.1_52100_52101",
-    /// #     "partition_count": 12,
+    /// #     "partitionCount": 12,
     /// #     "cpu_usage": 38.7,
     /// #     "memory_usage": 55.2,
     /// #     "total_memory": 17179869184,
@@ -1352,7 +1353,7 @@ impl MutationRoot {
     /// **最佳实践:**
     /// - 表名使用小写字母+下划线(user_orders)
     /// - 至少定义 1 个字段
-    /// - 指定 primary_key 用于去重和分区
+    /// - 指定 primaryKey 用于去重和分区
     /// - 设置合理的分区策略(Hash 推荐)
     /// - 添加 description 帮助团队理解
     ///
@@ -1362,15 +1363,15 @@ impl MutationRoot {
     ///   createTable(input: {
     ///     name: "users"
     ///     description: "用户信息表"
-    ///     primary_key: "user_id"
+    ///     primaryKey: "user_id"
     ///     partitionStrategy: {
     ///       strategyType: PKHASH
     ///       numPartitions: 4
     ///     }
     ///     fields: [
-    ///       { name: "user_id", field_type: U64, nullable: false }
-    ///       { name: "username", field_type: KEYWORD, nullable: false }
-    ///       { name: "age", field_type: I8, nullable: true }
+    ///       { name: "user_id", fieldType: U64, nullable: false }
+    ///       { name: "username", fieldType: KEYWORD, nullable: false }
+    ///       { name: "age", fieldType: I8, nullable: true }
     ///     ]
     ///   }) {
     ///     name
@@ -1939,6 +1940,7 @@ impl GraphQLServer {
             .at("/", get(root))
             .at("/health", get(health))
             .at("/graphql", post(graphql_endpoint))
+            .at("/playground", get(playground))
             .with(Cors::new());
 
         Server::new(TcpListener::bind(addr)).run(app).await
@@ -1959,4 +1961,10 @@ async fn root() -> poem::web::Json<serde_json::Value> {
         "version": "0.1.0",
         "graphql_endpoint": "/graphql",
     }))
+}
+
+/// GraphQL Playground (GraphiQL) HTML page
+#[handler]
+async fn playground() -> impl IntoResponse {
+    poem::web::Html(GraphiQLSource::build().endpoint("/graphql").finish())
 }

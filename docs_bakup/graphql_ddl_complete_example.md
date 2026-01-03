@@ -16,26 +16,25 @@ Calm 使用 **GraphQL 作为唯一的 DDL (数据定义语言) 接口**。这样
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `name` | String | ✅ | - | 表名 |
-| `primary_key` | String | ❌ | null | 主键字段名 |
+| `primaryKey` | String | ❌ | null | 主键字段名 |
 | `description` | String | ❌ | null | **✨ 新增** 表描述/注释 |
-| `partition_strategy` | PartitionStrategyInput | ❌ | Hash(1 partition) | 分区策略 |
-| `partition_count` | Int | ❌ | 1 | 分区数量(仅当未指定 partition_strategy 时) |
+| `partitionStrategy` | PartitionStrategyInput | ❌ | Hash(1 partition) | 分区策略 |
 | `fields` | [FieldInput!]! | ✅ | - | 字段列表 |
-| `store_source` | Boolean | ❌ | true | 是否存储原始 JSON |
-| `persist_policy` | PersistPolicyInput | ❌ | default | 持久化策略 |
+| `storeSource` | Boolean | ❌ | true | 是否存储原始 JSON |
+| `persistPolicy` | PersistPolicyInput | ❌ | default | 持久化策略 |
 
 ### 字段级配置
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `name` | String | ✅ | - | 字段名 |
-| `field_type` | FieldTypeEnum | ✅ | - | 字段类型 |
+| `fieldType` | FieldTypeEnum | ✅ | - | 字段类型 |
 | `indexed` | Boolean | ❌ | true | 是否建立索引 |
 | `description` | String | ❌ | null | **✨ 新增** 字段描述/注释 |
-| `default_value` | String | ❌ | null | **✨ 新增** 默认值(JSON 格式) |
+| `defaultValue` | String | ❌ | null | **✨ 新增** 默认值(JSON 格式) |
 | `nullable` | Boolean | ❌ | true | **✨ 新增** 是否可为空 |
-| `case_sensitive` | Boolean | ❌ | true | 是否区分大小写(仅 Keyword) |
-| `is_array` | Boolean | ❌ | false | **✨ 新增** 是否为数组类型(仅 Keyword) |
+| `caseSensitive` | Boolean | ❌ | true | 是否区分大小写(仅 Keyword) |
+| `isArray` | Boolean | ❌ | false | **✨ 新增** 是否为数组类型(仅 Keyword) |
 | `format` | String | ❌ | null | 时间格式(仅 Timestamp) |
 
 ### 支持的字段类型
@@ -60,15 +59,16 @@ Calm 使用 **GraphQL 作为唯一的 DDL (数据定义语言) 接口**。这样
 
 | 策略 | 参数 | 说明 | 使用场景 |
 |------|------|------|----------|
-| `PKHash` | num_partitions | 基于主键哈希分配 | 适合有主键的表,自动负载均衡 |
-| `HASH` | field, num_partitions | 基于指定字段哈希分配 | 无主键表,均衡负载 |
-| `RANGE` | field, range_start, range_step | 基于范围划分(按需创建) | 时序数据,支持 Int64/Timestamp 字段 |
+| `PKHash` | numPartitions | 基于主键哈希分配 | 适合有主键的表,自动负载均衡 |
+| `HASH` | field, numPartitions | 基于指定字段哈希分配 | 无主键表,均衡负载 |
+| `RANGE` | field, start, step, numPartitions | 基于范围划分(按需创建) | 时序数据,支持 Int64/Timestamp 字段 |
 | `CUSTOM` | - | 用户自定义分区名 | 特殊业务需求,手动指定分区 |
 | `NONE` | - | 单分区 | 小表,测试环境 |
 
-**Range 分区说明:**
-- `range_start`: 起始值(毫秒时间戳或整数)
-- `range_step`: 步长(例如: 86400000 = 1天)
+- **Range 分区说明:**
+- `start`: 起始值(毫秒时间戳或整数)
+- `step`: 步长(例如: 86400000 = 1天)
+- `numPartitions`: 预创建的分区数量
 - 分区按需创建,命名格式: `partition_{start_value}`
 - 支持字段类型: Int64, Timestamp(毫秒/秒/微秒/纳秒)
 
@@ -76,8 +76,8 @@ Calm 使用 **GraphQL 作为唯一的 DDL (数据定义语言) 接口**。这样
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `max_docs_per_segment` | Int | 100000 | 段内文档数阈值 |
-| `max_segment_age_secs` | Int | 300 | 段存活时间阈值(秒) |
+| `maxDocsPerSegment` | Int | 100000 | 段内文档数阈值 |
+| `maxSegmentAgeSecs` | Int | 300 | 段存活时间阈值(秒) |
 
 ---
 
@@ -90,74 +90,75 @@ mutation {
   createTable(input: {
     name: "users"
     description: "用户信息表,存储所有注册用户的基本信息"
-    primary_key: "user_id"
+    primaryKey: "user_id"
     
     # Hash 分区,基于 user_id,4 个分区
-    partition_strategy: {
-      strategy_type: HASH
-      field: "user_id"
-      num_partitions: 4
+    partitionStrategy: {
+      hash: {
+        field: "user_id"
+        numPartitions: 4
+      }
     }
     
     fields: [
       { 
         name: "user_id"
-        field_type: U64
+        fieldType: U64
         indexed: true
         description: "用户唯一标识符"
         nullable: false
       }
       { 
         name: "username"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         indexed: true
-        case_sensitive: false
+        caseSensitive: false
         description: "用户名,不区分大小写"
         nullable: false
       }
       { 
         name: "email"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         indexed: true
-        case_sensitive: false
+        caseSensitive: false
         description: "用户邮箱"
         nullable: false
       }
       { 
         name: "age"
-        field_type: I8
+        fieldType: I8
         indexed: true
         description: "用户年龄"
-        default_value: "18"
+        defaultValue: "18"
         nullable: true
       }
       { 
         name: "balance"
-        field_type: F64
+        fieldType: F64
         indexed: false
         description: "账户余额"
-        default_value: "0.0"
+        defaultValue: "0.0"
         nullable: false
       }
       { 
         name: "is_active"
-        field_type: BOOLEAN
+        fieldType: BOOLEAN
         indexed: true
         description: "账户是否激活"
-        default_value: "true"
+        defaultValue: "true"
         nullable: false
       }
       { 
         name: "tags"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         indexed: true
-        is_array: true
+        isArray: true
         description: "用户标签列表"
         nullable: true
       }
       { 
         name: "created_at"
-        field_type: TIMESTAMP
+        fieldType: TIMESTAMP
         indexed: true
         format: "iso8601"
         description: "账户创建时间"
@@ -165,7 +166,7 @@ mutation {
       }
       { 
         name: "last_login_at"
-        field_type: TIMESTAMP
+        fieldType: TIMESTAMP
         indexed: true
         format: "iso8601"
         description: "最后登录时间"
@@ -173,18 +174,18 @@ mutation {
       }
     ]
     
-    store_source: true
+    storeSource: true
     
-    persist_policy: {
-      max_docs_per_segment: 100000
-      max_segment_age_secs: 300
+    persistPolicy: {
+      maxDocsPerSegment: 100000
+      maxSegmentAgeSecs: 300
     }
   }) {
     name
-    partition_count
+    partitionCount
     fields {
       name
-      field_type
+      fieldType
       indexed
     }
   }
@@ -197,17 +198,17 @@ mutation {
   "data": {
     "createTable": {
       "name": "users",
-      "partition_count": 4,
+      "partitionCount": 4,
       "fields": [
-        { "name": "user_id", "field_type": "U64", "indexed": true },
-        { "name": "username", "field_type": "Keyword", "indexed": true },
-        { "name": "email", "field_type": "Keyword", "indexed": true },
-        { "name": "age", "field_type": "I8", "indexed": true },
-        { "name": "balance", "field_type": "F64", "indexed": false },
-        { "name": "is_active", "field_type": "Boolean", "indexed": true },
-        { "name": "tags", "field_type": "Keyword", "indexed": true },
-        { "name": "created_at", "field_type": "Timestamp", "indexed": true },
-        { "name": "last_login_at", "field_type": "Timestamp", "indexed": true }
+        { "name": "user_id", "fieldType": "U64", "indexed": true },
+        { "name": "username", "fieldType": "Keyword", "indexed": true },
+        { "name": "email", "fieldType": "Keyword", "indexed": true },
+        { "name": "age", "fieldType": "I8", "indexed": true },
+        { "name": "balance", "fieldType": "F64", "indexed": false },
+        { "name": "is_active", "fieldType": "Boolean", "indexed": true },
+        { "name": "tags", "fieldType": "Keyword", "indexed": true },
+        { "name": "created_at", "fieldType": "Timestamp", "indexed": true },
+        { "name": "last_login_at", "fieldType": "Timestamp", "indexed": true }
       ]
     }
   }
@@ -223,29 +224,30 @@ mutation {
   createTable(input: {
     name: "access_logs"
     description: "访问日志表,按天分区"
-    primary_key: "log_id"
+    primaryKey: "log_id"
     
     # Range 分区,按时间戳分区
-    # range_start: 2024-01-01 00:00:00 (UTC)
-    # range_step: 86400000 (1天 = 24小时 * 3600秒 * 1000毫秒)
-    partition_strategy: {
-      strategy_type: RANGE
-      field: "timestamp"
-      range_start: 1704067200000
-      range_step: 86400000
+    partitionStrategy: {
+      range: {
+        field: "timestamp"
+        start: 1704067200000         # 2024-01-01 00:00:00 UTC
+        step: 86400000               # 1 天(毫秒)
+        numPartitions: 30            # 按需创建 30 个分区
+        parallelism: 1
+      }
     }
     
     fields: [
       { 
         name: "log_id"
-        field_type: U64
+        fieldType: U64
         indexed: true
         description: "日志唯一 ID"
         nullable: false
       }
       { 
         name: "timestamp"
-        field_type: TIMESTAMP
+        fieldType: TIMESTAMP
         indexed: true
         format: "iso8601"
         description: "访问时间"
@@ -253,43 +255,43 @@ mutation {
       }
       { 
         name: "user_id"
-        field_type: U64
+        fieldType: U64
         indexed: true
         description: "访问用户 ID"
         nullable: true
       }
       { 
         name: "path"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         indexed: true
         description: "访问路径"
         nullable: false
       }
       { 
         name: "status_code"
-        field_type: I16
+        fieldType: I16
         indexed: true
         description: "HTTP 状态码"
         nullable: false
       }
       { 
         name: "response_time_ms"
-        field_type: F32
+        fieldType: F32
         indexed: false
         description: "响应时间(毫秒)"
         nullable: true
       }
     ]
     
-    store_source: true
+    storeSource: true
     
-    persist_policy: {
-      max_docs_per_segment: 500000  # 日志量大,增加段大小
-      max_segment_age_secs: 600     # 10 分钟持久化
+    persistPolicy: {
+      maxDocsPerSegment: 500000  # 日志量大,增加段大小
+      maxSegmentAgeSecs: 600     # 10 分钟持久化
     }
   }) {
     name
-    partition_count
+    partitionCount
   }
 }
 ```
@@ -303,47 +305,48 @@ mutation {
   createTable(input: {
     name: "products"
     description: "商品信息表,按主键自动分区"
-    primary_key: "product_id"
+    primaryKey: "product_id"
     
     # PKHash 分区,基于主键 product_id 自动哈希
-    partition_strategy: {
-      strategy_type: PKHash
-      num_partitions: 4
+    partitionStrategy: {
+      pkHash: {
+        numPartitions: 4
+      }
     }
     
     fields: [
       { 
         name: "product_id"
-        field_type: U64
+        fieldType: U64
         description: "商品 ID"
       }
       { 
         name: "name"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         description: "商品名称"
       }
       { 
         name: "price"
-        field_type: F64
+        fieldType: F64
         description: "商品价格"
-        default_value: "0.0"
+        defaultValue: "0.0"
       }
       { 
         name: "stock"
-        field_type: I32
+        fieldType: I32
         description: "库存数量"
-        default_value: "0"
+        defaultValue: "0"
       }
       { 
         name: "on_sale"
-        field_type: BOOLEAN
+        fieldType: BOOLEAN
         description: "是否在售"
-        default_value: "true"
+        defaultValue: "true"
       }
     ]
   }) {
     name
-    partition_count
+    partitionCount
   }
 }
 ```
@@ -357,23 +360,28 @@ mutation {
   createTable(input: {
     name: "metrics"
     description: "系统性能指标表,展示所有数值类型"
-    primary_key: "metric_id"
-    partition_count: 2
+    primaryKey: "metric_id"
+    partitionStrategy: {
+      hash: {
+        field: "metric_id"
+        numPartitions: 2
+      }
+    }
     
     fields: [
-      { name: "metric_id", field_type: U64, description: "指标 ID" }
-      { name: "cpu_usage_i8", field_type: I8, description: "CPU 使用率(0-100)" }
-      { name: "memory_usage_i16", field_type: I16, description: "内存使用(MB)" }
-      { name: "disk_usage_i32", field_type: I32, description: "磁盘使用(MB)" }
-      { name: "network_bytes_i64", field_type: I64, description: "网络传输字节数" }
-      { name: "port_u8", field_type: U8, description: "端口号(0-255)" }
-      { name: "process_id_u16", field_type: U16, description: "进程 ID" }
-      { name: "session_id_u32", field_type: U32, description: "会话 ID" }
-      { name: "transaction_id_u64", field_type: U64, description: "事务 ID" }
-      { name: "latency_f32", field_type: F32, description: "延迟(ms)" }
-      { name: "throughput_f64", field_type: F64, description: "吞吐量(MB/s)" }
-      { name: "is_healthy", field_type: BOOLEAN, description: "健康状态" }
-      { name: "timestamp", field_type: TIMESTAMP, format: "iso8601", description: "采集时间" }
+      { name: "metric_id", fieldType: U64, description: "指标 ID" }
+      { name: "cpu_usage_i8", fieldType: I8, description: "CPU 使用率(0-100)" }
+      { name: "memory_usage_i16", fieldType: I16, description: "内存使用(MB)" }
+      { name: "disk_usage_i32", fieldType: I32, description: "磁盘使用(MB)" }
+      { name: "network_bytes_i64", fieldType: I64, description: "网络传输字节数" }
+      { name: "port_u8", fieldType: U8, description: "端口号(0-255)" }
+      { name: "process_id_u16", fieldType: U16, description: "进程 ID" }
+      { name: "session_id_u32", fieldType: U32, description: "会话 ID" }
+      { name: "transaction_id_u64", fieldType: U64, description: "事务 ID" }
+      { name: "latency_f32", fieldType: F32, description: "延迟(ms)" }
+      { name: "throughput_f64", fieldType: F64, description: "吞吐量(MB/s)" }
+      { name: "is_healthy", fieldType: BOOLEAN, description: "健康状态" }
+      { name: "timestamp", fieldType: TIMESTAMP, format: "iso8601", description: "采集时间" }
     ]
   }) {
     name
@@ -401,7 +409,7 @@ query {
     description  # 显示: "用户信息表,存储所有注册用户的基本信息"
     fields {
       name
-      field_type
+      fieldType
       indexed
       # description  # 后续可以添加到 Field 类型中
     }
@@ -411,9 +419,9 @@ query {
 
 ---
 
-## 默认值 (default_value) 的用途
+## 默认值 (defaultValue) 的用途
 
-新增的 `default_value` 字段实现:
+新增的 `defaultValue` 字段实现:
 
 1. **插入时自动填充**: INSERT 时未提供值,自动使用默认值
 2. **业务逻辑**: balance 默认 0.0, is_active 默认 true
@@ -453,9 +461,9 @@ INSERT INTO users (user_id, username, email) VALUES (2, 'bob', 'bob@example.com'
 
 ---
 
-## 数组字段 (is_array) 的用途
+## 数组字段 (isArray) 的用途
 
-新增的 `is_array` 字段 (仅 Keyword 类型) 实现:
+新增的 `isArray` 字段 (仅 Keyword 类型) 实现:
 
 1. **标签系统**: 用户标签、商品分类
 2. **权限管理**: 用户角色列表
@@ -469,12 +477,12 @@ mutation {
   createTable(input: {
     name: "posts"
     fields: [
-      { name: "post_id", field_type: U64 }
-      { name: "title", field_type: KEYWORD }
+      { name: "post_id", fieldType: U64 }
+      { name: "title", fieldType: KEYWORD }
       { 
         name: "tags"
-        field_type: KEYWORD
-        is_array: true      # ✨ 标记为数组
+        fieldType: KEYWORD
+        isArray: true      # ✨ 标记为数组
         description: "文章标签列表"
       }
     ]
@@ -535,9 +543,9 @@ mutation {
     name: "users"
     description: "用户表"
     fields: [
-      { name: "user_id", field_type: U64, description: "用户 ID" }
-      { name: "username", field_type: KEYWORD, description: "用户名" }
-      { name: "age", field_type: I8, default_value: "18", description: "年龄" }
+      { name: "user_id", fieldType: U64, description: "用户 ID" }
+      { name: "username", fieldType: KEYWORD, description: "用户名" }
+      { name: "age", fieldType: I8, defaultValue: "18", description: "年龄" }
     ]
   }) { name }
 }
@@ -582,9 +590,9 @@ mutation {
 |------|------|------------|
 | 表描述 | ❌ | ✅ description |
 | 字段描述 | ❌ | ✅ description |
-| 默认值 | ❌ | ✅ default_value |
+| 默认值 | ❌ | ✅ defaultValue |
 | 可空性 | ❌ | ✅ nullable |
-| 数组字段 | ❌ | ✅ is_array (Keyword) |
+| 数组字段 | ❌ | ✅ isArray (Keyword) |
 | 字段类型 | 13 种 | 13 种 (支持别名) |
 | 分区策略 | ✅ | ✅ 完整支持 |
 | 持久化策略 | ✅ | ✅ 完整支持 |
@@ -594,8 +602,8 @@ mutation {
 1. **单一入口**: GraphQL 是唯一的 DDL 接口
 2. **完整性**: 支持所有 Calm 特性(分区、持久化、14 种类型)
 3. **自文档化**: description 字段使数据模型清晰易懂
-4. **业务友好**: default_value、nullable 满足实际需求
-5. **灵活性**: is_array 支持多值属性
+4. **业务友好**: defaultValue、nullable 满足实际需求
+5. **灵活性**: isArray 支持多值属性
 
 ### 📚 相关文档
 

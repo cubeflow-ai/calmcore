@@ -11,6 +11,9 @@ pub mod sql_normalizer;
 // Federation 层（联邦查询）
 pub mod federation;
 
+// UDFs
+pub mod udf;
+
 // Re-exports
 pub use federation::FederatedQueryExecutor;
 pub use sql_normalizer::{NormalizedSql, PartitionFilters, SqlNormalizer};

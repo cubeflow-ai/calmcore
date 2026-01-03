@@ -176,7 +176,10 @@ impl NaturalOrderExecutor {
                 };
 
                 // 3. 提取 WHERE 子句
-                let where_clause = select.selection.as_ref().map(|selection| format!("{}", selection));
+                let where_clause = select
+                    .selection
+                    .as_ref()
+                    .map(|selection| format!("{}", selection));
 
                 // 4. 解析 LIMIT 和 OFFSET - 使用 sqlparser 的 LimitClause
                 let (limit, offset) = if let Some(limit_clause) = &query.limit_clause {
@@ -570,41 +573,65 @@ impl NaturalOrderExecutor {
             })?;
 
         // 获取 segment 数据
-        let (schema, index_readers, doc_count, deleted, row_data) = if segment_id == "current" {
-            let current_segment = partition.get_current_segment();
-            let schema = partition.arrow_schema.clone();
-            let index_readers = current_segment.get_index_readers();
-            let doc_count = current_segment.doc_count();
-            let deleted = current_segment.get_deleted();
-            let row_data = current_segment.get_row_data();
-            drop(current_segment);
-            (schema, index_readers, doc_count, deleted, row_data)
-        } else {
-            let segment_id_u64: u64 = segment_id
-                .parse()
-                .map_err(|_| CoreError::Internal(format!("Invalid segment ID: {}", segment_id)))?;
-
-            let frozen_segments = partition.get_frozen_segments();
-            let segment = frozen_segments
-                .iter()
-                .find(|(id, _)| *id == segment_id_u64)
-                .map(|(_, seg)| seg.clone())
-                .ok_or_else(|| {
-                    CoreError::NotExisted(format!("Segment {} not found", segment_id))
+        let (schema, index_readers, doc_count, deleted, row_data, segment_start) =
+            if segment_id == "current" {
+                let current_segment = partition.get_current_segment();
+                let schema = partition.arrow_schema.clone();
+                let index_readers = current_segment.get_index_readers();
+                let doc_count = current_segment.doc_count();
+                let deleted = current_segment.get_deleted();
+                let row_data = current_segment.get_row_data();
+                let segment_start = current_segment.start;
+                drop(current_segment);
+                (
+                    schema,
+                    index_readers,
+                    doc_count,
+                    deleted,
+                    row_data,
+                    segment_start,
+                )
+            } else {
+                let segment_id_u64: u64 = segment_id.parse().map_err(|_| {
+                    CoreError::Internal(format!("Invalid segment ID: {}", segment_id))
                 })?;
 
-            let schema = partition.arrow_schema.clone();
-            let index_readers = segment.get_index_readers();
-            let doc_count = segment.doc_count();
-            let deleted = segment.get_deleted();
-            let row_data = segment.get_row_data();
-            drop(frozen_segments);
-            (schema, index_readers, doc_count, deleted, row_data)
-        };
+                let frozen_segments = partition.get_frozen_segments();
+                let segment = frozen_segments
+                    .iter()
+                    .find(|(id, _)| *id == segment_id_u64)
+                    .map(|(_, seg)| seg.clone())
+                    .ok_or_else(|| {
+                        CoreError::NotExisted(format!("Segment {} not found", segment_id))
+                    })?;
+
+                let schema = partition.arrow_schema.clone();
+                let index_readers = segment.get_index_readers();
+                let doc_count = segment.doc_count();
+                let deleted = segment.get_deleted();
+                let row_data = segment.get_row_data();
+                let segment_start = segment.start;
+                drop(frozen_segments);
+                (
+                    schema,
+                    index_readers,
+                    doc_count,
+                    deleted,
+                    row_data,
+                    segment_start,
+                )
+            };
 
         // 使用 SegmentScanner 直接扫描
-        let scanner =
-            SegmentScanner::new(schema.clone(), row_data, index_readers, doc_count, deleted);
+        let scanner = SegmentScanner::new(
+            schema.clone(),
+            row_data,
+            index_readers,
+            doc_count,
+            deleted,
+            false,
+            segment_start,
+        );
 
         // 🚀 构建投影列索引
         let projection = if is_select_star {

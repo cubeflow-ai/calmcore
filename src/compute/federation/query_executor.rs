@@ -11,7 +11,10 @@ use datafusion_federation::{default_session_state, FederatedTableProviderAdaptor
 
 use crate::catalog::Catalog;
 use crate::cluster::ClusterManager;
-use crate::compute::NormalizedSql;
+use crate::compute::{
+    udf::fulltext_udf::{register_fulltext_udfs, wrap_stream_with_scores},
+    NormalizedSql,
+};
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
@@ -143,6 +146,10 @@ impl FederatedQueryExecutor {
 
         let state = default_session_state();
         let ctx = SessionContext::new_with_state(state);
+        let fulltext_context = register_fulltext_udfs(&ctx);
+        if normalized.needs_score_column {
+            fulltext_context.clear_scores();
+        }
 
         for table_name in &table_names {
             let schema = table_schemas
@@ -156,8 +163,13 @@ impl FederatedQueryExecutor {
                 if local_partitions.is_empty() {
                     self.register_empty_table(&ctx, table_name, schema.clone())?;
                 } else {
-                    self.register_local_table(&ctx, table_name, local_partitions)
-                        .await?;
+                    self.register_local_table(
+                        &ctx,
+                        table_name,
+                        local_partitions,
+                        normalized.needs_score_column,
+                    )
+                    .await?;
                 }
                 continue;
             }
@@ -172,8 +184,13 @@ impl FederatedQueryExecutor {
                 if local_partitions.is_empty() {
                     self.register_empty_table(&ctx, table_name, schema.clone())?;
                 } else {
-                    self.register_local_table(&ctx, table_name, local_partitions)
-                        .await?;
+                    self.register_local_table(
+                        &ctx,
+                        table_name,
+                        local_partitions,
+                        normalized.needs_score_column,
+                    )
+                    .await?;
                 }
             } else if !nodes.contains_key(&my_node_id) {
                 let (target_node, partitions) = nodes
@@ -184,7 +201,8 @@ impl FederatedQueryExecutor {
                 self.register_federated_table(&ctx, table_name, &target_node, partitions)
                     .await?;
             } else {
-                self.register_merged_table(&ctx, table_name, nodes).await?;
+                self.register_merged_table(&ctx, table_name, nodes, normalized.needs_score_column)
+                    .await?;
             }
         }
 
@@ -198,6 +216,12 @@ impl FederatedQueryExecutor {
             .await
             .map_err(|e| CoreError::Internal(format!("Failed to execute query: {}", e)))?;
 
+        let stream = if normalized.needs_score_column {
+            wrap_stream_with_scores(stream, fulltext_context.clone())
+        } else {
+            stream
+        };
+
         log::debug!("[FederatedQueryExecutor] Query execution started");
         Ok(stream)
     }
@@ -208,6 +232,7 @@ impl FederatedQueryExecutor {
         ctx: &SessionContext,
         table_name: &str,
         partition_names: Vec<String>,
+        needs_internal_id: bool,
     ) -> CoreResult<()> {
         if partition_names.is_empty() {
             log::debug!(
@@ -226,7 +251,12 @@ impl FederatedQueryExecutor {
             .to_arrow_schema();
 
         if let Some(provider) = self
-            .create_local_provider(table_name, &partition_names, schema.clone())
+            .create_local_provider(
+                table_name,
+                &partition_names,
+                schema.clone(),
+                needs_internal_id,
+            )
             .await?
         {
             ctx.register_table(table_name, provider).map_err(|e| {
@@ -321,6 +351,7 @@ impl FederatedQueryExecutor {
         ctx: &SessionContext,
         table_name: &str,
         nodes: &HashMap<String, Vec<String>>,
+        needs_internal_id: bool,
     ) -> CoreResult<()> {
         let my_node_id = self.cluster_manager.node_id().to_string();
         let table_schema = self
@@ -352,7 +383,12 @@ impl FederatedQueryExecutor {
 
             if node_id == &my_node_id {
                 if let Some(provider) = self
-                    .create_local_provider(table_name, partitions, table_schema.clone())
+                    .create_local_provider(
+                        table_name,
+                        partitions,
+                        table_schema.clone(),
+                        needs_internal_id,
+                    )
                     .await?
                 {
                     ctx.register_table(&temp_table_name, provider)
@@ -443,6 +479,7 @@ impl FederatedQueryExecutor {
         table_name: &str,
         partition_names: &[String],
         schema: datafusion::arrow::datatypes::SchemaRef,
+        needs_internal_id: bool,
     ) -> CoreResult<Option<Arc<crate::compute::UnionTableProvider>>> {
         if partition_names.is_empty() {
             return Ok(None);
@@ -469,6 +506,7 @@ impl FederatedQueryExecutor {
             table_name.to_string(),
             self.engine.clone(),
             schema,
+            needs_internal_id,
         )?;
 
         Ok(Some(Arc::new(provider)))

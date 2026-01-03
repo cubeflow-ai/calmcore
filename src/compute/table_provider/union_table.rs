@@ -44,6 +44,9 @@ pub struct UnionTableProvider {
 
     /// Engine 引用
     engine: Arc<Engine>,
+
+    /// 是否需要输出 `_internal_id` 列
+    emit_internal_id: bool,
 }
 
 impl UnionTableProvider {
@@ -62,6 +65,7 @@ impl UnionTableProvider {
         table_name: String,
         engine: Arc<Engine>,
         schema: SchemaRef,
+        emit_internal_id: bool,
     ) -> CoreResult<Self> {
         let final_schema = if partitions.is_empty() {
             // 本地没有partition，使用传入的schema
@@ -89,6 +93,7 @@ impl UnionTableProvider {
             partitions,
             table_name,
             engine,
+            emit_internal_id,
         })
     }
 }
@@ -143,7 +148,8 @@ impl TableProvider for UnionTableProvider {
         let mut partition_plans: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
 
         for partition in &self.partitions {
-            let partition_provider = super::PartitionTableProvider::new(partition.clone());
+            let partition_provider =
+                super::PartitionTableProvider::new(partition.clone(), self.emit_internal_id);
 
             let plan = partition_provider
                 .scan(_state, projection, filters, limit)

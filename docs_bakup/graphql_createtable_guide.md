@@ -25,12 +25,12 @@ mutation {
   createTable(input: {
     name: "users"
     fields: [
-      { name: "user_id", field_type: U64 }
-      { name: "username", field_type: KEYWORD }
+      { name: "user_id", fieldType: U64 }
+      { name: "username", fieldType: KEYWORD }
     ]
   }) {
     name
-    partition_count
+    partitionCount
   }
 }
 ```
@@ -48,43 +48,43 @@ mutation {
   createTable(input: {
     name: "users"
     description: "用户信息表"
-    primary_key: "user_id"
-    partition_count: 4
+    primaryKey: "user_id"
+    partitionCount: 4
     
     fields: [
       {
         name: "user_id"
-        field_type: U64
+        fieldType: U64
         description: "用户唯一标识符"
         indexed: true
         nullable: false
       }
       {
         name: "username"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         description: "用户名(不区分大小写)"
         indexed: true
-        case_sensitive: false
+        caseSensitive: false
         nullable: false
       }
       {
         name: "email"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         description: "用户邮箱"
         indexed: true
         nullable: true
       }
       {
         name: "age"
-        field_type: I8
+        fieldType: I8
         description: "用户年龄(0-127)"
         indexed: true
-        default_value: "18"
+        defaultValue: "18"
         nullable: true
       }
       {
         name: "created_at"
-        field_type: TIMESTAMP
+        fieldType: TIMESTAMP
         description: "创建时间"
         indexed: true
         nullable: false
@@ -92,11 +92,11 @@ mutation {
     ]
   }) {
     name
-    partition_count
-    primary_key
+    partitionCount
+    primaryKey
     fields {
       name
-      field_type
+      fieldType
       indexed
     }
   }
@@ -113,25 +113,24 @@ mutation {
 |------|------|------|--------|------|
 | `name` | String | ✅ | - | 表名(小写字母+数字+下划线) |
 | `fields` | [FieldInput] | ✅ | - | 字段列表(至少 1 个) |
-| `primary_key` | String | ❌ | 第一个字段 | 主键字段名 |
+| `primaryKey` | String | ❌ | 第一个字段 | 主键字段名 |
 | `description` | String | ❌ | null | 表描述(强烈推荐) |
-| `partition_count` | u64 | ❌ | 1 | 简化分区配置(Hash 分区) |
-| `partition_strategy` | PartitionStrategyInput | ❌ | null | 高级分区配置 |
-| `store_source` | bool | ❌ | true | 是否存储原始 JSON |
-| `persist_policy` | PersistPolicyInput | ❌ | 默认 | 持久化策略 |
+| `partitionStrategy` | PartitionStrategyInput | ❌ | null | 高级分区配置 |
+| `storeSource` | bool | ❌ | true | 是否存储原始 JSON |
+| `persistPolicy` | PersistPolicyInput | ❌ | 默认 | 持久化策略 |
 
 ### FieldInput 字段
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `name` | String | ✅ | - | 字段名(小写字母+数字+下划线) |
-| `field_type` | FieldTypeEnum | ✅ | - | 字段类型(见下方) |
+| `fieldType` | FieldTypeEnum | ✅ | - | 字段类型(见下方) |
 | `indexed` | bool | ❌ | true | 是否索引(true=可查询) |
 | `description` | String | ❌ | null | 字段描述(推荐填写) |
 | `nullable` | bool | ❌ | true | 是否可为空(false=必填) |
-| `default_value` | String | ❌ | null | 默认值(JSON 字符串) |
-| `case_sensitive` | bool | ❌ | true | 是否区分大小写(仅 KEYWORD) |
-| `is_array` | bool | ❌ | false | 是否数组(仅 KEYWORD) |
+| `defaultValue` | String | ❌ | null | 默认值(JSON 字符串) |
+| `caseSensitive` | bool | ❌ | true | 是否区分大小写(仅 KEYWORD) |
+| `isArray` | bool | ❌ | false | 是否数组(仅 KEYWORD) |
 | `format` | String | ❌ | null | 时间格式(仅 TIMESTAMP) |
 
 ---
@@ -145,16 +144,18 @@ mutation {
   createTable(input: {
     name: "users"
     description: "用户信息表"
-    primary_key: "user_id"
-    partition_count: 4  # CPU 核心数或 2^n
+    primaryKey: "user_id"
+    partitionStrategy: {
+      pkHash: { numPartitions: 4 }
+    }
     
     fields: [
-      { name: "user_id", field_type: U64, nullable: false }
-      { name: "username", field_type: KEYWORD, case_sensitive: false, nullable: false }
-      { name: "email", field_type: KEYWORD, nullable: true }
-      { name: "age", field_type: I8, default_value: "18", nullable: true }
-      { name: "tags", field_type: KEYWORD, is_array: true, nullable: true }
-      { name: "created_at", field_type: TIMESTAMP, nullable: false }
+      { name: "user_id", fieldType: U64, nullable: false }
+      { name: "username", fieldType: KEYWORD, caseSensitive: false, nullable: false }
+      { name: "email", fieldType: KEYWORD, nullable: true }
+      { name: "age", fieldType: I8, defaultValue: "18", nullable: true }
+      { name: "tags", fieldType: KEYWORD, isArray: true, nullable: true }
+      { name: "created_at", fieldType: TIMESTAMP, nullable: false }
     ]
   }) { name }
 }
@@ -173,31 +174,24 @@ mutation {
   createTable(input: {
     name: "orders"
     description: "订单表"
-    primary_key: "order_id"
+    primaryKey: "order_id"
     
-    partition_strategy: {
-      strategy_type: RANGE
-      field: "order_time"
-      ranges: [
-        {
-          partition_id: 0
-          start: { int_value: 1704067200000 }  # 2024-01-01
-          end: { int_value: 1706745600000 }    # 2024-02-01
-        }
-        {
-          partition_id: 1
-          start: { int_value: 1706745600000 }  # 2024-02-01
-          end: { int_value: 1709251200000 }    # 2024-03-01
-        }
-      ]
+    partitionStrategy: {
+      range: {
+        field: "order_time"
+        start: 1704067200000        # 起始毫秒
+        step: 2592000000            # 30 天 (毫秒)
+        numPartitions: 2            # 创建 2 个范围分区
+        parallelism: 1              # 可选
+      }
     }
     
     fields: [
-      { name: "order_id", field_type: U64, nullable: false }
-      { name: "user_id", field_type: U64, indexed: true, nullable: false }
-      { name: "amount", field_type: F64, nullable: false }
-      { name: "status", field_type: KEYWORD, nullable: false }
-      { name: "order_time", field_type: TIMESTAMP, nullable: false }
+      { name: "order_id", fieldType: U64, nullable: false }
+      { name: "user_id", fieldType: U64, indexed: true, nullable: false }
+      { name: "amount", fieldType: F64, nullable: false }
+      { name: "status", fieldType: KEYWORD, nullable: false }
+      { name: "order_time", fieldType: TIMESTAMP, nullable: false }
     ]
   }) { name }
 }
@@ -215,20 +209,25 @@ mutation {
   createTable(input: {
     name: "logs"
     description: "应用日志表"
-    primary_key: "log_id"
-    partition_count: 8  # 高并发,更多分区
+    primaryKey: "log_id"
+    partitionStrategy: {
+      hash: {
+        field: "log_id"
+        numPartitions: 8
+      }
+    }  # 高并发,更多分区
     
-    persist_policy: {
-      max_docs_per_segment: 500000  # 50 万文档持久化
-      max_segment_age_secs: 600      # 10 分钟持久化
+    persistPolicy: {
+      maxDocsPerSegment: 500000  # 50 万文档持久化
+      maxSegmentAgeSecs: 600      # 10 分钟持久化
     }
     
     fields: [
-      { name: "log_id", field_type: U64, nullable: false }
-      { name: "level", field_type: KEYWORD, nullable: false }
-      { name: "message", field_type: TEXT, nullable: false }
-      { name: "service", field_type: KEYWORD, nullable: false }
-      { name: "timestamp", field_type: TIMESTAMP, nullable: false }
+      { name: "log_id", fieldType: U64, nullable: false }
+      { name: "level", fieldType: KEYWORD, nullable: false }
+      { name: "message", fieldType: TEXT, nullable: false }
+      { name: "service", fieldType: KEYWORD, nullable: false }
+      { name: "timestamp", fieldType: TIMESTAMP, nullable: false }
     ]
   }) { name }
 }
@@ -246,19 +245,19 @@ mutation {
   createTable(input: {
     name: "config"
     description: "系统配置表"
-    primary_key: "config_key"
-    partition_count: 1  # 小表无需分区
+    primaryKey: "config_key"
+    partitionStrategy: { none: {} }  # 小表无需分区
     
-    persist_policy: {
-      max_docs_per_segment: 10000
-      max_segment_age_secs: 300
+    persistPolicy: {
+      maxDocsPerSegment: 10000
+      maxSegmentAgeSecs: 300
     }
     
     fields: [
-      { name: "config_key", field_type: KEYWORD, nullable: false }
-      { name: "config_value", field_type: KEYWORD, nullable: false }
-      { name: "description", field_type: TEXT, nullable: true }
-      { name: "updated_at", field_type: TIMESTAMP, nullable: false }
+      { name: "config_key", fieldType: KEYWORD, nullable: false }
+      { name: "config_value", fieldType: KEYWORD, nullable: false }
+      { name: "description", fieldType: TEXT, nullable: true }
+      { name: "updated_at", fieldType: TIMESTAMP, nullable: false }
     ]
   }) { name }
 }
@@ -279,17 +278,13 @@ mutation {
 - 均匀分布的数据
 - 随机查询
 
-**配置方式 1(简化):**
+**推荐配置:**
 ```graphql
-partition_count: 4
-```
-
-**配置方式 2(完整):**
-```graphql
-partition_strategy: {
-  strategy_type: HASH
-  field: "user_id"
-  num_partitions: 4
+partitionStrategy: {
+  hash: {
+    field: "user_id"
+    numPartitions: 4
+  }
 }
 ```
 
@@ -308,13 +303,14 @@ partition_strategy: {
 
 **配置:**
 ```graphql
-partition_strategy: {
-  strategy_type: RANGE
-  field: "timestamp"
-  ranges: [
-    { partition_id: 0, start: {int_value: 0}, end: {int_value: 1704067200000} }
-    { partition_id: 1, start: {int_value: 1704067200000}, end: {int_value: 1735689600000} }
-  ]
+partitionStrategy: {
+  range: {
+    field: "timestamp"
+    start: 0
+    step: 86400000
+    numPartitions: 8
+    parallelism: 1
+  }
 }
 ```
 
@@ -332,10 +328,8 @@ partition_strategy: {
 
 **配置:**
 ```graphql
-partition_count: 1
-# 或
-partition_strategy: {
-  strategy_type: NONE
+partitionStrategy: {
+  none: {}
 }
 ```
 
@@ -374,9 +368,9 @@ partition_strategy: {
 ```graphql
 {
   name: "username"
-  field_type: KEYWORD
-  case_sensitive: false  # 不区分大小写
-  is_array: false        # 单个值
+  fieldType: KEYWORD
+  caseSensitive: false  # 不区分大小写
+  isArray: false        # 单个值
 }
 ```
 
@@ -384,7 +378,7 @@ partition_strategy: {
 ```graphql
 {
   name: "content"
-  field_type: TEXT
+  fieldType: TEXT
   indexed: true  # 支持全文检索
 }
 ```
@@ -422,7 +416,7 @@ UserOrders     # 驼峰
 ```graphql
 {
   name: "user_id"
-  field_type: U64
+  fieldType: U64
   nullable: false  # 必填
 }
 ```
@@ -441,8 +435,8 @@ UserOrders     # 驼峰
 ```graphql
 {
   name: "age"
-  field_type: I8
-  default_value: "18"  # JSON 字符串
+  fieldType: I8
+  defaultValue: "18"  # JSON 字符串
   nullable: true
 }
 ```
@@ -450,35 +444,39 @@ UserOrders     # 驼峰
 ### 5. 选择合适的主键
 
 ```graphql
-primary_key: "user_id"  # 唯一、不变、索引
+primaryKey: "user_id"  # 唯一、不变、索引
 ```
 
 ### 6. 合理配置分区
 
 ```graphql
 # 小表
-partition_count: 1
+partitionStrategy: { none: {} }
 
 # 中表
-partition_count: 4
+partitionStrategy: {
+  hash: { field: "user_id", numPartitions: 4 }
+}
 
 # 大表
-partition_count: 8
+partitionStrategy: {
+  hash: { field: "user_id", numPartitions: 8 }
+}
 ```
 
 ### 7. 调整持久化策略
 
 ```graphql
 # 实时查询(低延迟)
-persist_policy: {
-  max_docs_per_segment: 50000
-  max_segment_age_secs: 60
+persistPolicy: {
+  maxDocsPerSegment: 50000
+  maxSegmentAgeSecs: 60
 }
 
 # 高吞吐写入(高延迟)
-persist_policy: {
-  max_docs_per_segment: 500000
-  max_segment_age_secs: 600
+persistPolicy: {
+  maxDocsPerSegment: 500000
+  maxSegmentAgeSecs: 600
 }
 ```
 
@@ -515,7 +513,9 @@ Error: num_partitions must be > 0
 
 **解决:**
 ```graphql
-partition_count: 4  # 至少 1
+partitionStrategy: {
+  hash: { field: "user_id", numPartitions: 4 }
+}
 ```
 
 ### 错误 4: Range 分区重叠
@@ -527,23 +527,23 @@ Error: Range partitions overlap
 **解决:** 确保区间不重叠,且连续:
 ```graphql
 ranges: [
-  { partition_id: 0, start: {int_value: 0}, end: {int_value: 1000} }
-  { partition_id: 1, start: {int_value: 1000}, end: {int_value: 2000} }  # 连续
+  { partition_id: 0, start: {intValue: 0}, end: {intValue: 1000} }
+  { partition_id: 1, start: {intValue: 1000}, end: {intValue: 2000} }  # 连续
 ]
 ```
 
 ### 错误 5: 默认值格式错误
 
 ```
-Error: Invalid default_value JSON
+Error: Invalid defaultValue JSON
 ```
 
 **解决:** 使用 JSON 字符串格式:
 ```graphql
-default_value: "18"        # 整数
-default_value: "\"text\""  # 字符串(需要转义引号)
-default_value: "true"      # 布尔
-default_value: "1.23"      # 浮点
+defaultValue: "18"        # 整数
+defaultValue: "\"text\""  # 字符串(需要转义引号)
+defaultValue: "true"      # 布尔
+defaultValue: "1.23"      # 浮点
 ```
 
 ---

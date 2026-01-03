@@ -1,7 +1,10 @@
 use std::{any::Any, sync::Arc};
 
 use datafusion::{
-    arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
+    arrow::{
+        datatypes::{Field, SchemaRef},
+        record_batch::RecordBatch,
+    },
     catalog::Session,
     datasource::{TableProvider, TableType},
     error::Result,
@@ -13,7 +16,7 @@ use datafusion::{
 };
 use tokio::sync::mpsc;
 
-use crate::partition::Partition;
+use crate::{catalog::schema::DOC_ID_FIELD, partition::Partition};
 
 use super::segment_scanner::SegmentScanner;
 
@@ -26,6 +29,7 @@ use super::segment_scanner::SegmentScanner;
 pub struct PartitionTableProvider {
     partition: Arc<Partition>,
     schema: SchemaRef,
+    emit_internal_id: bool,
 }
 
 impl std::fmt::Debug for PartitionTableProvider {
@@ -38,9 +42,18 @@ impl std::fmt::Debug for PartitionTableProvider {
 }
 
 impl PartitionTableProvider {
-    pub fn new(partition: Arc<Partition>) -> Self {
-        let schema = partition.arrow_schema.clone();
-        Self { partition, schema }
+    pub fn new(partition: Arc<Partition>, emit_internal_id: bool) -> Self {
+        let base_schema = partition.arrow_schema.clone();
+        let schema = if emit_internal_id {
+            augment_schema_with_internal_id(base_schema)
+        } else {
+            base_schema
+        };
+        Self {
+            partition,
+            schema,
+            emit_internal_id,
+        }
     }
 
     pub fn scan_partition(
@@ -64,6 +77,7 @@ impl PartitionTableProvider {
             filters.to_vec(),
             projection.cloned(),
             limit,
+            self.emit_internal_id,
         ))
     }
 
@@ -93,8 +107,24 @@ impl PartitionTableProvider {
             index_readers,
             doc_count,
             deleted,
+            self.emit_internal_id,
+            segment.start,
         ))
     }
+}
+
+fn augment_schema_with_internal_id(schema: SchemaRef) -> SchemaRef {
+    if schema.field_with_name(DOC_ID_FIELD).is_ok() {
+        return schema;
+    }
+
+    let mut fields = schema.fields().to_vec();
+    fields.push(Arc::new(Field::new(
+        DOC_ID_FIELD,
+        datafusion::arrow::datatypes::DataType::UInt32,
+        false,
+    )));
+    Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
 }
 
 #[async_trait::async_trait]
@@ -142,10 +172,12 @@ impl TableProvider for PartitionTableProvider {
 /// - 外部通过 RecvStream 包装成 SendableRecordBatchStream
 pub struct PartitionExec {
     partition: Arc<Partition>,
+    full_schema: SchemaRef,
     schema: SchemaRef,
     filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
+    emit_internal_id: bool,
     properties: PlanProperties,
 }
 
@@ -156,6 +188,7 @@ impl PartitionExec {
         filters: Vec<Expr>,
         projection: Option<Vec<usize>>,
         limit: Option<usize>,
+        emit_internal_id: bool,
     ) -> Self {
         // Debug logging for schema and projection
         if let Some(ref proj) = projection {
@@ -179,6 +212,8 @@ impl PartitionExec {
             }
         }
 
+        let full_schema = schema.clone();
+
         // 计算投影后的 schema
         let output_schema = if let Some(ref proj) = projection {
             if proj.is_empty() {
@@ -200,10 +235,12 @@ impl PartitionExec {
 
         Self {
             partition,
+            full_schema,
             schema: output_schema,
             filters,
             projection,
             limit,
+            emit_internal_id,
             properties,
         }
     }
@@ -264,19 +301,27 @@ impl ExecutionPlan for PartitionExec {
         use tokio::sync::mpsc;
 
         let partition = self.partition.clone();
-        let full_schema = self.partition.arrow_schema.clone();
+        let full_schema = self.full_schema.clone();
         let output_schema = self.schema.clone();
         let filters = self.filters.clone();
         let projection = self.projection.clone();
         let _limit = self.limit;
+        let emit_internal_id = self.emit_internal_id;
 
         // 创建 bounded channel: 容量 10
         let (tx, rx) = mpsc::channel::<Result<RecordBatch>>(10);
 
         // 启动 tokio task 串行处理所有 Segments
         tokio::spawn(async move {
-            if let Err(e) =
-                process_partition_segments(partition, full_schema, filters, projection, tx).await
+            if let Err(e) = process_partition_segments(
+                partition,
+                full_schema,
+                filters,
+                projection,
+                emit_internal_id,
+                tx,
+            )
+            .await
             {
                 log::error!("❌ [PartitionExec] Error processing segments: {}", e);
             }
@@ -293,6 +338,7 @@ async fn process_partition_segments(
     schema: SchemaRef,
     filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
+    emit_internal_id: bool,
     tx: mpsc::Sender<Result<RecordBatch>>,
 ) -> Result<()> {
     // 1. 处理 current_segment
@@ -314,6 +360,8 @@ async fn process_partition_segments(
                     current_segment.get_index_readers(),
                     doc_count,
                     current_segment.get_deleted(),
+                    emit_internal_id,
+                    current_segment.start,
                 ))
             }
         };
@@ -346,6 +394,8 @@ async fn process_partition_segments(
                 segment.get_index_readers(),
                 doc_count,
                 segment.get_deleted(),
+                emit_internal_id,
+                segment.start,
             );
             scanners.push((*seg_id, segment.start, scanner));
         }

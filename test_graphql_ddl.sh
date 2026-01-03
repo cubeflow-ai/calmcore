@@ -15,7 +15,7 @@ echo "---------------------------------------------------"
 curl -s -X POST "$GRAPHQL_URL" \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "mutation { createTable(input: { name: \"test_ddl_demo\", description: \"DDL 功能测试表\", primary_key: \"id\", partition_count: 1, fields: [ { name: \"id\", field_type: U64, description: \"主键 ID\", nullable: false }, { name: \"name\", field_type: KEYWORD, description: \"名称\", default_value: \"\\\"unknown\\\"\", nullable: true }, { name: \"age\", field_type: I8, description: \"年龄\", default_value: \"0\", nullable: true }, { name: \"active\", field_type: BOOLEAN, description: \"是否激活\", default_value: \"true\", nullable: false } ] }) { name partition_count fields { name field_type indexed } } }"
+    "query": "mutation { createTable(input: { name: \"test_ddl_demo\", description: \"DDL 功能测试表\", primaryKey: \"id\", partitionStrategy: { none: {} }, fields: [ { name: \"id\", fieldType: U64, description: \"主键 ID\", nullable: false }, { name: \"name\", fieldType: KEYWORD, description: \"名称\", defaultValue: \"\\\"unknown\\\"\", nullable: true, caseSensitive: false }, { name: \"age\", fieldType: I8, description: \"年龄\", defaultValue: \"0\", nullable: true }, { name: \"active\", fieldType: BOOLEAN, description: \"是否激活\", defaultValue: \"true\", nullable: false } ] }) { name partitionCount fields { name fieldType indexed } } }"
   }' | jq '.'
 
 echo ""

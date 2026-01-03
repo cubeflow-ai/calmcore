@@ -12,9 +12,9 @@
 
 #### 字段级新增字段:
 - **`description`** (Option<String>): 字段描述/注释
-- **`default_value`** (Option<String>): 默认值(JSON 字符串格式)
+- **`defaultValue`** (Option<String>): 默认值(JSON 字符串格式)
 - **`nullable`** (bool): 是否可为空
-- **`is_array`** (bool): 是否为数组类型(仅 Keyword 字段)
+- **`isArray`** (bool): 是否为数组类型(仅 Keyword 字段)
 
 ### 2. 修改的文件
 
@@ -22,9 +22,9 @@
 |------|---------|------|
 | `src/schema/mod.rs` | 添加 `description` 字段 | 表级描述 |
 | `src/schema/field.rs` | 为所有 FieldOption 添加 3 个新字段 | 字段级元数据 |
-| `src/schema/field.rs` | 添加 `description()`, `default_value()`, `nullable()` 方法 | 访问器方法 |
+| `src/schema/field.rs` | 添加 `description()`, `defaultValue()`, `nullable()` 方法 | 访问器方法 |
 | `src/protocol/graphql/mod.rs` | 更新 `CreateTableInput` | 添加 description |
-| `src/protocol/graphql/mod.rs` | 更新 `FieldInput` | 添加 description, default_value, nullable, is_array |
+| `src/protocol/graphql/mod.rs` | 更新 `FieldInput` | 添加 description, defaultValue, nullable, isArray |
 | `src/protocol/graphql/mod.rs` | 更新 `create_table` mutation | 支持新字段 |
 | `src/protocol/mysql/mod.rs` | 更新 `handle_create_table` | 兼容新的 FieldOption 结构 |
 | `src/protocol/elasticsearch/mod.rs` | 更新 `create_index` | 兼容新的 FieldOption 结构 |
@@ -71,7 +71,7 @@
 
 ✅ **1. 代码清晰可读**
 - 所有新字段都有清晰的注释
-- 方法命名统一: `description()`, `default_value()`, `nullable()`
+- 方法命名统一: `description()`, `defaultValue()`, `nullable()`
 - 保持现有代码风格
 
 ✅ **2. 向后兼容**
@@ -107,10 +107,10 @@ $ cargo check
 mutation {
   createTable(input: {
     name: "users"
-    primary_key: "id"
+    primaryKey: "id"
     fields: [
-      { name: "id", field_type: U64, indexed: true }
-      { name: "name", field_type: KEYWORD, indexed: true }
+      { name: "id", fieldType: U64, indexed: true }
+      { name: "name", fieldType: KEYWORD, indexed: true }
     ]
   }) { name }
 }
@@ -123,28 +123,28 @@ mutation {
   createTable(input: {
     name: "users"
     description: "用户信息表"  # ✨ 新增
-    primary_key: "id"
+    primaryKey: "id"
     fields: [
       { 
         name: "id"
-        field_type: U64
+        fieldType: U64
         indexed: true
         description: "用户 ID"       # ✨ 新增
         nullable: false               # ✨ 新增
       }
       { 
         name: "name"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         indexed: true
         description: "用户名"         # ✨ 新增
-        default_value: "\"unknown\""  # ✨ 新增
+        defaultValue: "\"unknown\""  # ✨ 新增
         nullable: true                # ✨ 新增
       }
       {
         name: "tags"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         indexed: true
-        is_array: true                # ✨ 新增
+        isArray: true                # ✨ 新增
         description: "用户标签"
       }
     ]
@@ -161,50 +161,50 @@ mutation {
   createTable(input: {
     name: "products"
     description: "商品信息表,存储所有在售商品"
-    primary_key: "product_id"
-    partition_count: 4
+    primaryKey: "product_id"
+    partitionCount: 4
     
     fields: [
       { 
         name: "product_id"
-        field_type: U64
+        fieldType: U64
         indexed: true
         description: "商品唯一标识符"
         nullable: false
       }
       { 
         name: "name"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         indexed: true
         description: "商品名称"
         nullable: false
       }
       { 
         name: "price"
-        field_type: F64
+        fieldType: F64
         indexed: false
         description: "商品价格(元)"
-        default_value: "0.0"
+        defaultValue: "0.0"
         nullable: false
       }
       { 
         name: "stock"
-        field_type: I32
+        fieldType: I32
         indexed: true
         description: "库存数量"
-        default_value: "0"
+        defaultValue: "0"
         nullable: false
       }
       { 
         name: "tags"
-        field_type: KEYWORD
+        fieldType: KEYWORD
         indexed: true
-        is_array: true
+        isArray: true
         description: "商品标签,如 ['电子产品', '热销']"
         nullable: true
       }
     ]
-  }) { name partition_count }
+  }) { name partitionCount }
 }
 ```
 
@@ -268,14 +268,14 @@ query {
   table(name: "products") {
     name
     description            # "商品信息表,存储所有在售商品"
-    partition_count
+    partitionCount
     fields {
       name
-      field_type
+      fieldType
       indexed
       # 未来可以添加:
       # description
-      # default_value
+      # defaultValue
       # nullable
     }
   }
@@ -286,13 +286,13 @@ query {
 
 ### 短期 (1-2 周)
 1. ✅ **已完成**: GraphQL DDL 增强
-2. 🔄 **进行中**: 实现 default_value 的插入逻辑
+2. 🔄 **进行中**: 实现 defaultValue 的插入逻辑
 3. 🔄 **进行中**: 实现 nullable 的约束检查
 4. 📅 **待办**: 更新 SHOW CREATE TABLE 命令显示 description
 
 ### 中期 (1-2 月)
-1. 📅 ALTER TABLE 支持(修改 description、default_value)
-2. 📅 GraphQL query 返回字段元数据(description、default_value、nullable)
+1. 📅 ALTER TABLE 支持(修改 description、defaultValue)
+2. 📅 GraphQL query 返回字段元数据(description、defaultValue、nullable)
 3. 📅 生成数据库文档工具
 4. 📅 ER 图自动生成
 
@@ -315,9 +315,9 @@ query {
 
 - ✅ 所有字段类型支持完整的元数据
 - ✅ 表级和字段级 description 支持
-- ✅ default_value 为业务逻辑提供支持
+- ✅ defaultValue 为业务逻辑提供支持
 - ✅ nullable 增强数据完整性约束
-- ✅ is_array 支持多值属性
+- ✅ isArray 支持多值属性
 - ✅ 代码清晰、可读、易维护
 - ✅ 编译通过,无错误
 - ✅ 完整的文档和示例

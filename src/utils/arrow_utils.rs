@@ -6,8 +6,14 @@ use std::{
 use ahash::AHasher;
 use datafusion::arrow::{
     self as arrow,
-    array::{Array, ArrayRef, RecordBatch, StringArray, UInt32Array},
-    datatypes::Schema,
+    array::{
+        Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Float32Array,
+        Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, LargeBinaryArray,
+        LargeStringArray, RecordBatch, StringArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array,
+        UInt32Array, UInt64Array, UInt8Array,
+    },
+    datatypes::{Schema, TimeUnit},
 };
 
 use crate::{
@@ -15,22 +21,102 @@ use crate::{
     utils::error::{CoreError, CoreResult},
 };
 
+#[inline]
+fn hash_option_iter<T, I>(len: usize, iter: I) -> Vec<u32>
+where
+    T: Hash,
+    I: Iterator<Item = Option<T>>,
+{
+    let mut result = Vec::with_capacity(len);
+    for value in iter {
+        let mut hasher = AHasher::default();
+        value.hash(&mut hasher);
+        result.push(hasher.finish() as u32);
+    }
+    result
+}
+
 pub fn array_to_hash(arr: &ArrayRef) -> Vec<u32> {
     match arr.data_type() {
         arrow::datatypes::DataType::Utf8 => {
             let string_array = arrow_downcast!(arr, StringArray);
-            let mut result = Vec::with_capacity(string_array.len());
-            for v in string_array.iter() {
-                let mut hasher = AHasher::default();
-                v.hash(&mut hasher);
-                result.push(hasher.finish() as u32);
-            }
-            result
+            hash_option_iter(string_array.len(), string_array.iter())
+        }
+        arrow::datatypes::DataType::LargeUtf8 => {
+            let string_array = arrow_downcast!(arr, LargeStringArray);
+            hash_option_iter(string_array.len(), string_array.iter())
+        }
+        arrow::datatypes::DataType::Binary => {
+            let binary_array = arrow_downcast!(arr, BinaryArray);
+            hash_option_iter(binary_array.len(), binary_array.iter())
+        }
+        arrow::datatypes::DataType::LargeBinary => {
+            let binary_array = arrow_downcast!(arr, LargeBinaryArray);
+            hash_option_iter(binary_array.len(), binary_array.iter())
+        }
+        arrow::datatypes::DataType::Boolean => {
+            let bool_array = arrow_downcast!(arr, BooleanArray);
+            hash_option_iter(bool_array.len(), bool_array.iter())
         }
         arrow::datatypes::DataType::UInt32 => arrow_downcast!(arr, UInt32Array)
             .iter()
             .map(|v| v.unwrap_or(0))
             .collect(),
+        arrow::datatypes::DataType::UInt64 => {
+            let array = arrow_downcast!(arr, UInt64Array);
+            hash_option_iter(array.len(), array.iter())
+        }
+        arrow::datatypes::DataType::UInt16 => {
+            let array = arrow_downcast!(arr, UInt16Array);
+            hash_option_iter(array.len(), array.iter())
+        }
+        arrow::datatypes::DataType::UInt8 => {
+            let array = arrow_downcast!(arr, UInt8Array);
+            hash_option_iter(array.len(), array.iter())
+        }
+        arrow::datatypes::DataType::Int64 => {
+            let array = arrow_downcast!(arr, Int64Array);
+            hash_option_iter(array.len(), array.iter())
+        }
+        arrow::datatypes::DataType::Int32 => {
+            let array = arrow_downcast!(arr, Int32Array);
+            hash_option_iter(array.len(), array.iter())
+        }
+        arrow::datatypes::DataType::Int16 => {
+            let array = arrow_downcast!(arr, Int16Array);
+            hash_option_iter(array.len(), array.iter())
+        }
+        arrow::datatypes::DataType::Int8 => {
+            let array = arrow_downcast!(arr, Int8Array);
+            hash_option_iter(array.len(), array.iter())
+        }
+        arrow::datatypes::DataType::Date32 => {
+            let array = arrow_downcast!(arr, Date32Array);
+            hash_option_iter(array.len(), array.iter())
+        }
+        arrow::datatypes::DataType::Date64 => {
+            let array = arrow_downcast!(arr, Date64Array);
+            hash_option_iter(array.len(), array.iter())
+        }
+        arrow::datatypes::DataType::Timestamp(unit, _) => match unit {
+            TimeUnit::Second => {
+                let array = arrow_downcast!(arr, TimestampSecondArray);
+                hash_option_iter(array.len(), array.iter())
+            }
+            TimeUnit::Millisecond => {
+                let array = arrow_downcast!(arr, TimestampMillisecondArray);
+                hash_option_iter(array.len(), array.iter())
+            }
+            TimeUnit::Microsecond => {
+                let array = arrow_downcast!(arr, TimestampMicrosecondArray);
+                hash_option_iter(array.len(), array.iter())
+            }
+            TimeUnit::Nanosecond => {
+                let array = arrow_downcast!(arr, TimestampNanosecondArray);
+                hash_option_iter(array.len(), array.iter())
+            }
+        },
+
         _ => panic!("unsupported pk type"),
     }
 }

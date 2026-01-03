@@ -5,10 +5,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use crate::{
-    calm::{
-        new_data_client, CalmService, PartitionDetail, SegmentDetail,
-        TableDetail,
-    },
+    calm::{new_data_client, CalmService, PartitionDetail, SegmentDetail, TableDetail},
     catalog::{table_meta::PartitionStrategy, TableMeta},
     cluster::keys,
     schema::Schema,
@@ -114,7 +111,7 @@ pub trait CalmRpcService {
     /// 删除表（协调节点）
     async fn drop_table(table_name: String) -> CoreResult<()>;
 
-    /// 删除表（协调节点）
+    /// 删除分片（协调节点）
     async fn drop_partition(table_name: String, partition_name: String) -> CoreResult<()>;
 
     /// 获取表元数据
@@ -145,6 +142,55 @@ impl CalmService {
 
     fn am_i_coord_node(&self) -> bool {
         self.cluster_manager.am_i_coord_node()
+    }
+
+    fn is_local_node(&self, node_id: &str) -> bool {
+        node_id == keys::SINGLE_NODE_CLUSTER_ID || node_id == self.node_id()
+    }
+
+    pub(crate) async fn local_node_info(&self) -> CoreResult<crate::calm::NodeInfo> {
+        use sysinfo::System;
+
+        let node_id = self.node_id().to_string();
+
+        // 获取当前节点的所有 partition
+        let all_partitions = self.engine.list_all_spartitions().await;
+        let partition_count = all_partitions.len();
+
+        // 获取系统信息
+        let mut sys = System::new_all();
+        sys.refresh_all();
+
+        // CPU 使用率 (所有核心的平均值)
+        let cpu_usage = if sys.cpus().is_empty() {
+            0.0
+        } else {
+            sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32
+        };
+
+        // 内存信息
+        let total_memory = sys.total_memory();
+        let used_memory = sys.used_memory();
+        let memory_usage = if total_memory == 0 {
+            0.0
+        } else {
+            (used_memory as f64 / total_memory as f64 * 100.0) as f32
+        };
+
+        // 系统负载 (1分钟平均负载)
+        let load_avg = System::load_average();
+        let load_avg_1min = load_avg.one as f32;
+
+        Ok(crate::calm::NodeInfo {
+            node_id,
+            partition_count,
+            cpu_usage,
+            memory_usage,
+            total_memory,
+            used_memory,
+            load_avg_1min,
+            all_partitions,
+        })
     }
 
     /// 获取协调节点的 RPC 客户端（用于宏）
@@ -498,41 +544,7 @@ impl CalmRpcService for CalmService {
     /// 获取当前节点的状态信息
     #[ddl_macros::local_only]
     async fn node_info(self, _context: Context) -> CoreResult<crate::calm::NodeInfo> {
-        use sysinfo::System;
-
-        let node_id = self.node_id().to_string();
-
-        // 获取当前节点的所有 partition
-        let all_partitions = self.engine.list_all_spartitions().await;
-        let partition_count = all_partitions.len();
-
-        // 获取系统信息
-        let mut sys = System::new_all();
-        sys.refresh_all();
-
-        // CPU 使用率 (所有核心的平均值)
-        let cpu_usage =
-            sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
-
-        // 内存信息
-        let total_memory = sys.total_memory();
-        let used_memory = sys.used_memory();
-        let memory_usage = (used_memory as f64 / total_memory as f64 * 100.0) as f32;
-
-        // 系统负载 (1分钟平均负载) - 使用关联函数
-        let load_avg = System::load_average();
-        let load_avg_1min = load_avg.one as f32;
-
-        Ok(crate::calm::NodeInfo {
-            node_id,
-            partition_count,
-            cpu_usage,
-            memory_usage,
-            total_memory,
-            used_memory,
-            load_avg_1min,
-            all_partitions,
-        })
+        self.local_node_info().await
     }
 
     #[doc = " 加载 segment 文件到指定分区 , （自动路由到分区所在节点）"]
@@ -761,20 +773,35 @@ impl CalmRpcService for CalmService {
                 node_id
             );
 
-            // 在远程节点创建分区（数据节点会通过 gossip 发布）
-            let client = new_data_client(&node_id).await?;
-
-            client
-                .create_partition_local(
+            if self.is_local_node(&node_id) {
+                log::info!(
+                    "🔧 Partition '{}/{}' is assigned to local node, creating directly",
+                    table_name,
+                    partition_name
+                );
+                Self::create_partition_local(
+                    self.clone(),
                     tarpc::context::current(),
                     table_name.clone(),
                     partition_name.clone(),
                 )
-                .await
-                .flatten_rpc(&format!(
-                    "Create partition '{}/{}' on node '{}'",
-                    table_name, partition_name, node_id
-                ))?;
+                .await?;
+            } else {
+                // 在远程节点创建分区（数据节点会通过 gossip 发布）
+                let client = new_data_client(&node_id).await?;
+
+                client
+                    .create_partition_local(
+                        tarpc::context::current(),
+                        table_name.clone(),
+                        partition_name.clone(),
+                    )
+                    .await
+                    .flatten_rpc(&format!(
+                        "Create partition '{}/{}' on node '{}'",
+                        table_name, partition_name, node_id
+                    ))?;
+            }
 
             log::info!(
                 "✅ Partition '{}/{}' created on node '{}'",
@@ -973,7 +1000,9 @@ impl CalmRpcService for CalmService {
         let partition_list = table_info
             .partitions
             .read()
-            .await.values().map(|p| (p.partition_name.clone(), p.owner.clone()))
+            .await
+            .values()
+            .map(|p| (p.partition_name.clone(), p.owner.clone()))
             .collect_vec();
 
         let mut partitions = HashMap::new();
@@ -1093,12 +1122,20 @@ impl CalmRpcService for CalmService {
 
         // 查询每个节点的状态
         for node_id in alive_nodes {
+            if node_id == keys::SINGLE_NODE_CLUSTER_ID {
+                let mut local_info = self.local_node_info().await?;
+                local_info.node_id = node_id;
+                node_infos.push(local_info);
+                continue;
+            }
+
+            let node_id_for_log = node_id.clone();
             let result = async {
-                let client = new_data_client(&node_id).await?;
+                let client = new_data_client(&node_id_for_log).await?;
                 client
                     .node_info(tarpc::context::current())
                     .await
-                    .flatten_rpc(&format!("Get node info from '{}'", node_id))
+                    .flatten_rpc(&format!("Get node info from '{}'", node_id_for_log))
             }
             .await;
 
@@ -1107,7 +1144,7 @@ impl CalmRpcService for CalmService {
                 Err(e) => {
                     log::warn!(
                         "⚠️  Failed to get info from node '{}': {}, skipping",
-                        node_id,
+                        node_id_for_log,
                         e
                     );
                 }
@@ -1172,19 +1209,33 @@ impl CalmRpcService for CalmService {
         );
 
         // 3. 通知选定的节点创建分区
-        let client = new_data_client(&target_node).await?;
-
-        let partition_meta = client
-            .create_partition_local(
+        let partition_meta = if self.is_local_node(&target_node) {
+            log::info!(
+                "🔧 [CoordNode] Target node '{}' is local, creating partition directly",
+                target_node
+            );
+            Self::create_partition_local(
+                self.clone(),
                 tarpc::context::current(),
                 table_name.clone(),
                 partition_name.clone(),
             )
-            .await
-            .flatten_rpc(&format!(
-                "[CoordNode] Create partition '{}/{}' on node '{}'",
-                table_name, partition_name, target_node
-            ))?;
+            .await?
+        } else {
+            let client = new_data_client(&target_node).await?;
+
+            client
+                .create_partition_local(
+                    tarpc::context::current(),
+                    table_name.clone(),
+                    partition_name.clone(),
+                )
+                .await
+                .flatten_rpc(&format!(
+                    "[CoordNode] Create partition '{}/{}' on node '{}'",
+                    table_name, partition_name, target_node
+                ))?
+        };
 
         log::info!(
             "✅ [CoordNode] Partition '{}/{}' created successfully on node '{}'",
@@ -1227,6 +1278,18 @@ impl CalmRpcService for CalmService {
                 );
 
                 // 超时后，主动查询数据节点验证分区是否真实存在
+                if self.is_local_node(&target_node) {
+                    log::info!(
+                        "📥 [CoordNode] Partition '{}/{}' exists locally, updating catalog",
+                        table_name,
+                        partition_name
+                    );
+                    self.catalog
+                        .update_partition_meta(&table_name, partition_meta.clone())
+                        .await?;
+                    return Ok(partition_meta);
+                }
+
                 let client = new_data_client(&target_node).await?;
                 match client
                     .get_partition_detail(

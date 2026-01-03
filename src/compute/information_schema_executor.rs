@@ -13,6 +13,7 @@ use futures::stream;
 use std::sync::Arc;
 
 use crate::catalog::Catalog;
+use crate::compute::udf::fulltext_udf::register_fulltext_udfs;
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
@@ -93,6 +94,7 @@ impl InformationSchemaExecutor {
         // 创建独立的 SessionContext
         let config = SessionConfig::new().with_information_schema(true);
         let ctx = SessionContext::new_with_config(config);
+        let _fulltext_context = register_fulltext_udfs(&ctx);
 
         // 注册虚拟表
         self.register_tables(&ctx, &db_name).await?;
