@@ -7,6 +7,10 @@ FROM rust:1.91.1-bookworm AS builder
 
 WORKDIR /app
 
+# 使用阿里云镜像源
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
+
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     pkg-config \
@@ -34,6 +38,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
+
+# 使用阿里云镜像源
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \

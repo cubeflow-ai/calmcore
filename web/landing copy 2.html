@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CalmCore - 现代分布式 HTAP 数据库</title>
+    <style>
+        :root {
+            --primary-color: #6366f1;
+            --secondary-color: #a855f7;
+            --accent-color: #22d3ee;
+            --bg-dark: #020617;
+            --bg-card: rgba(15, 23, 42, 0.8);
+            --text-main: #f8fafc;
+            --text-muted: #cbd5e1;
+            --white: #ffffff;
+            --border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            margin: 0;
+            background-color: var(--bg-dark);
+            color: var(--text-muted);
+            line-height: 1.7;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        /* Header */
+        .header {
+            background: rgba(2, 6, 23, 0.8);
+            backdrop-filter: blur(10px);
+            color: var(--text-main);
+            padding: 20px 0;
+            position: fixed;
+            width: 100%;
+            top: 0;
+            z-index: 1000;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .header .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 28px;
+            font-weight: 700;
+            background: linear-gradient(to right, #818cf8, #22d3ee);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .nav a {
+            color: var(--text-main);
+            text-decoration: none;
+            margin-left: 25px;
+            font-weight: 500;
+            transition: opacity 0.3s;
+        }
+
+        .nav a:hover {
+            opacity: 0.8;
+        }
+
+        /* Hero Section */
+        .hero {
+            background: radial-gradient(circle at 50% -20%, rgba(99, 102, 241, 0.3), transparent),
+                radial-gradient(circle at 0% 100%, rgba(168, 85, 247, 0.1), transparent);
+            color: var(--text-main);
+            text-align: center;
+            padding: 200px 20px 140px;
+            position: relative;
+        }
+
+        .hero h1 {
+            font-size: 64px;
+            font-weight: 800;
+            margin-bottom: 20px;
+            letter-spacing: -1px;
+            background: linear-gradient(to bottom, #ffffff, #94a3b8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 22px;
+            max-width: 700px;
+            margin: 0 auto 30px auto;
+            color: var(--text-muted);
+        }
+
+        .hero .cta-button {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            padding: 15px 35px;
+            border-radius: 12px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 16px;
+            transition: transform 0.3s, box-shadow 0.3s;
+            display: inline-block;
+            box-shadow: 0 10px 25px -5px rgba(99, 102, 241, 0.4);
+        }
+
+        .hero .cta-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Section Styling */
+        .section {
+            padding: 100px 0;
+        }
+
+        .section:nth-child(even) {
+            background-color: rgba(15, 23, 42, 0.5);
+        }
+
+        .section-title {
+            text-align: center;
+            font-size: 36px;
+            color: var(--text-main);
+            margin-bottom: 50px;
+        }
+
+        /* About Section */
+        .about-content {
+            text-align: center;
+            max-width: 800px;
+            margin: 0 auto;
+            font-size: 18px;
+        }
+
+        /* Features Section */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 40px;
+        }
+
+        .feature-item {
+            background: var(--bg-card);
+            backdrop-filter: blur(10px);
+            padding: 30px;
+            border-radius: 20px;
+            border: 1px solid var(--border-color);
+            text-align: left;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .feature-item:hover {
+            transform: translateY(-5px);
+            border-color: var(--accent-color);
+            box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.5);
+        }
+
+        .feature-icon {
+            font-size: 32px;
+            margin-bottom: 15px;
+            display: block;
+        }
+
+        .feature-item h3 {
+            font-size: 20px;
+            color: var(--text-main);
+            margin-bottom: 15px;
+        }
+
+        .feature-tag {
+            display: inline-block;
+            padding: 2px 8px;
+            background: rgba(99, 102, 241, 0.2);
+            border: 1px solid var(--primary-color);
+            border-radius: 4px;
+            font-size: 12px;
+            color: var(--accent-color);
+            margin-bottom: 10px;
+        }
+
+        /* Architecture Visuals */
+        .arch-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+        }
+
+        .arch-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 40px;
+        }
+
+        .arch-card h4 {
+            text-align: center;
+            margin-top: 0;
+            color: var(--accent-color);
+            font-size: 20px;
+            margin-bottom: 30px;
+        }
+
+        .arch-visual {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .arch-node {
+            width: 100%;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            text-align: center;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-main);
+        }
+
+        .arch-node.highlight {
+            background: linear-gradient(90deg, rgba(99, 102, 241, 0.4), rgba(168, 85, 247, 0.3));
+            border-color: var(--accent-color);
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.2);
+        }
+
+        .arch-node.storage {
+            background: linear-gradient(135deg, rgba(34, 211, 238, 0.1), rgba(99, 102, 241, 0.1));
+            border: 1px dashed var(--accent-color);
+            padding: 25px;
+        }
+
+        .gossip-container {
+            position: relative;
+            width: 100%;
+            padding: 10px 0;
+            min-height: 120px;
+            /* 强制最小高度，防止 Canvas 塌陷 */
+        }
+
+        #gossipCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+
+        .arch-arrow {
+            color: #64748b;
+            font-size: 20px;
+        }
+
+        .cluster-group {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            width: 100%;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Tech Stack Section */
+        .tech-stack-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 20px;
+            text-align: center;
+        }
+
+        .tech-item {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            transition: all 0.3s;
+        }
+
+        .tech-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+            transform: scale(1.05);
+        }
+
+        .tech-item h4 {
+            margin: 0;
+            font-size: 18px;
+            color: var(--text-main);
+        }
+
+        /* Footer */
+        .footer {
+            background-color: #020617;
+            color: #64748b;
+            text-align: center;
+            padding: 40px 20px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .footer p {
+            margin: 0;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header class="header">
+        <div class="container">
+            <div class="logo">CalmCore</div>
+            <nav class="nav">
+                <a href="#about">关于</a>
+                <a href="#features">特性</a>
+                <a href="#architecture">架构</a>
+                <a href="#tech-stack">技术栈</a>
+                <a href="/index.html">数据浏览器</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="hero">
+            <h1>CalmCore</h1>
+            <p>基于 <strong>CubeFS</strong> 共享存储的云原生分布式 HTAP 数据库</p>
+            <a href="#features" class="cta-button">了解更多</a>
+
+            <!-- Hero Visual Animation -->
+            <div class="hero-visual"
+                style="margin-top: 60px; max-width: 900px; margin-left: auto; margin-right: auto; position: relative;">
+                <div class="gossip-container">
+                    <canvas id="gossipCanvas"></canvas>
+                    <div class="cluster-group" style="grid-template-columns: repeat(4, 1fr);">
+                        <div class="arch-node highlight">计算节点 01</div>
+                        <div class="arch-node highlight">计算节点 02</div>
+                        <div class="arch-node highlight">计算节点 03</div>
+                        <div class="arch-node highlight">计算节点 04</div>
+                    </div>
+                    <div
+                        style="text-align: center; font-size: 12px; color: var(--accent-color); margin-top: 10px; position: relative; z-index: 1;">
+                        ⚡ P2P Gossip Network (节点选举与数据分发)
+                    </div>
+                </div>
+                <div class="arch-arrow" style="margin: 10px 0;">↓ (Shared Storage Access)</div>
+                <div class="arch-node storage">
+                    <strong>CubeFS 共享存储层</strong><br>
+                    <span style="font-size: 12px; opacity: 0.8;">(Data Shards / Metadata / Parquet)</span>
+                </div>
+            </div>
+        </section>
+
+        <section id="about" class="section">
+            <div class="container">
+                <h2 class="section-title">什么是 CalmCore?</h2>
+                <div class="about-content">
+                    <p>
+                        CalmCore 是一个为极致扩展性而生的数据库系统。通过将计算与存储完全解耦，CalmCore 运行在 <strong>CubeFS</strong> 分布式文件系统之上，
+                        利用 <strong>Gossip 协议</strong> 实现集群节点的自愈与发现。无论是海量数据的实时分析，还是高并发的事务处理，CalmCore 都能通过横向扩展计算节点轻松应对。
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <section id="features" class="section">
+            <div class="container">
+                <h2 class="section-title">核心特性</h2>
+                <div class="features-grid">
+                    <div class="feature-item">
+                        <div class="feature-icon">🚀</div>
+                        <h3>高性能</h3>
+                        <p>基于 Rust 构建，提供内存安全和极致的执行效率，支持高吞吐量写入和低延迟查询。</p>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-tag">Cloud Native</div>
+                        <div class="feature-icon">🌐</div>
+                        <h3>存算分离架构</h3>
+                        <p>底层基于 <strong>CubeFS</strong> 共享存储，计算节点完全无状态，支持秒级横向扩缩容。</p>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-tag">Decentralized</div>
+                        <div class="feature-icon">🔌</div>
+                        <h3>Gossip 集群协调</h3>
+                        <p>采用去中心化的 Gossip 协议进行成员发现与状态同步，消除单点故障，确保集群高可用。</p>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-icon">📊</div>
+                        <h3>HTAP 能力</h3>
+                        <p>同时支持快速的事务处理和复杂的分析查询，满足混合工作负载的需求。</p>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-icon">🛡️</div>
+                        <h3>高级分区</h3>
+                        <p>支持按哈希、范围和时间等多种策略进行数据分区，优化查询性能和数据管理。</p>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-icon">🔍</div>
+                        <h3>强大的全文搜索</h3>
+                        <p>内置高效的倒排索引，提供丰富的全文搜索功能，如下推、模糊查询和短语匹配。</p>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-icon">🧬</div>
+                        <h3>向量检索 (Vector Search)</h3>
+                        <p>支持高维向量索引与相似度检索，助力 AI 与大模型应用，实现毫秒级语义搜索。</p>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-icon">🕸️</div>
+                        <h3>图搜索 (Graph Search)</h3>
+                        <p>内置图数据处理能力，支持复杂的关联查询与路径分析，探索数据间的深层联系。</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="architecture" class="section">
+            <div class="container">
+                <h2 class="section-title">灵活的部署架构</h2>
+                <div class="arch-grid">
+                    <!-- Single Node -->
+                    <div class="arch-card">
+                        <h4>单机模式 (Single Node)</h4>
+                        <div class="arch-visual">
+                            <div class="arch-node">客户端 (GraphQL / SQL)</div>
+                            <div class="arch-arrow">↓</div>
+                            <div class="arch-node highlight"
+                                style="height: 120px; display: flex; align-items: center; justify-content: center;">
+                                CalmCore All-in-One<br>(计算 + 存储 + 元数据)
+                            </div>
+                            <div class="arch-arrow">↓</div>
+                            <div class="arch-node">本地磁盘 (Parquet / Index)</div>
+                        </div>
+                    </div>
+
+                    <!-- Distributed -->
+                    <div class="arch-card">
+                        <h4>分布式模式 (Distributed)</h4>
+                        <div class="arch-visual">
+                            <div class="arch-node">负载均衡 (Load Balancer)</div>
+                            <div class="arch-arrow">↓</div>
+                            <div class="cluster-group">
+                                <div class="arch-node highlight">计算/读节点 A</div>
+                                <div class="arch-node highlight">计算/读节点 B</div>
+                                <div class="arch-node highlight">计算/读节点 N...</div>
+                            </div>
+                            <div class="arch-arrow">↓ (Shared Access)</div>
+                            <div class="arch-node storage">
+                                <strong>CubeFS 共享存储层</strong><br>
+                                <span style="font-size: 12px; opacity: 0.8;">(Data Shards / Metadata / Parquet)</span>
+                            </div>
+                            <div class="arch-arrow">↓</div>
+                            <div class="arch-node">多副本物理存储</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="tech-stack" class="section">
+            <div class="container">
+                <h2 class="section-title">技术栈</h2>
+                <div class="tech-stack-grid">
+                    <div class="tech-item">
+                        <h4>Rust</h4>
+                    </div>
+                    <div class="tech-item">
+                        <h4>DataFusion</h4>
+                    </div>
+                    <div class="tech-item">
+                        <h4>Arrow</h4>
+                    </div>
+                    <div class="tech-item">
+                        <h4>Parquet</h4>
+                    </div>
+                    <div class="tech-item">
+                        <h4>Tonic (gRPC)</h4>
+                    </div>
+                    <div class="tech-item">
+                        <h4>Chitchat (Gossip)</h4>
+                    </div>
+                    <div class="tech-item">
+                        <h4>Tokio</h4>
+                    </div>
+                    <div class="tech-item">
+                        <h4>Poem</h4>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <p>&copy; 2025 CalmCore Project. All rights reserved.</p>
+    </footer>
+
+    <script>
+        // Gossip Network Canvas Animation
+        const canvas = document.getElementById('gossipCanvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.querySelector('.gossip-container');
+        const archNodes = container.querySelectorAll('.arch-node');
+
+        let width, height;
+        let particles = [];
+        const maxParticles = 12; // 基础粒子数
+
+        function resizeCanvas() {
+            if (!container) return;
+            width = container.offsetWidth;
+            height = container.offsetHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        class Particle {
+            constructor(isStatic = false, x, y) {
+                this.isStatic = isStatic;
+                this.x = x || Math.random() * width;
+                this.y = y || Math.random() * height;
+                this.vx = (Math.random() - 0.5) * 0.4;
+                this.vy = (Math.random() - 0.5) * 0.4;
+                this.radius = isStatic ? 4 : 2; // 增大粒子尺寸，确保可见
+                this.alpha = 0;
+                this.targetAlpha = isStatic ? 0.8 : 0.4 + Math.random() * 0.4; // 增加不透明度
+            }
+
+            update() {
+                if (!this.isStatic) {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    // 边界检查
+                    if (this.x < 0 || this.x > width) this.vx *= -1;
+                    if (this.y < 0 || this.y > height) this.vy *= -1;
+                }
+                // 模拟动态加入的淡入效果
+                if (this.alpha < this.targetAlpha) this.alpha += 0.005;
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(34, 211, 238, ${this.alpha})`;
+                ctx.fill();
+            }
+        }
+
+        function getStaticPositions() {
+            const containerRect = container.getBoundingClientRect();
+            return Array.from(archNodes).map(node => {
+                const rect = node.getBoundingClientRect();
+                return {
+                    x: rect.left - containerRect.left + rect.width / 2,
+                    y: rect.top - containerRect.top + rect.height / 2
+                };
+            });
+        }
+
+        function createParticles() {
+            particles = [];
+            // 为每个 UI 节点创建一个锚点粒子
+            const positions = getStaticPositions();
+            positions.forEach(pos => particles.push(new Particle(true, pos.x, pos.y)));
+            // 创建一些随机漂浮粒子
+            for (let i = 0; i < maxParticles; i++) particles.push(new Particle());
+        }
+
+        function drawLines() {
+            for (let i = 0; i < particles.length; i++) {
+                for (let j = i + 1; j < particles.length; j++) {
+                    const p1 = particles[i];
+                    const p2 = particles[j];
+                    const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+                    const threshold = width / 2.2;
+
+                    if (dist < threshold) {
+                        ctx.beginPath();
+                        ctx.moveTo(p1.x, p1.y);
+                        ctx.lineTo(p2.x, p2.y);
+                        const alpha = (1 - dist / threshold) * Math.min(p1.alpha, p2.alpha) * 0.8; // 增加线条亮度
+                        ctx.strokeStyle = `rgba(99, 102, 241, ${alpha})`;
+                        ctx.lineWidth = 0.8;
+                        ctx.stroke();
+                    }
+                }
+            }
+        }
+
+        function animate() {
+            ctx.clearRect(0, 0, width, height);
+            // 模拟节点动态加入：偶尔增加一个临时粒子
+            if (particles.length < maxParticles + 6 && Math.random() > 0.98) {
+                particles.push(new Particle());
+            }
+            particles.forEach(p => { p.update(); p.draw(); });
+            drawLines();
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', () => { resizeCanvas(); createParticles(); });
+
+        // 确保页面完全加载后再启动动画，防止布局未完成导致高度为0
+        window.addEventListener('load', () => {
+            resizeCanvas();
+            createParticles();
+            animate();
+            console.log('Gossip animation started'); // 打开控制台可确认脚本是否运行
+        });
+    </script>
+</body>
+
+</html>
