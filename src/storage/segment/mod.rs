@@ -8,8 +8,8 @@ use crate::{
     partition::WriteInfo,
     schema::{field::FieldOption, Schema},
     segment::field_store::{
-        BooleanField, F32Field, F64Field, I16Field, I32Field, I64Field, I8Field, KeywordField,
-        PkWriter, U16Field, U32Field, U64Field, U8Field,
+        BooleanField, F32Field, F64Field, FullTextField, I16Field, I32Field, I64Field, I8Field,
+        KeywordField, PkWriter, U16Field, U32Field, U64Field, U8Field,
     },
     utils::error::{CoreError, CoreResult},
 };
@@ -109,6 +109,10 @@ impl Segment {
                 }
                 FieldOption::Timestamp { .. } => {
                     let field = field_store::TimestampField::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::Fulltext { .. } => {
+                    let field = FullTextField::new(field_opt);
                     fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
             }
@@ -230,6 +234,10 @@ impl Segment {
                 }
                 FieldOption::Timestamp { .. } => {
                     let field = field_store::TimestampField::new(field_opt);
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
+                FieldOption::Fulltext { .. } => {
+                    let field = FullTextField::new(field_opt);
                     fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
             }
@@ -812,6 +820,10 @@ impl Segment {
                     let field = field_store::TimestampField::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
+                FieldOption::Fulltext { .. } => {
+                    let field = FullTextField::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
             }
         }
 
@@ -992,6 +1004,9 @@ impl Segment {
                     field.as_any().downcast_ref::<field_store::TimestampField>()
                 {
                     let disk_field = timestamp.persist(&field_path)?;
+                    new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
+                } else if let Some(fulltext) = field.as_any().downcast_ref::<FullTextField>() {
+                    let disk_field = fulltext.persist(&field_path)?;
                     new_fields.push(Box::new(disk_field) as Box<dyn IndexWriter>);
                 } else {
                     log::error!(
@@ -1283,6 +1298,10 @@ impl Segment {
                     let field = field_store::TimestampField::from_disk(field_opt, &field_path)?;
                     fields.push(Box::new(field) as Box<dyn IndexWriter>);
                 }
+                FieldOption::Fulltext { .. } => {
+                    let field = FullTextField::from_disk(field_opt, &field_path)?;
+                    fields.push(Box::new(field) as Box<dyn IndexWriter>);
+                }
             }
         }
         log::info!("  Fields loaded in {:?}", start.elapsed());
@@ -1530,6 +1549,8 @@ impl Segment {
                 .downcast_ref::<field_store::TimestampField>()
             {
                 readers.insert(name, Box::new(timestamp.clone()) as Box<dyn IndexReader>);
+            } else if let Some(fulltext) = field_writer.as_any().downcast_ref::<FullTextField>() {
+                // readers.insert(name, Box::new(fulltext.clone()) as Box<dyn IndexReader>);
             }
         }
 

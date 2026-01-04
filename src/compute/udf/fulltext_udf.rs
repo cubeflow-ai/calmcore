@@ -20,7 +20,8 @@ use datafusion::arrow::compute::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::logical_expr::{create_udf, ScalarUDF, Volatility};
+use datafusion::logical_expr::expr_fn::SimpleScalarUDF;
+use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
 use datafusion::physical_plan::{ColumnarValue, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::prelude::SessionContext;
 use datafusion::scalar::ScalarValue;
@@ -76,19 +77,26 @@ impl FullTextContext {
     }
 }
 
-/// Create text() UDF for text queries
+/// Create text() UDF for text queries - supports 2 or 3 arguments
+/// - text(field, query) uses default boost=1.0
+/// - text(field, query, boost)
 pub fn create_text_udf(context: Arc<FullTextContext>) -> ScalarUDF {
     let fun = Arc::new(
         move |args: &[ColumnarValue]| -> DataFusionResult<ColumnarValue> {
-            if args.len() != 3 {
+            // Accept 2 or 3 arguments
+            if args.len() < 2 || args.len() > 3 {
                 return Err(DataFusionError::Execution(
-                    "text(field, query, boost) expects exactly 3 arguments".into(),
+                    "text() expects 2 or 3 arguments: text(field, query[, boost])".into(),
                 ));
             }
 
             let field_values = string_column_from_arg(&args[0], "field")?;
             let query_text = scalar_string_from_arg(&args[1], "query")?;
-            let boost = scalar_f32_from_arg(&args[2], 1.0, "boost")?;
+            let boost = if args.len() >= 3 {
+                scalar_f32_from_arg(&args[2], 1.0, "boost")?
+            } else {
+                1.0f32
+            };
             let query_terms = tokenize(&query_text);
 
             let mut builder = BooleanBuilder::with_capacity(field_values.len());
@@ -108,29 +116,48 @@ pub fn create_text_udf(context: Arc<FullTextContext>) -> ScalarUDF {
         },
     );
 
-    create_udf(
-        "text",
-        vec![DataType::Utf8, DataType::Utf8, DataType::Float32],
-        DataType::Boolean,
+    let signature = Signature::one_of(
+        vec![
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8, DataType::Float64]),
+        ],
         Volatility::Immutable,
+    );
+
+    ScalarUDF::from(SimpleScalarUDF::new_with_signature(
+        "text",
+        signature,
+        DataType::Boolean,
         fun,
-    )
+    ))
 }
 
-/// Create phrase() UDF for phrase queries
+/// Create phrase() UDF for phrase queries - supports 2, 3, or 4 arguments
+/// - phrase(field, query) uses default boost=1.0, slop=0
+/// - phrase(field, query, boost) uses default slop=0
+/// - phrase(field, query, boost, slop)
 pub fn create_phrase_udf(context: Arc<FullTextContext>) -> ScalarUDF {
     let fun = Arc::new(
         move |args: &[ColumnarValue]| -> DataFusionResult<ColumnarValue> {
-            if args.len() != 4 {
+            // Accept 2, 3, or 4 arguments
+            if args.len() < 2 || args.len() > 4 {
                 return Err(DataFusionError::Execution(
-                    "phrase(field, query, boost, slop) expects exactly 4 arguments".into(),
+                    "phrase() expects 2-4 arguments: phrase(field, query[, boost[, slop]])".into(),
                 ));
             }
 
             let field_values = string_column_from_arg(&args[0], "field")?;
             let phrase_text = scalar_string_from_arg(&args[1], "query")?;
-            let boost = scalar_f32_from_arg(&args[2], 1.0, "boost")?;
-            let _slop = scalar_i32_from_arg(&args[3], 0, "slop")?;
+            let boost = if args.len() >= 3 {
+                scalar_f32_from_arg(&args[2], 1.0, "boost")?
+            } else {
+                1.0f32
+            };
+            let _slop = if args.len() >= 4 {
+                scalar_i32_from_arg(&args[3], 0, "slop")?
+            } else {
+                0i32
+            };
 
             let mut builder = BooleanBuilder::with_capacity(field_values.len());
             let needle = phrase_text.to_lowercase();
@@ -151,18 +178,26 @@ pub fn create_phrase_udf(context: Arc<FullTextContext>) -> ScalarUDF {
         },
     );
 
-    create_udf(
-        "phrase",
+    let signature = Signature::one_of(
         vec![
-            DataType::Utf8,
-            DataType::Utf8,
-            DataType::Float32,
-            DataType::Int32,
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8, DataType::Float64]),
+            TypeSignature::Exact(vec![
+                DataType::Utf8,
+                DataType::Utf8,
+                DataType::Float64,
+                DataType::Int64,
+            ]),
         ],
-        DataType::Boolean,
         Volatility::Immutable,
+    );
+
+    ScalarUDF::from(SimpleScalarUDF::new_with_signature(
+        "phrase",
+        signature,
+        DataType::Boolean,
         fun,
-    )
+    ))
 }
 
 /// Register both text() and phrase() UDFs on the provided context and return the shared FT context

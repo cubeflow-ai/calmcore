@@ -31,6 +31,7 @@ pub mod row_data;
 pub mod text;
 
 pub use row_data::RowDataStore;
+pub use text::{FieldStats, FullTextField, PostingEntry, TermStats};
 
 // 导出泛型类型别名
 pub use generic_index::GenericIndexedField;

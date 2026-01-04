@@ -464,6 +464,7 @@ impl Partition {
                     crate::schema::field::FieldType::F64 => DataType::Float64,
                     crate::schema::field::FieldType::Boolean => DataType::Boolean,
                     crate::schema::field::FieldType::Timestamp => DataType::Int64,
+                    crate::schema::field::FieldType::Fulltext => DataType::UInt16,
                 };
 
                 // Compare types - they must match exactly

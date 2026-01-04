@@ -9,15 +9,18 @@
 //! 4. Sequential access pattern for efficient iteration
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use byteorder::ReadBytesExt;
 use datafusion::arrow::array::{Array, ArrayRef, RecordBatch, StringArray};
-use mem_btree::BTree;
 use roaring::RoaringBitmap;
 
 use crate::schema::field::{FieldOption, FieldType};
 use crate::segment::field_store::IndexWriter;
 use crate::utils::error::{CoreError, CoreResult};
+
+use super::mmap_index::{self, MmapIndex};
 
 use super::simple_analyzer::SimpleAnalyzer;
 
@@ -91,14 +94,11 @@ impl FieldStats {
 pub struct FullTextField {
     field: FieldOption,
 
-    /// Unified posting list index: term -> (stats, postings)
-    /// This is the ONLY index structure, containing all data:
-    /// - Term statistics (doc_freq, total_freq) for BM25
-    /// - Posting entries: doc_ids (sorted) + term_freq + positions
-    ///
-    /// Memory: BTree<String, (TermStats, Vec<PostingEntry>)>
-    /// Disk: TreeReader with PostingListSerializer (future)
-    posting_lists: Arc<RwLock<BTree<String, (TermStats, Vec<PostingEntry>)>>>,
+    /// Memory-mapped index for persisted data
+    index: Option<MmapIndex>,
+
+    /// In-memory posting lists for newly added data (not yet persisted)
+    temp_posting_lists: Arc<RwLock<HashMap<String, (TermStats, Vec<PostingEntry>)>>>,
 
     /// Field-level statistics
     /// For BM25 scoring (avgdl, etc.)
@@ -113,49 +113,36 @@ impl FullTextField {
     pub fn new(field: &FieldOption) -> Self {
         Self {
             field: field.clone(),
-            posting_lists: Arc::new(RwLock::new(BTree::new(128))),
+            index: None,
+            temp_posting_lists: Arc::new(RwLock::new(HashMap::new())),
             field_stats: Arc::new(RwLock::new(FieldStats::default())),
             analyzer: Arc::new(SimpleAnalyzer::new()),
         }
     }
 
-    /// Load from disk (Parquet format)
+    /// Load from disk (mmap format)
     pub fn from_disk(field: &FieldOption, field_path: &str) -> CoreResult<Self> {
-        use super::posting_list_parquet::read_posting_lists;
+        use super::mmap_index::FIELD_STATS_FILE;
         use std::fs;
 
-        let posting_path = format!("{}/posting_lists.parquet", field_path);
-        let stats_path = format!("{}/field_stats.json", field_path);
-
-        // Load posting lists from Parquet
-        let posting_lists = if std::path::Path::new(&posting_path).exists() {
-            log::debug!(
-                "📂 [FullTextField] Loading posting lists from {}",
-                posting_path
-            );
-
-            let rows = read_posting_lists(&posting_path)?;
-            log::debug!("✅ [FullTextField] Loaded {} terms", rows.len());
-
-            // Convert rows to BTree
-            let mut btree = BTree::new(128);
-            for row in rows {
-                let (stats, postings) = row.to_stats_and_postings();
-                btree.put(row.term, (stats, postings));
-            }
-
-            Arc::new(RwLock::new(btree))
+        let index = if Path::new(field_path).join(mmap_index::TERMS_FILE).exists() {
+            log::debug!("📂 [FullTextField] Loading mmap index from {}", field_path);
+            Some(MmapIndex::open(field_path)?)
         } else {
             log::debug!(
-                "⚠️  [FullTextField] No posting lists found at {}, creating empty index",
-                posting_path
+                "⚠️  [FullTextField] No mmap index found at {}, creating empty field",
+                field_path
             );
-            Arc::new(RwLock::new(BTree::new(128)))
+            None
         };
 
         // Load field statistics
-        let field_stats = if std::path::Path::new(&stats_path).exists() {
-            log::debug!("📂 [FullTextField] Loading field stats from {}", stats_path);
+        let stats_path = Path::new(field_path).join(FIELD_STATS_FILE);
+        let field_stats = if stats_path.exists() {
+            log::debug!(
+                "📂 [FullTextField] Loading field stats from {:?}",
+                stats_path
+            );
             let stats_json = fs::read_to_string(&stats_path)
                 .map_err(|e| CoreError::Internal(format!("Failed to read field stats: {}", e)))?;
             let stats: FieldStats = serde_json::from_str(&stats_json).map_err(|e| {
@@ -164,7 +151,7 @@ impl FullTextField {
             Arc::new(RwLock::new(stats))
         } else {
             log::warn!(
-                "⚠️  [FullTextField] No field stats found at {}, using defaults",
+                "⚠️  [FullTextField] No field stats found at {:?}, using defaults",
                 stats_path
             );
             Arc::new(RwLock::new(FieldStats::default()))
@@ -172,62 +159,70 @@ impl FullTextField {
 
         Ok(Self {
             field: field.clone(),
-            posting_lists,
+            index,
+            temp_posting_lists: Arc::new(RwLock::new(HashMap::new())),
             field_stats,
             analyzer: Arc::new(SimpleAnalyzer::new()),
         })
     }
 
-    /// Persist to disk using Parquet format
+    /// Persist to disk using mmap format
     pub fn persist(&self, path: &str) -> CoreResult<Self> {
-        use super::posting_list_parquet::{write_posting_lists, PostingListRow};
+        use super::mmap_index::{MmapIndexWriter, FIELD_STATS_FILE};
         use std::fs;
 
         // Create directory if not exists
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| CoreError::Internal(format!("Failed to create directory: {}", e)))?;
-        }
+        fs::create_dir_all(path)
+            .map_err(|e| CoreError::Internal(format!("Failed to create directory: {}", e)))?;
 
-        // Collect all posting lists into rows
-        let posting_lists = self.posting_lists.read().unwrap();
-        let mut rows: Vec<PostingListRow> = Vec::new();
+        let temp_postings = self.temp_posting_lists.read().unwrap();
+        if !temp_postings.is_empty() {
+            let mut writer = MmapIndexWriter::new(path)?;
 
-        for item in posting_lists.iter() {
-            let (term, (stats, postings), _ttl) = item.as_ref();
-            rows.push(PostingListRow::new(term.clone(), stats, postings));
-        }
+            // Sort terms for deterministic order
+            let mut sorted_terms: Vec<_> = temp_postings.keys().collect();
+            sorted_terms.sort();
 
-        // Sort by term (required for binary search)
-        rows.sort_by(|a, b| a.term.cmp(&b.term));
+            for term in sorted_terms {
+                let (stats, postings) = &temp_postings[term];
 
-        if !rows.is_empty() {
-            // Write posting lists to Parquet
-            let posting_path = format!("{}/posting_lists.parquet", path);
-            write_posting_lists(&rows, &posting_path)?;
+                // Serialize postings to binary format
+                let mut postings_data = Vec::new();
+                for entry in postings {
+                    postings_data.extend_from_slice(&entry.doc_id.to_be_bytes());
+                    postings_data.extend_from_slice(&entry.term_freq.to_be_bytes());
+                    postings_data.extend_from_slice(&(entry.positions.len() as u32).to_be_bytes());
+                    for pos in &entry.positions {
+                        postings_data.extend_from_slice(&pos.to_be_bytes());
+                    }
+                }
+                // TODO: Add compression for postings_data
+
+                writer.write_term(term, &postings_data)?;
+            }
+
+            writer.finish()?;
             log::debug!(
-                "✅ [FullTextField] Persisted {} terms to {}",
-                rows.len(),
-                posting_path
+                "✅ [FullTextField] Persisted {} terms to mmap index at {}",
+                temp_postings.len(),
+                path
             );
         }
 
-        // Write field statistics (use serde_json for simplicity)
+        // Write field statistics
         let field_stats = self.field_stats.read().unwrap();
-        let stats_path = format!("{}/field_stats.json", path);
+        let stats_path = Path::new(path).join(FIELD_STATS_FILE);
         let stats_json = serde_json::to_string(&*field_stats)
             .map_err(|e| CoreError::Internal(format!("Failed to serialize field stats: {}", e)))?;
         fs::write(&stats_path, stats_json)
             .map_err(|e| CoreError::Internal(format!("Failed to write field stats: {}", e)))?;
+        log::debug!(
+            "✅ [FullTextField] Persisted field stats to {:?}",
+            stats_path
+        );
 
-        log::debug!("✅ [FullTextField] Persisted field stats to {}", stats_path);
-
-        Ok(Self {
-            field: self.field.clone(),
-            posting_lists: self.posting_lists.clone(),
-            field_stats: self.field_stats.clone(),
-            analyzer: self.analyzer.clone(),
-        })
+        // Reload from the persisted path to use the mmap index
+        Self::from_disk(&self.field, path)
     }
 
     // ============ Query Interface (Full-text specific, not from IndexReader) ============
@@ -240,16 +235,68 @@ impl FullTextField {
         if tokens.is_empty() {
             return None;
         }
-
         let analyzed_term = &tokens[0].name;
-        let posting_lists = self.posting_lists.read().unwrap();
 
-        // Extract doc_ids from posting list (stats, postings)
-        if let Some((_stats, postings)) = posting_lists.get(analyzed_term) {
-            let bitmap = RoaringBitmap::from_sorted_iter(postings.iter().map(|p| p.doc_id)).ok()?;
-            Some(bitmap)
-        } else {
+        let mut final_bitmap = RoaringBitmap::new();
+
+        // 1. Query the mmap index (persisted data)
+        if let Some(index) = &self.index {
+            // Binary search for the term in the term dictionary
+            let mut low = 0;
+            let mut high = index.num_terms();
+            let mut mmap_bitmap = RoaringBitmap::new();
+
+            while low < high {
+                let mid = low + (high - low) / 2;
+                if let Some(entry) = index.get_term_entry(mid) {
+                    let current_term = index.get_term(entry);
+                    match current_term.cmp(analyzed_term) {
+                        std::cmp::Ordering::Less => low = mid + 1,
+                        std::cmp::Ordering::Greater => high = mid,
+                        std::cmp::Ordering::Equal => {
+                            let postings_data = index.get_postings_data(entry);
+                            // Deserialize postings
+                            let mut cursor = std::io::Cursor::new(postings_data);
+                            while let Ok(doc_id) = byteorder::ReadBytesExt::read_u32::<
+                                byteorder::BigEndian,
+                            >(&mut cursor)
+                            {
+                                mmap_bitmap.insert(doc_id);
+                                // Skip term_freq and positions for now
+                                let _ = byteorder::ReadBytesExt::read_u32::<byteorder::BigEndian>(
+                                    &mut cursor,
+                                ); // term_freq
+                                if let Ok(pos_len) = byteorder::ReadBytesExt::read_u32::<
+                                    byteorder::BigEndian,
+                                >(&mut cursor)
+                                {
+                                    cursor.set_position(cursor.position() + (pos_len * 4) as u64);
+                                } else {
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            final_bitmap |= &mmap_bitmap;
+        }
+
+        // 2. Query the in-memory temp posting lists (new data)
+        let temp_postings = self.temp_posting_lists.read().unwrap();
+        if let Some((_stats, postings)) = temp_postings.get(analyzed_term) {
+            let temp_bitmap =
+                RoaringBitmap::from_sorted_iter(postings.iter().map(|p| p.doc_id)).ok()?;
+            final_bitmap |= &temp_bitmap;
+        }
+
+        if final_bitmap.is_empty() {
             None
+        } else {
+            Some(final_bitmap)
         }
     }
 
@@ -268,7 +315,16 @@ impl FullTextField {
     /// index.phrase_query(&["rust", "programming"], 2);
     /// ```
     pub fn phrase_query(&self, terms: &[&str], slop: u32) -> Option<RoaringBitmap> {
+        // TODO: Add support for phrase queries on the mmap index.
+        // This will require deserializing positions from the mmap data.
+
         if terms.is_empty() {
+            return None;
+        }
+
+        // For now, only query in-memory temp data
+        let temp_postings = self.temp_posting_lists.read().unwrap();
+        if temp_postings.is_empty() {
             return None;
         }
 
@@ -282,15 +338,13 @@ impl FullTextField {
             analyzed_terms.push(tokens[0].name.clone());
         }
 
-        let posting_lists = self.posting_lists.read().unwrap();
-
-        // Get posting lists for all terms
+        // Get posting lists for all terms from in-memory data
         let mut term_postings = Vec::new();
         for term in &analyzed_terms {
-            if let Some((_stats, postings)) = posting_lists.get(term) {
+            if let Some((_stats, postings)) = temp_postings.get(term) {
                 term_postings.push(postings);
             } else {
-                return None; // Term not found
+                return None; // Term not found in-memory
             }
         }
 
@@ -443,13 +497,14 @@ impl FullTextField {
 
     /// Get term statistics (for BM25 scoring)
     pub fn get_term_stats(&self, term: &str) -> Option<TermStats> {
+        // TODO: Get term stats from mmap index as well.
         let tokens = self.analyzer.analyzer_query(term);
         if tokens.is_empty() {
             return None;
         }
         let analyzed_term = &tokens[0].name;
-        let posting_lists = self.posting_lists.read().unwrap();
-        posting_lists
+        let temp_postings = self.temp_posting_lists.read().unwrap();
+        temp_postings
             .get(analyzed_term)
             .map(|(stats, _postings)| stats.clone())
     }
@@ -462,14 +517,15 @@ impl FullTextField {
     /// Get posting list for a term (doc_ids + positions)
     /// Returns unified posting entries from the posting list
     pub fn get_postings(&self, term: &str) -> Option<Vec<PostingEntry>> {
+        // TODO: Get postings from mmap index as well.
         let tokens = self.analyzer.analyzer_query(term);
         if tokens.is_empty() {
             return None;
         }
         let analyzed_term = &tokens[0].name;
 
-        let posting_lists = self.posting_lists.read().unwrap();
-        posting_lists
+        let temp_postings = self.temp_posting_lists.read().unwrap();
+        temp_postings
             .get(analyzed_term)
             .map(|(_stats, postings)| postings.clone())
     }
@@ -488,8 +544,7 @@ impl IndexWriter for FullTextField {
             .downcast_ref::<StringArray>()
             .ok_or_else(|| CoreError::Internal("Expected StringArray".to_string()))?;
 
-        // Build unified posting lists
-        // term -> [(doc_id, [positions])]
+        // Build unified posting lists for the new data
         let mut term_postings: HashMap<String, HashMap<u32, Vec<u32>>> = HashMap::new();
         let mut term_frequencies: HashMap<String, u64> = HashMap::new();
 
@@ -508,71 +563,45 @@ impl IndexWriter for FullTextField {
             // Update field statistics
             self.field_stats.write().unwrap().add_document(field_length);
 
-            // Build unified posting list structure
             for token in tokens {
                 let term = token.name.clone();
                 let position = token.index as u32;
 
-                // Add to posting list
-                let doc_positions = term_postings
+                term_postings
                     .entry(term.clone())
                     .or_default()
                     .entry(doc_id)
-                    .or_default();
+                    .or_default()
+                    .push(position);
 
-                doc_positions.push(position);
-
-                // Update term frequencies
-                *term_frequencies.entry(term).or_insert(0) += 1;
+                *term_frequencies.entry(term).or_default() += 1;
             }
         }
 
-        // Convert to (TermStats, Vec<PostingEntry>) and update posting_lists
-        let mut posting_lists = self.posting_lists.write().unwrap();
+        // Merge into the main in-memory temp_posting_lists
+        let mut temp_posting_lists = self.temp_posting_lists.write().unwrap();
 
         for (term, doc_positions_map) in term_postings {
-            // Create PostingEntry for each document
-            let mut new_entries: Vec<PostingEntry> = doc_positions_map
+            let (stats, postings) = temp_posting_lists.entry(term.clone()).or_insert_with(|| {
+                let total_freq = *term_frequencies.get(&term).unwrap_or(&0);
+                (
+                    TermStats {
+                        doc_freq: 0,
+                        total_freq,
+                    },
+                    Vec::new(),
+                )
+            });
+
+            let new_postings: Vec<PostingEntry> = doc_positions_map
                 .into_iter()
                 .map(|(doc_id, positions)| PostingEntry::new(doc_id, positions))
                 .collect();
 
-            // Sort by doc_id (required for efficient iteration)
-            new_entries.sort_by_key(|e| e.doc_id);
-
-            // Merge with existing posting list if present
-            let merged_postings = if let Some((old_stats, existing)) = posting_lists.get(&term) {
-                let mut merged = existing.clone();
-                merged.extend(new_entries);
-                merged.sort_by_key(|e| e.doc_id);
-                // Deduplicate by doc_id (merge positions if same doc)
-                merged.dedup_by(|a, b| {
-                    if a.doc_id == b.doc_id {
-                        b.positions.extend(&a.positions);
-                        b.positions.sort_unstable();
-                        b.term_freq = b.positions.len() as u32;
-                        true
-                    } else {
-                        false
-                    }
-                });
-
-                // Update term statistics
-                let new_stats = TermStats {
-                    doc_freq: merged.len() as u32,
-                    total_freq: old_stats.total_freq + *term_frequencies.get(&term).unwrap_or(&0),
-                };
-                (new_stats, merged)
-            } else {
-                // New term, create fresh statistics
-                let stats = TermStats {
-                    doc_freq: new_entries.len() as u32,
-                    total_freq: *term_frequencies.get(&term).unwrap_or(&0),
-                };
-                (stats, new_entries)
-            };
-
-            posting_lists.put(term.clone(), merged_postings);
+            stats.doc_freq += new_postings.len() as u32;
+            postings.extend(new_postings);
+            postings.sort_by_key(|e| e.doc_id);
+            postings.dedup_by_key(|e| e.doc_id);
         }
 
         Ok(())

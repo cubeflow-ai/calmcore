@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CalmCore - 现代分布式 HTAP 数据库</title>
+    <title>CalmCore - 现代分布式 HTAP 数据库 (Modern Distributed HTAP Database)</title>
     <style>
         :root {
             --primary-color: #6366f1;
@@ -320,11 +320,11 @@
         <div class="container">
             <div class="logo">CalmCore</div>
             <nav class="nav">
-                <a href="#about">关于</a>
-                <a href="#features">特性</a>
-                <a href="#architecture">架构</a>
-                <a href="#tech-stack">技术栈</a>
-                <a href="/index.html">数据浏览器</a>
+                <a href="#about">关于 (About)</a>
+                <a href="#features">特性 (Features)</a>
+                <a href="#architecture">架构 (Architecture)</a>
+                <a href="#tech-stack">技术栈 (Tech Stack)</a>
+                <a href="/index.html">数据浏览器 (Data Explorer)</a>
             </nav>
         </div>
     </header>
@@ -332,8 +332,8 @@
     <main>
         <section class="hero">
             <h1>CalmCore</h1>
-            <p>基于 <strong>CubeFS</strong> 共享存储的云原生分布式 HTAP 数据库</p>
-            <a href="#features" class="cta-button">了解更多</a>
+            <p>基于 <strong>CubeFS</strong> 共享存储的云原生分布式 HTAP 数据库 (A cloud-native, distributed HTAP database based on <strong>CubeFS</strong> shared storage)</p>
+            <a href="#features" class="cta-button">了解更多 (Learn More)</a>
 
             <!-- Hero Visual Animation -->
             <div class="hero-visual"
@@ -341,19 +341,19 @@
                 <div class="gossip-container">
                     <canvas id="gossipCanvas"></canvas>
                     <div class="cluster-group" style="grid-template-columns: repeat(4, 1fr);">
-                        <div class="arch-node highlight">计算节点 01</div>
-                        <div class="arch-node highlight">计算节点 02</div>
-                        <div class="arch-node highlight">计算节点 03</div>
-                        <div class="arch-node highlight">计算节点 04</div>
+                        <div class="arch-node highlight">计算节点 01 (Compute Node 01)</div>
+                        <div class="arch-node highlight">计算节点 02 (Compute Node 02)</div>
+                        <div class="arch-node highlight">计算节点 03 (Compute Node 03)</div>
+                        <div class="arch-node highlight">计算节点 04 (Compute Node 04)</div>
                     </div>
                     <div
                         style="text-align: center; font-size: 12px; color: var(--accent-color); margin-top: 10px; position: relative; z-index: 1;">
-                        ⚡ P2P Gossip Network (节点选举与数据分发)
+                        ⚡ P2P Gossip Network (节点选举与数据分发 / Node Election & Data Distribution)
                     </div>
                 </div>
                 <div class="arch-arrow" style="margin: 10px 0;">↓ (Shared Storage Access)</div>
                 <div class="arch-node storage">
-                    <strong>CubeFS 共享存储层</strong><br>
+                    <strong>CubeFS 共享存储层 (Shared Storage Layer)</strong><br>
                     <span style="font-size: 12px; opacity: 0.8;">(Data Shards / Metadata / Parquet)</span>
                 </div>
             </div>
@@ -361,11 +361,13 @@
 
         <section id="about" class="section">
             <div class="container">
-                <h2 class="section-title">什么是 CalmCore?</h2>
+                <h2 class="section-title">什么是 CalmCore? (What is CalmCore?)</h2>
                 <div class="about-content">
                     <p>
                         CalmCore 是一个为极致扩展性而生的数据库系统。通过将计算与存储完全解耦，CalmCore 运行在 <strong>CubeFS</strong> 分布式文件系统之上，
                         利用 <strong>Gossip 协议</strong> 实现集群节点的自愈与发现。无论是海量数据的实时分析，还是高并发的事务处理，CalmCore 都能通过横向扩展计算节点轻松应对。
+                        <br><br>
+                        (CalmCore is a database system born for extreme scalability. By completely decoupling computing and storage, CalmCore runs on top of the <strong>CubeFS</strong> distributed file system and uses the <strong>Gossip protocol</strong> to achieve self-healing and discovery of cluster nodes. Whether it's real-time analysis of massive data or high-concurrency transaction processing, CalmCore can easily handle it by horizontally scaling compute nodes.)
                     </p>
                 </div>
             </div>
@@ -373,49 +375,49 @@
 
         <section id="features" class="section">
             <div class="container">
-                <h2 class="section-title">核心特性</h2>
+                <h2 class="section-title">核心特性 (Core Features)</h2>
                 <div class="features-grid">
                     <div class="feature-item">
                         <div class="feature-icon">🚀</div>
-                        <h3>高性能</h3>
-                        <p>基于 Rust 构建，提供内存安全和极致的执行效率，支持高吞吐量写入和低延迟查询。</p>
+                        <h3>高性能 (High Performance)</h3>
+                        <p>基于 Rust 构建，提供内存安全和极致的执行效率，支持高吞吐量写入和低延迟查询。(Built on Rust, it provides memory safety and ultimate execution efficiency, supporting high-throughput writes and low-latency queries.)</p>
                     </div>
                     <div class="feature-item">
                         <div class="feature-tag">Cloud Native</div>
                         <div class="feature-icon">🌐</div>
-                        <h3>存算分离架构</h3>
-                        <p>底层基于 <strong>CubeFS</strong> 共享存储，计算节点完全无状态，支持秒级横向扩缩容。</p>
+                        <h3>存算分离架构 (Separation of compute and storage)</h3>
+                        <p>底层基于 <strong>CubeFS</strong> 共享存储，计算节点完全无状态，支持秒级横向扩缩容。(Based on <strong>CubeFS</strong> shared storage, compute nodes are completely stateless and support horizontal scaling in seconds.)</p>
                     </div>
                     <div class="feature-item">
                         <div class="feature-tag">Decentralized</div>
                         <div class="feature-icon">🔌</div>
-                        <h3>Gossip 集群协调</h3>
-                        <p>采用去中心化的 Gossip 协议进行成员发现与状态同步，消除单点故障，确保集群高可用。</p>
+                        <h3>Gossip 集群协调 (Gossip Cluster Coordination)</h3>
+                        <p>采用去中心化的 Gossip 协议进行成员发现与状态同步，消除单点故障，确保集群高可用。(It adopts a decentralized Gossip protocol for member discovery and status synchronization, eliminating single points of failure and ensuring high cluster availability.)</p>
                     </div>
                     <div class="feature-item">
                         <div class="feature-icon">📊</div>
-                        <h3>HTAP 能力</h3>
-                        <p>同时支持快速的事务处理和复杂的分析查询，满足混合工作负载的需求。</p>
+                        <h3>HTAP 能力 (HTAP Capability)</h3>
+                        <p>同时支持快速的事务处理和复杂的分析查询，满足混合工作负载的需求。(Simultaneously supports fast transaction processing and complex analytical queries to meet the needs of mixed workloads.)</p>
                     </div>
                     <div class="feature-item">
                         <div class="feature-icon">🛡️</div>
-                        <h3>高级分区</h3>
-                        <p>支持按哈希、范围和时间等多种策略进行数据分区，优化查询性能和数据管理。</p>
+                        <h3>高级分区 (Advanced Partitioning)</h3>
+                        <p>支持按哈希、范围和时间等多种策略进行数据分区，优化查询性能和数据管理。(Supports data partitioning by multiple strategies such as hash, range, and time to optimize query performance and data management.)</p>
                     </div>
                     <div class="feature-item">
                         <div class="feature-icon">🔍</div>
-                        <h3>强大的全文搜索</h3>
-                        <p>内置高效的倒排索引，提供丰富的全文搜索功能，如下推、模糊查询和短语匹配。</p>
+                        <h3>强大的全文搜索 (Powerful Full-text Search)</h3>
+                        <p>内置高效的倒排索引，提供丰富的全文搜索功能，如下推、模糊查询和短语匹配。(Built-in efficient inverted index provides rich full-text search functions, such as pushdown, fuzzy query, and phrase matching.)</p>
                     </div>
                     <div class="feature-item">
                         <div class="feature-icon">🧬</div>
                         <h3>向量检索 (Vector Search)</h3>
-                        <p>支持高维向量索引与相似度检索，助力 AI 与大模型应用，实现毫秒级语义搜索。</p>
+                        <p>支持高维向量索引与相似度检索，助力 AI 与大模型应用，实现毫秒级语义搜索。(Supports high-dimensional vector indexing and similarity retrieval, empowering AI and large model applications to achieve millisecond-level semantic search.)</p>
                     </div>
                     <div class="feature-item">
                         <div class="feature-icon">🕸️</div>
                         <h3>图搜索 (Graph Search)</h3>
-                        <p>内置图数据处理能力，支持复杂的关联查询与路径分析，探索数据间的深层联系。</p>
+                        <p>内置图数据处理能力，支持复杂的关联查询与路径分析，探索数据间的深层联系。(Built-in graph data processing capabilities, supporting complex association queries and path analysis to explore the deep connections between data.)</p>
                     </div>
                 </div>
             </div>
@@ -423,41 +425,41 @@
 
         <section id="architecture" class="section">
             <div class="container">
-                <h2 class="section-title">灵活的部署架构</h2>
+                <h2 class="section-title">灵活的部署架构 (Flexible Deployment Architecture)</h2>
                 <div class="arch-grid">
                     <!-- Single Node -->
                     <div class="arch-card">
-                        <h4>单机模式 (Single Node)</h4>
+                        <h4>单机模式 (Single Node Mode)</h4>
                         <div class="arch-visual">
-                            <div class="arch-node">客户端 (GraphQL / SQL)</div>
+                            <div class="arch-node">客户端 (Client) (GraphQL / SQL)</div>
                             <div class="arch-arrow">↓</div>
                             <div class="arch-node highlight"
                                 style="height: 120px; display: flex; align-items: center; justify-content: center;">
-                                CalmCore All-in-One<br>(计算 + 存储 + 元数据)
+                                CalmCore All-in-One<br>(计算 (Compute) + 存储 (Storage) + 元数据 (Metadata))
                             </div>
                             <div class="arch-arrow">↓</div>
-                            <div class="arch-node">本地磁盘 (Parquet / Index)</div>
+                            <div class="arch-node">本地磁盘 (Local Disk) (Parquet / Index)</div>
                         </div>
                     </div>
 
                     <!-- Distributed -->
                     <div class="arch-card">
-                        <h4>分布式模式 (Distributed)</h4>
+                        <h4>分布式模式 (Distributed Mode)</h4>
                         <div class="arch-visual">
                             <div class="arch-node">负载均衡 (Load Balancer)</div>
                             <div class="arch-arrow">↓</div>
                             <div class="cluster-group">
-                                <div class="arch-node highlight">计算/读节点 A</div>
-                                <div class="arch-node highlight">计算/读节点 B</div>
-                                <div class="arch-node highlight">计算/读节点 N...</div>
+                                <div class="arch-node highlight">计算/读节点 A (Compute/Read Node A)</div>
+                                <div class="arch-node highlight">计算/读节点 B (Compute/Read Node B)</div>
+                                <div class="arch-node highlight">计算/读节点 N... (Compute/Read Node N...)</div>
                             </div>
                             <div class="arch-arrow">↓ (Shared Access)</div>
                             <div class="arch-node storage">
-                                <strong>CubeFS 共享存储层</strong><br>
+                                <strong>CubeFS 共享存储层 (Shared Storage Layer)</strong><br>
                                 <span style="font-size: 12px; opacity: 0.8;">(Data Shards / Metadata / Parquet)</span>
                             </div>
                             <div class="arch-arrow">↓</div>
-                            <div class="arch-node">多副本物理存储</div>
+                            <div class="arch-node">多副本物理存储 (Multi-replica physical storage)</div>
                         </div>
                     </div>
                 </div>
@@ -466,7 +468,7 @@
 
         <section id="tech-stack" class="section">
             <div class="container">
-                <h2 class="section-title">技术栈</h2>
+                <h2 class="section-title">技术栈 (Tech Stack)</h2>
                 <div class="tech-stack-grid">
                     <div class="tech-item">
                         <h4>Rust</h4>

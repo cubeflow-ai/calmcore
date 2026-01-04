@@ -564,6 +564,7 @@ impl InformationSchemaExecutor {
         match field_type {
             // 字符串类型
             FieldType::Keyword => (12, "VARCHAR".to_string(), Some(65535), None),
+            FieldType::Fulltext => (12, "TEXT".to_string(), Some(65535), None),
 
             // 整数类型
             FieldType::I8 => (-6, "TINYINT".to_string(), Some(3), Some(0)),

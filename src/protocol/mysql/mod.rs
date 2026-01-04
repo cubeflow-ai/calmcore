@@ -1635,6 +1635,13 @@ async fn handle_describe(
         // 字段类型
         let field_type = match field {
             FieldOption::Keyword { .. } => "varchar(255)",
+            FieldOption::Fulltext { is_array, .. } => {
+                if *is_array {
+                    "json"
+                } else {
+                    "text"
+                }
+            }
             FieldOption::I8 { .. } => "tinyint",
             FieldOption::I16 { .. } => "smallint",
             FieldOption::I32 { .. } => "int",

@@ -110,6 +110,16 @@ impl Schema {
                         (DataType::Utf8, true)
                     }
                 }
+                field::FieldOption::Fulltext { is_array, .. } => {
+                    if *is_array {
+                        (
+                            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                            true,
+                        )
+                    } else {
+                        (DataType::Utf8, true)
+                    }
+                }
                 field::FieldOption::I8 { .. } => (DataType::Int8, true),
                 field::FieldOption::I16 { .. } => (DataType::Int16, true),
                 field::FieldOption::I32 { .. } => (DataType::Int32, true),

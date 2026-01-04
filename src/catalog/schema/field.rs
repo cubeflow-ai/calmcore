@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FieldType {
     Keyword,
+    Fulltext,
     I8,
     I16,
     I32,
@@ -157,12 +158,25 @@ pub enum FieldOption {
         default_value: Option<String>,
         nullable: bool,
     },
+    Fulltext {
+        name: String,
+        index: bool,
+        is_array: bool,
+        persist_option: Option<PersistOption>,
+        /// 字段描述/注释
+        description: Option<String>,
+        /// 默认值（JSON 字符串格式）
+        default_value: Option<String>,
+        /// 是否可为空，默认 true
+        nullable: bool,
+    },
 }
 
 impl FieldOption {
     pub fn name(&self) -> &str {
         match self {
             FieldOption::Keyword { name, .. } => name,
+            FieldOption::Fulltext { name, .. } => name,
             FieldOption::I8 { name, .. } => name,
             FieldOption::I16 { name, .. } => name,
             FieldOption::I32 { name, .. } => name,
@@ -182,6 +196,7 @@ impl FieldOption {
     pub fn normalize_name(&mut self) {
         match self {
             FieldOption::Keyword { name, .. } => *name = name.to_lowercase(),
+            FieldOption::Fulltext { name, .. } => *name = name.to_lowercase(),
             FieldOption::I8 { name, .. } => *name = name.to_lowercase(),
             FieldOption::I16 { name, .. } => *name = name.to_lowercase(),
             FieldOption::I32 { name, .. } => *name = name.to_lowercase(),
@@ -200,6 +215,7 @@ impl FieldOption {
     pub fn is_index(&self) -> bool {
         match self {
             FieldOption::Keyword { index, .. } => *index,
+            FieldOption::Fulltext { index, .. } => *index,
             FieldOption::I8 { index, .. } => *index,
             FieldOption::I16 { index, .. } => *index,
             FieldOption::I32 { index, .. } => *index,
@@ -218,6 +234,7 @@ impl FieldOption {
     pub fn is_array(&self) -> bool {
         match self {
             FieldOption::Keyword { is_array, .. } => *is_array,
+            FieldOption::Fulltext { is_array, .. } => *is_array,
             FieldOption::I8 { .. } => false,
             FieldOption::I16 { .. } => false,
             FieldOption::I32 { .. } => false,
@@ -237,6 +254,9 @@ impl FieldOption {
     pub fn persist_option(&self) -> PersistOption {
         match self {
             FieldOption::Keyword { persist_option, .. } => persist_option
+                .clone()
+                .unwrap_or_else(PersistOption::default),
+            FieldOption::Fulltext { persist_option, .. } => persist_option
                 .clone()
                 .unwrap_or_else(PersistOption::default),
             _ => PersistOption::default(),
@@ -265,6 +285,7 @@ impl FieldOption {
     pub fn field_type(&self) -> FieldType {
         match self {
             FieldOption::Keyword { .. } => FieldType::Keyword,
+            FieldOption::Fulltext { .. } => FieldType::Fulltext,
             FieldOption::I8 { .. } => FieldType::I8,
             FieldOption::I16 { .. } => FieldType::I16,
             FieldOption::I32 { .. } => FieldType::I32,
@@ -292,6 +313,7 @@ impl FieldOption {
     pub fn description(&self) -> Option<&str> {
         match self {
             FieldOption::Keyword { description, .. } => description.as_deref(),
+            FieldOption::Fulltext { description, .. } => description.as_deref(),
             FieldOption::I8 { description, .. } => description.as_deref(),
             FieldOption::I16 { description, .. } => description.as_deref(),
             FieldOption::I32 { description, .. } => description.as_deref(),
@@ -311,6 +333,7 @@ impl FieldOption {
     pub fn default_value(&self) -> Option<&str> {
         match self {
             FieldOption::Keyword { default_value, .. } => default_value.as_deref(),
+            FieldOption::Fulltext { default_value, .. } => default_value.as_deref(),
             FieldOption::I8 { default_value, .. } => default_value.as_deref(),
             FieldOption::I16 { default_value, .. } => default_value.as_deref(),
             FieldOption::I32 { default_value, .. } => default_value.as_deref(),
@@ -330,6 +353,7 @@ impl FieldOption {
     pub fn nullable(&self) -> bool {
         match self {
             FieldOption::Keyword { nullable, .. } => *nullable,
+            FieldOption::Fulltext { nullable, .. } => *nullable,
             FieldOption::I8 { nullable, .. } => *nullable,
             FieldOption::I16 { nullable, .. } => *nullable,
             FieldOption::I32 { nullable, .. } => *nullable,
