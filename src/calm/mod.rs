@@ -482,19 +482,31 @@ impl CalmService {
             .with_schema(schema)
             .build(stream::iter(vec![Ok(batch)]));
 
-        log::info!("📡 [Flight] Calling do_put...");
+        let start = tokio::time::Instant::now();
 
-        // 调用 do_put 发送数据
-        let response = match client.do_put(encoder).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                self.flight_channel_cache.invalidate(node_id).await;
-                log::error!("❌ [Flight] do_put failed: {}", e);
-                return Err(CoreError::Network(format!("Flight do_put failed: {}", e)));
-            }
-        };
+        // 调用 do_put 发送数据，超时控制 1s
+        let response =
+            match tokio::time::timeout(Duration::from_secs(1), client.do_put(encoder)).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
+                    self.flight_channel_cache.invalidate(node_id).await;
+                    log::error!("❌ [Flight] do_put failed: {}", e);
+                    return Err(CoreError::Network(format!("Flight do_put failed: {}", e)));
+                }
+                Err(_) => {
+                    self.flight_channel_cache.invalidate(node_id).await;
+                    log::error!(
+                        "⏱️ [Flight] do_put timeout after 1s while sending to node '{}'",
+                        node_id
+                    );
+                    return Err(CoreError::Timeout(
+                        "Flight do_put exceeded 1s timeout".to_string(),
+                    ));
+                }
+            };
 
-        log::info!("📡 [Flight] do_put returned, reading response...");
+        let duration = start.elapsed();
+        log::info!("📡 [Flight] do_put completed in {:?}", duration);
 
         // 读取响应以确认完成
         let _results: Vec<PutResult> = match response.try_collect().await {
