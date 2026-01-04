@@ -9,7 +9,7 @@ use datafusion::sql::sqlparser::ast::{
     FunctionArgumentClause, FunctionArguments, Ident, LimitClause, OrderBy, OrderByExpr,
     OrderByKind, Query, Select, SelectItem, SetExpr, Value, ValueWithSpan,
 };
-use datafusion::sql::sqlparser::dialect::MySqlDialect;
+use datafusion::sql::sqlparser::dialect::GenericDialect;
 use regex::Regex;
 use std::collections::HashSet;
 
@@ -198,7 +198,7 @@ impl SqlNormalizer {
     /// 4. 将MySQL特有语法转换为标准SQL
     /// 5. 将 Timestamp 字段的 Int64 比较值转换为 CAST 表达式
     pub fn normalize(sql: &str) -> CoreResult<NormalizedSql> {
-        let dialect = MySqlDialect {};
+        let dialect = GenericDialect {};
 
         let mut statements = DFParser::parse_sql_with_dialect(sql, &dialect)?;
 

@@ -96,6 +96,27 @@ impl ElasticsearchServer {
             .await?;
         Ok(())
     }
+
+    /// 将一批文档写入指定索引，复用 CalmService 的分布式路由能力
+    async fn insert_documents(&self, index: &str, docs: Vec<Value>) -> Result<usize, CoreError> {
+        if docs.is_empty() {
+            return Ok(0);
+        }
+
+        let table_info = self.calm_service.catalog().get_or_load_table(index).await?;
+
+        let normalized_docs: Vec<Value> = docs.into_iter().map(normalize_document_keys).collect();
+
+        log::info!("📝 [ES Insert] After normalization: {:?}", normalized_docs);
+
+        let batch = crate::utils::arrow_utils::json_to_record_batch(
+            &normalized_docs,
+            table_info.table.schema.to_arrow_schema(),
+        )
+        .map_err(|e| internal_error(e.to_string()))?;
+
+        self.calm_service.clone().insert_data(index, batch).await
+    }
 }
 
 // ===== 请求/响应结构体 =====
@@ -416,37 +437,41 @@ async fn index_document_with_id(
     Query(_query): Query<std::collections::HashMap<String, String>>,
     Json(document): Json<Value>,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
-    // 添加 _id 字段到文档
-    let mut doc = document;
-    if let Value::Object(ref mut map) = doc {
-        map.insert("_id".to_string(), Value::String(id.clone()));
-    }
-
-    // 获取表元数据
-    let meta = server
+    // 获取表的 primary_key
+    let table_info = server
         .calm_service
         .catalog()
         .get_or_load_table(&index)
         .await
         .map_err(|e| not_found(e.to_string()))?;
 
-    // 转换为 RecordBatch
-    let batch = crate::utils::arrow_utils::json_to_record_batch(
-        &[doc],
-        meta.table.schema.to_arrow_schema(),
-    )
-    .map_err(|e| internal_error(e.to_string()))?;
+    let primary_key = table_info
+        .table
+        .schema
+        .primary_key
+        .as_ref()
+        .ok_or_else(|| bad_request("Table has no primary key"))?;
 
-    // 路由到默认分区 "p0"
-    let partition_name = "p0";
+    // 将 ES 的 _id 映射到表的 primary_key
+    let mut doc = document;
+    if let Value::Object(ref mut map) = doc {
+        // 尝试解析 ID 为主键类型对应的值
+        let pk_value = parse_primary_key_value(&id, primary_key, &table_info.table.schema.fields)
+            .map_err(|e| bad_request(format!("Invalid ID format: {}", e)))?;
+        map.insert(primary_key.clone(), pk_value.clone());
 
-    // 调用 insert_batch
-    server
-        .calm_service
-        .engine()
-        .insert_batch(&index, partition_name, batch)
-        .await
-        .map_err(|e| internal_error(e.to_string()))?;
+        log::info!(
+            "📝 [ES Insert] Inserting document with {}={:?}, full doc: {:?}",
+            primary_key,
+            pk_value,
+            doc
+        );
+    } else {
+        return Err(bad_request("Document payload must be a JSON object").into());
+    }
+
+    // 通过 CalmService 在集群内路由并写入
+    server.insert_documents(&index, vec![doc]).await?;
 
     Ok(poem::web::Json(serde_json::json!({
         "_index": index,
@@ -472,40 +497,35 @@ async fn index_document(
     Query(_query): Query<std::collections::HashMap<String, String>>,
     Json(document): Json<Value>,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
-    // 生成唯一 ID
-    let id = uuid::Uuid::new_v4().to_string();
-
-    // 添加 _id 字段到文档
-    let mut doc = document;
-    if let Value::Object(ref mut map) = doc {
-        map.insert("_id".to_string(), Value::String(id.clone()));
-    }
-
-    // 获取表元数据
-    let meta = server
+    // 获取表的 primary_key
+    let table_info = server
         .calm_service
         .catalog()
         .get_or_load_table(&index)
         .await
         .map_err(|e| not_found(e.to_string()))?;
 
-    // 转换为 RecordBatch
-    let batch = crate::utils::arrow_utils::json_to_record_batch(
-        &[doc],
-        meta.table.schema.to_arrow_schema(),
-    )
-    .map_err(|e| internal_error(e.to_string()))?;
+    let primary_key = table_info
+        .table
+        .schema
+        .primary_key
+        .as_ref()
+        .ok_or_else(|| bad_request("Table has no primary key"))?;
 
-    // 路由到默认分区 "p0"
-    let partition_name = "p0";
+    // 生成唯一 ID
+    let id = uuid::Uuid::new_v4().to_string();
 
-    // 调用 insert_batch
-    server
-        .calm_service
-        .engine()
-        .insert_batch(&index, partition_name, batch)
-        .await
-        .map_err(|e| internal_error(e.to_string()))?;
+    // 将 ES 的 _id 映射到表的 primary_key
+    let mut doc = document;
+    if let Value::Object(ref mut map) = doc {
+        let pk_value = parse_primary_key_value(&id, primary_key, &table_info.table.schema.fields)
+            .map_err(|e| bad_request(format!("Invalid ID format: {}", e)))?;
+        map.insert(primary_key.clone(), pk_value);
+    } else {
+        return Err(bad_request("Document payload must be a JSON object").into());
+    }
+
+    server.insert_documents(&index, vec![doc]).await?;
 
     Ok(poem::web::Json(serde_json::json!({
         "_index": index,
@@ -529,45 +549,60 @@ async fn get_document(
     Data(server): Data<&Arc<ElasticsearchServer>>,
     Path((index, id)): Path<(String, String)>,
 ) -> Result<poem::web::Json<serde_json::Value>, poem::Error> {
-    // 获取 table meta 用于路由
-    let table_meta = server
+    // 获取表的 primary_key
+    let table_info = server
         .calm_service
         .catalog()
         .get_or_load_table(&index)
         .await
         .map_err(|_| not_found(format!("Index '{}' not found", index)))?;
 
-    // 路由到分区 (简化为默认 p0)
-    let partition_id = "p0";
+    let primary_key = table_info
+        .table
+        .schema
+        .primary_key
+        .as_ref()
+        .ok_or_else(|| internal_error("Table has no primary key"))?;
 
-    let partition = server
+    use futures::StreamExt;
+
+    let id_literal = escape_sql_literal(&id);
+    let sql = format!(
+        "SELECT * FROM {} WHERE {} = '{}' LIMIT 1",
+        index, primary_key, id_literal
+    );
+
+    let mut stream = server
         .calm_service
-        .engine()
-        .get_partition(&index, partition_id)
+        .execute_query_stream(&sql)
         .await
-        .ok_or_else(|| internal_error("Partition not found".to_string()))?;
-
-    // 查询文档
-    let batch = partition
-        .get_by_pk(&[&id])
         .map_err(|e| internal_error(e.to_string()))?;
 
-    if let Some(batch) = batch {
-        if batch.num_rows() > 0 {
-            // 转换 RecordBatch 为 JSON
-            let json_docs = crate::utils::arrow_utils::record_batch_to_json(&batch)
-                .map_err(|e| internal_error(e.to_string()))?;
+    let mut found_doc: Option<Value> = None;
 
-            if let Some(doc) = json_docs.first() {
-                return Ok(poem::web::Json(serde_json::json!({
-                    "_index": index,
-                    "_id": id,
-                    "_version": 1,
-                    "found": true,
-                    "_source": doc
-                })));
-            }
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result.map_err(|e| internal_error(e.to_string()))?;
+        if batch.num_rows() == 0 {
+            continue;
         }
+
+        let docs = crate::utils::arrow_utils::record_batch_to_json(&batch)
+            .map_err(|e| internal_error(e.to_string()))?;
+
+        if let Some(doc) = docs.into_iter().next() {
+            found_doc = Some(doc);
+            break;
+        }
+    }
+
+    if let Some(doc) = found_doc {
+        return Ok(poem::web::Json(serde_json::json!({
+            "_index": index,
+            "_id": id,
+            "_version": 1,
+            "found": true,
+            "_source": doc
+        })));
     }
 
     Ok(poem::web::Json(serde_json::json!({
@@ -709,12 +744,8 @@ async fn bulk_operation_impl(
                 }
 
                 // 解析文档
-                let mut doc: Value = serde_json::from_str(lines[i])
+                let doc: Value = serde_json::from_str(lines[i])
                     .map_err(|e| bad_request(format!("Invalid JSON in document line: {}", e)))?;
-
-                if let Value::Object(ref mut map) = doc {
-                    map.insert("_id".to_string(), Value::String(doc_id.clone()));
-                }
 
                 i += 1;
 
@@ -732,99 +763,14 @@ async fn bulk_operation_impl(
 
     // 批量插入: 按索引分组处理
     for (index_name, doc_id_docs) in docs_by_index {
-        let table_meta = match server
-            .calm_service
-            .catalog()
-            .get_or_load_table(&index_name)
-            .await
-        {
-            Ok(m) => m,
-            Err(e) => {
-                errors = true;
-                // 为该索引的所有文档添加错误响应
-                for (doc_id, _) in doc_id_docs {
-                    items.push(json!({
-                        "index": {
-                            "_index": index_name,
-                            "_type": "_doc",
-                            "_id": doc_id,
-                            "status": 404,
-                            "error": {
-                                "type": "index_not_found_exception",
-                                "reason": e.to_string()
-                            }
-                        }
-                    }));
-                }
-                continue;
-            }
-        };
-
-        // 提取文档和ID
         let (doc_ids, docs): (Vec<String>, Vec<Value>) = doc_id_docs.into_iter().unzip();
-
-        // 标准化 JSON 字段名为小写（与 Arrow Schema 保持一致）
-        let normalized_docs: Vec<Value> = docs
-            .into_iter()
-            .map(|value| {
-                if let Value::Object(map) = value {
-                    let mut new_map = serde_json::Map::new();
-                    for (key, val) in map {
-                        new_map.insert(key.to_lowercase(), val);
-                    }
-                    Value::Object(new_map)
-                } else {
-                    value
-                }
-            })
-            .collect();
-
-        // 将 JSON 文档转换为 RecordBatch
-        let batch = match crate::utils::arrow_utils::json_to_record_batch(
-            &normalized_docs,
-            table_meta.table.schema.to_arrow_schema(),
-        ) {
-            Ok(b) => b,
-            Err(e) => {
-                errors = true;
-                for doc_id in doc_ids {
-                    items.push(json!({
-                        "index": {
-                            "_index": index_name,
-                            "_type": "_doc",
-                            "_id": doc_id,
-                            "status": 400,
-                            "error": {
-                                "type": "mapper_parsing_exception",
-                                "reason": e.to_string()
-                            }
-                        }
-                    }));
-                }
-                continue;
-            }
-        };
-
-        // 使用默认分区 "p0"
-        let partition_name = "p0";
-
-        // 调用 insert_batch
         let row_count = doc_ids.len();
-        match server
-            .calm_service
-            .engine()
-            .insert_batch(&index_name, partition_name, batch)
-            .await
-        {
-            Ok(_) => {
-                log::debug!(
-                    "✅ Bulk insert: {} rows into partition '{}' of '{}'",
-                    row_count,
-                    partition_name,
-                    index_name
-                );
 
-                for doc_id in doc_ids {
+        match server.insert_documents(&index_name, docs).await {
+            Ok(_) => {
+                log::debug!("✅ Bulk insert: {} rows into '{}'", row_count, index_name);
+
+                for doc_id in &doc_ids {
                     items.push(json!({
                         "index": {
                             "_index": index_name,
@@ -842,16 +788,19 @@ async fn bulk_operation_impl(
             }
             Err(e) => {
                 errors = true;
-                for doc_id in doc_ids {
+                let (status, error_type) = map_core_error(&e);
+                let reason = e.to_string();
+
+                for doc_id in &doc_ids {
                     items.push(json!({
                         "index": {
                             "_index": index_name,
                             "_type": "_doc",
                             "_id": doc_id,
-                            "status": 500,
+                            "status": status,
                             "error": {
-                                "type": "engine_exception",
-                                "reason": e.to_string()
+                                "type": error_type,
+                                "reason": reason
                             }
                         }
                     }));
@@ -873,6 +822,96 @@ async fn bulk_operation_impl(
     Ok(Response::builder()
         .content_type("application/json")
         .body(json_string))
+}
+
+fn normalize_document_keys(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut normalized = serde_json::Map::with_capacity(map.len());
+            for (key, val) in map {
+                normalized.insert(key.to_lowercase(), val);
+            }
+            Value::Object(normalized)
+        }
+        other => other,
+    }
+}
+
+fn escape_sql_literal(input: &str) -> String {
+    input.replace('\'', "''")
+}
+
+fn map_core_error(error: &CoreError) -> (u16, &'static str) {
+    match error {
+        CoreError::NotExisted(_) => (404, "index_not_found_exception"),
+        CoreError::InvalidParam(_) => (400, "mapper_parsing_exception"),
+        _ => (500, "engine_exception"),
+    }
+}
+
+/// 解析 ES 的 _id 为表的 primary_key 对应的值类型
+fn parse_primary_key_value(
+    id: &str,
+    pk_name: &str,
+    fields: &[FieldOption],
+) -> Result<Value, String> {
+    // 查找 primary_key 字段的类型
+    let pk_field = fields
+        .iter()
+        .find(|f| f.name() == pk_name)
+        .ok_or_else(|| format!("Primary key field '{}' not found", pk_name))?;
+
+    // 根据字段类型解析 ID
+    match pk_field {
+        FieldOption::I8 { .. } => id
+            .parse::<i8>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as I8: {}", e)),
+        FieldOption::I16 { .. } => id
+            .parse::<i16>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as I16: {}", e)),
+        FieldOption::I32 { .. } => id
+            .parse::<i32>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as I32: {}", e)),
+        FieldOption::I64 { .. } => id
+            .parse::<i64>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as I64: {}", e)),
+        FieldOption::U8 { .. } => id
+            .parse::<u8>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as U8: {}", e)),
+        FieldOption::U16 { .. } => id
+            .parse::<u16>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as U16: {}", e)),
+        FieldOption::U32 { .. } => id
+            .parse::<u32>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as U32: {}", e)),
+        FieldOption::U64 { .. } => id
+            .parse::<u64>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as U64: {}", e)),
+        FieldOption::F32 { .. } => id
+            .parse::<f32>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as F32: {}", e)),
+        FieldOption::F64 { .. } => id
+            .parse::<f64>()
+            .map(|v| json!(v))
+            .map_err(|e| format!("Failed to parse as F64: {}", e)),
+        FieldOption::Keyword { .. } => {
+            // 字符串类型，直接使用
+            Ok(Value::String(id.to_string()))
+        }
+        _ => Err(format!(
+            "Primary key type {:?} is not supported for ES _id mapping",
+            pk_field
+        )),
+    }
 }
 
 /// 搜索文档（POST）
