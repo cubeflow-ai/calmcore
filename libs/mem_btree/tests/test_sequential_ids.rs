@@ -105,7 +105,11 @@ fn test_sequential_ids_no_loss() {
     let test_keys = vec![65535, 65536, 65791, 65792, 66047, 66048];
     for &key in &test_keys {
         let exists = reader.get(&key).is_some();
-        println!("  Key {}: {}", key, if exists { "✅ EXISTS" } else { "❌ MISSING" });
+        println!(
+            "  Key {}: {}",
+            key,
+            if exists { "✅ EXISTS" } else { "❌ MISSING" }
+        );
     }
 
     // Verify ALL keys can be retrieved from disk

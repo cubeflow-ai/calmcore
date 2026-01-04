@@ -4,7 +4,11 @@
 /// 同时验证SQL的合法性
 use crate::utils::error::{CoreError, CoreResult};
 use datafusion::sql::parser::{DFParser, Statement};
-use datafusion::sql::sqlparser::ast::{BinaryOperator, Expr, SetExpr, Value, ValueWithSpan};
+use datafusion::sql::sqlparser::ast::{
+    BinaryOperator, CastKind, DataType, ExactNumberInfo, Expr, FunctionArg, FunctionArgExpr,
+    FunctionArgumentClause, FunctionArguments, Ident, LimitClause, OrderBy, OrderByExpr,
+    OrderByKind, Query, Select, SelectItem, SetExpr, Value, ValueWithSpan,
+};
 use datafusion::sql::sqlparser::dialect::MySqlDialect;
 use regex::Regex;
 use std::collections::HashSet;
@@ -20,6 +24,9 @@ pub struct NormalizedSql {
 
     /// 提取出的分区过滤条件
     pub partition_filters: PartitionFilters,
+
+    /// _score 相关配置
+    pub score: ScoreConfig,
 
     /// 是否需要注入 `_score` 虚拟列
     pub needs_score_column: bool,
@@ -38,6 +45,52 @@ pub struct PartitionFilters {
 
     /// 是否有 _partition 条件
     pub has_filter: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreOrder {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScoreLimit {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+impl ScoreLimit {
+    pub fn new(limit: Option<usize>, offset: Option<usize>) -> Self {
+        Self { limit, offset }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ScoreColumnPlacement {
+    Append { field_name: String },
+    Replace { index: usize, field_name: String },
+}
+
+impl ScoreColumnPlacement {
+    pub fn field_name(&self) -> &str {
+        match self {
+            ScoreColumnPlacement::Append { field_name }
+            | ScoreColumnPlacement::Replace { field_name, .. } => field_name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScoreConfig {
+    pub placement: Option<ScoreColumnPlacement>,
+    pub order: Option<ScoreOrder>,
+    pub limit: Option<ScoreLimit>,
+}
+
+impl ScoreConfig {
+    pub fn needs_score(&self) -> bool {
+        self.placement.is_some()
+    }
 }
 
 impl PartitionFilters {
@@ -160,6 +213,8 @@ impl SqlNormalizer {
             })?
         };
 
+        let (statement, score) = Self::process_score_clauses(statement)?;
+
         // 🎯 提取 _partition 过滤条件
         let partition_filters = Self::extract_partition_filters(&statement)?;
 
@@ -170,21 +225,424 @@ impl SqlNormalizer {
         // 🔧 修复 Timestamp 字段类型不匹配问题
         rewritten_sql = Self::fix_timestamp_comparisons(&rewritten_sql);
 
-        let needs_score_column = Self::detect_score_usage(&rewritten_sql);
+        let needs_score_column = score.needs_score();
 
         Ok(NormalizedSql {
             statement,
             rewritten_sql,
             partition_filters,
+            score,
             needs_score_column,
         })
     }
 
-    /// 检测 SQL 中是否引用了 `_score` 虚拟列
-    fn detect_score_usage(sql: &str) -> bool {
-        sql.to_lowercase().contains("_score")
+    fn process_score_clauses(statement: Statement) -> CoreResult<(Statement, ScoreConfig)> {
+        let mut score = ScoreConfig::default();
+
+        let processed_statement = match statement {
+            Statement::Statement(mut boxed) => {
+                if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut() {
+                    Self::handle_score_in_query(query, &mut score)?;
+                }
+
+                Self::ensure_no_remaining_score_refs(boxed.as_ref())?;
+                Statement::Statement(boxed)
+            }
+            other => other,
+        };
+
+        Ok((processed_statement, score))
     }
 
+    fn handle_score_in_query(query: &mut Query, score: &mut ScoreConfig) -> CoreResult<()> {
+        if let Some(order) = Self::strip_score_ordering(&mut query.order_by)? {
+            score.order = Some(order);
+
+            if let Some(limit_clause) = query.limit_clause.take() {
+                let (limit_value, offset_value) = Self::extract_score_limit(limit_clause)?;
+                if limit_value.is_some() || offset_value.is_some() {
+                    score.limit = Some(ScoreLimit::new(limit_value, offset_value));
+                }
+            }
+        }
+
+        if let SetExpr::Select(select) = query.body.as_mut() {
+            Self::rewrite_projection_for_score(select, score)?;
+        }
+
+        if score.placement.is_none() && score.order.is_some() {
+            score.placement = Some(ScoreColumnPlacement::Append {
+                field_name: "_score".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn strip_score_ordering(order_by: &mut Option<OrderBy>) -> CoreResult<Option<ScoreOrder>> {
+        let Some(order_clause) = order_by.as_mut() else {
+            return Ok(None);
+        };
+
+        let OrderByKind::Expressions(exprs) = &mut order_clause.kind else {
+            return Ok(None);
+        };
+
+        let mut detected = None;
+        let mut retained = Vec::with_capacity(exprs.len());
+
+        for expr in exprs.drain(..) {
+            if Self::expr_refs_score(&expr.expr) {
+                if !Self::is_score_identifier(&expr.expr) {
+                    return Err(CoreError::InvalidParam(
+                        "ORDER BY _score currently only supports plain identifiers".into(),
+                    ));
+                }
+
+                let descending = expr.options.asc.map(|flag| !flag).unwrap_or(true);
+                if detected.is_none() {
+                    detected = Some(if descending {
+                        ScoreOrder::Desc
+                    } else {
+                        ScoreOrder::Asc
+                    });
+                }
+            } else {
+                retained.push(expr);
+            }
+        }
+
+        *exprs = retained;
+
+        if exprs.is_empty() {
+            *order_by = None;
+        }
+
+        Ok(detected)
+    }
+
+    fn rewrite_projection_for_score(
+        select: &mut Select,
+        score: &mut ScoreConfig,
+    ) -> CoreResult<()> {
+        for (idx, item) in select.projection.iter_mut().enumerate() {
+            match item {
+                SelectItem::UnnamedExpr(expr) if Self::is_score_identifier(expr) => {
+                    *item = SelectItem::ExprWithAlias {
+                        expr: Self::score_placeholder_expr(),
+                        alias: Ident::new("_score"),
+                    };
+                    Self::set_score_placement(score, idx, "_score")?;
+                }
+                SelectItem::ExprWithAlias { expr, alias } if Self::is_score_identifier(expr) => {
+                    *expr = Self::score_placeholder_expr();
+                    Self::set_score_placement(score, idx, &alias.value)?;
+                }
+                _ if Self::expr_refs_score_in_item(item) => {
+                    return Err(CoreError::InvalidParam(
+                        "_score can only appear as a standalone select item".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn set_score_placement(
+        score: &mut ScoreConfig,
+        index: usize,
+        field_name: &str,
+    ) -> CoreResult<()> {
+        if score.placement.is_some() {
+            return Err(CoreError::InvalidParam(
+                "_score can only appear once in the projection list".into(),
+            ));
+        }
+
+        score.placement = Some(ScoreColumnPlacement::Replace {
+            index,
+            field_name: field_name.to_string(),
+        });
+        Ok(())
+    }
+
+    fn score_placeholder_expr() -> Expr {
+        Expr::Cast {
+            kind: CastKind::Cast,
+            expr: Box::new(Expr::Value(ValueWithSpan::from(Value::Number(
+                "0".to_string(),
+                false,
+            )))),
+            data_type: DataType::Float(ExactNumberInfo::None),
+            format: None,
+        }
+    }
+
+    fn parse_limit_value(expr: &Expr) -> CoreResult<Option<usize>> {
+        match expr {
+            Expr::Value(value_with_span) => match &value_with_span.value {
+                Value::Number(value, _) => value
+                    .parse::<usize>()
+                    .map(Some)
+                    .map_err(|_| CoreError::InvalidParam("LIMIT must be numeric".into())),
+                Value::SingleQuotedString(s) if s.eq_ignore_ascii_case("all") => Ok(None),
+                Value::DoubleQuotedString(s) if s.eq_ignore_ascii_case("all") => Ok(None),
+                _ => Err(CoreError::InvalidParam(
+                    "LIMIT must be a positive integer or ALL".into(),
+                )),
+            },
+            _ => Err(CoreError::InvalidParam(
+                "LIMIT expressions referencing columns are not supported with _score".into(),
+            )),
+        }
+    }
+
+    fn parse_offset_value(expr: &Expr) -> CoreResult<usize> {
+        match expr {
+            Expr::Value(value_with_span) => match &value_with_span.value {
+                Value::Number(value, _) => value.parse::<usize>().map_err(|_| {
+                    CoreError::InvalidParam("OFFSET must be a positive integer".into())
+                }),
+                _ => Err(CoreError::InvalidParam(
+                    "OFFSET must be a positive integer".into(),
+                )),
+            },
+            _ => Err(CoreError::InvalidParam(
+                "OFFSET expressions referencing columns are not supported".into(),
+            )),
+        }
+    }
+
+    fn extract_score_limit(clause: LimitClause) -> CoreResult<(Option<usize>, Option<usize>)> {
+        match clause {
+            LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            } => {
+                if !limit_by.is_empty() {
+                    return Err(CoreError::InvalidParam(
+                        "LIMIT BY is not supported when ordering by _score".into(),
+                    ));
+                }
+
+                let limit_value = match limit {
+                    Some(expr) => Some(Self::parse_limit_value(&expr)?),
+                    None => None,
+                }
+                .flatten();
+
+                let offset_value = match offset {
+                    Some(offset) => Some(Self::parse_offset_value(&offset.value)?),
+                    None => None,
+                };
+
+                Ok((limit_value, offset_value))
+            }
+            LimitClause::OffsetCommaLimit { offset, limit } => {
+                let offset_value = Some(Self::parse_offset_value(&offset)?);
+                let limit_value = Self::parse_limit_value(&limit)?;
+                Ok((limit_value, offset_value))
+            }
+        }
+    }
+
+    fn ensure_no_remaining_score_refs(
+        statement: &datafusion::sql::sqlparser::ast::Statement,
+    ) -> CoreResult<()> {
+        if Self::statement_contains_score(statement) {
+            return Err(CoreError::InvalidParam(
+                "_score is only supported in SELECT clauses and ORDER BY".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn statement_contains_score(statement: &datafusion::sql::sqlparser::ast::Statement) -> bool {
+        match statement {
+            datafusion::sql::sqlparser::ast::Statement::Query(query) => {
+                Self::query_contains_score(query)
+            }
+            _ => false,
+        }
+    }
+
+    fn query_contains_score(query: &Query) -> bool {
+        if query
+            .order_by
+            .as_ref()
+            .map(|order_by| Self::order_by_contains_score(order_by))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        Self::query_body_contains_score(query.body.as_ref())
+    }
+
+    fn query_body_contains_score(body: &SetExpr) -> bool {
+        match body {
+            SetExpr::Select(select) => {
+                if let Some(selection) = &select.selection {
+                    if Self::expr_refs_score(selection) {
+                        return true;
+                    }
+                }
+
+                select
+                    .projection
+                    .iter()
+                    .any(|item| Self::expr_refs_score_in_item(item))
+            }
+            SetExpr::Query(query) => Self::query_contains_score(query),
+            SetExpr::SetOperation { left, right, .. } => {
+                Self::query_body_contains_score(left) || Self::query_body_contains_score(right)
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_refs_score_in_item(item: &SelectItem) -> bool {
+        match item {
+            SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                Self::expr_refs_score(expr)
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_refs_score(expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier(ident) => ident.value.eq_ignore_ascii_case("_score"),
+            Expr::CompoundIdentifier(idents) => idents
+                .last()
+                .map(|ident| ident.value.eq_ignore_ascii_case("_score"))
+                .unwrap_or(false),
+            Expr::BinaryOp { left, right, .. } => {
+                Self::expr_refs_score(left) || Self::expr_refs_score(right)
+            }
+            Expr::Nested(inner) => Self::expr_refs_score(inner),
+            Expr::UnaryOp { expr, .. } => Self::expr_refs_score(expr),
+            Expr::Function(function) => {
+                Self::function_arguments_ref_score(&function.parameters)
+                    || Self::function_arguments_ref_score(&function.args)
+                    || function
+                        .filter
+                        .as_ref()
+                        .map(|expr| Self::expr_refs_score(expr))
+                        .unwrap_or(false)
+                    || Self::order_by_exprs_refs_score(&function.within_group)
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                Self::expr_refs_score(expr)
+                    || Self::expr_refs_score(low)
+                    || Self::expr_refs_score(high)
+            }
+            Expr::Case {
+                operand,
+                conditions,
+                else_result,
+                ..
+            } => {
+                operand
+                    .as_ref()
+                    .map(|expr| Self::expr_refs_score(expr))
+                    .unwrap_or(false)
+                    || conditions.iter().any(|case_when| {
+                        Self::expr_refs_score(&case_when.condition)
+                            || Self::expr_refs_score(&case_when.result)
+                    })
+                    || else_result
+                        .as_ref()
+                        .map(|expr| Self::expr_refs_score(expr))
+                        .unwrap_or(false)
+            }
+            Expr::InList { expr, list, .. } => {
+                Self::expr_refs_score(expr) || list.iter().any(Self::expr_refs_score)
+            }
+            Expr::Exists { subquery, .. } => Self::query_contains_score(subquery),
+            Expr::Subquery(query) => Self::query_contains_score(query),
+            _ => false,
+        }
+    }
+
+    fn order_by_contains_score(order_by: &OrderBy) -> bool {
+        match &order_by.kind {
+            OrderByKind::Expressions(exprs) => Self::order_by_exprs_refs_score(exprs),
+            OrderByKind::All(_) => false,
+        }
+    }
+
+    fn order_by_exprs_refs_score(exprs: &[OrderByExpr]) -> bool {
+        exprs
+            .iter()
+            .any(|order_expr| Self::expr_refs_score(&order_expr.expr))
+    }
+
+    fn function_arguments_ref_score(args: &FunctionArguments) -> bool {
+        match args {
+            FunctionArguments::None => false,
+            FunctionArguments::Subquery(query) => Self::query_contains_score(query),
+            FunctionArguments::List(list) => {
+                for arg in &list.args {
+                    let matches = match arg {
+                        FunctionArg::Named { arg, .. } | FunctionArg::Unnamed(arg) => {
+                            Self::function_arg_expr_refs_score(arg)
+                        }
+                        FunctionArg::ExprNamed { name, arg, .. } => {
+                            Self::expr_refs_score(name) || Self::function_arg_expr_refs_score(arg)
+                        }
+                    };
+
+                    if matches {
+                        return true;
+                    }
+                }
+
+                for clause in &list.clauses {
+                    match clause {
+                        FunctionArgumentClause::OrderBy(exprs) => {
+                            if Self::order_by_exprs_refs_score(exprs) {
+                                return true;
+                            }
+                        }
+                        FunctionArgumentClause::Limit(expr) => {
+                            if Self::expr_refs_score(expr) {
+                                return true;
+                            }
+                        }
+                        FunctionArgumentClause::Having(bound) => {
+                            if Self::expr_refs_score(&bound.1) {
+                                return true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                false
+            }
+        }
+    }
+
+    fn function_arg_expr_refs_score(arg: &FunctionArgExpr) -> bool {
+        match arg {
+            FunctionArgExpr::Expr(expr) => Self::expr_refs_score(expr),
+            FunctionArgExpr::QualifiedWildcard(_) | FunctionArgExpr::Wildcard => false,
+        }
+    }
+
+    fn is_score_identifier(expr: &Expr) -> bool {
+        matches!(expr, Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("_score"))
+            || matches!(expr, Expr::CompoundIdentifier(idents) if idents
+                .last()
+                .map(|ident| ident.value.eq_ignore_ascii_case("_score"))
+                .unwrap_or(false))
+    }
     /// 提取 _partition 过滤条件
     fn extract_partition_filters(statement: &Statement) -> CoreResult<PartitionFilters> {
         let mut filters = PartitionFilters::default();
@@ -581,8 +1039,42 @@ mod tests {
         let result = SqlNormalizer::normalize(sql).unwrap();
 
         assert!(result.rewritten_sql.contains("text"));
-        assert!(result.rewritten_sql.contains("_score"));
+        assert!(!result.rewritten_sql.contains("_score"));
         assert!(!result.partition_filters.has_filter);
         assert!(result.needs_score_column);
+        assert!(matches!(result.score.order, Some(ScoreOrder::Desc)));
+        assert!(result.score.limit.is_none());
+        assert!(matches!(
+            result.score.placement,
+            Some(ScoreColumnPlacement::Append { .. })
+        ));
+    }
+
+    #[test]
+    fn test_score_order_with_limit_and_offset() {
+        let sql =
+            "SELECT id FROM logs WHERE text(message, 'error', 1.0) ORDER BY _score DESC LIMIT 5 OFFSET 2";
+        let result = SqlNormalizer::normalize(sql).unwrap();
+
+        assert!(!result.rewritten_sql.contains("_score"));
+        assert!(!result.rewritten_sql.to_uppercase().contains("ORDER BY"));
+        assert!(!result.rewritten_sql.to_uppercase().contains("LIMIT"));
+        assert!(matches!(result.score.order, Some(ScoreOrder::Desc)));
+        let limit = result.score.limit.expect("limit expected");
+        assert_eq!(limit.limit, Some(5));
+        assert_eq!(limit.offset, Some(2));
+    }
+
+    #[test]
+    fn test_score_projection_with_alias() {
+        let sql = "SELECT _score AS ranking FROM logs";
+        let result = SqlNormalizer::normalize(sql).unwrap();
+
+        assert!(result.rewritten_sql.contains("ranking"));
+        assert!(result.needs_score_column);
+        assert!(matches!(
+            result.score.placement,
+            Some(ScoreColumnPlacement::Replace { index: 0, field_name }) if field_name == "ranking"
+        ));
     }
 }

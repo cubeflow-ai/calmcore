@@ -14,6 +14,9 @@
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanBuilder, Float32Array, LargeStringArray, StringArray,
 };
+use datafusion::arrow::compute::{
+    concat_batches, lexsort_to_indices, take, SortColumn, SortOptions,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
@@ -26,7 +29,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use crate::segment::field_store::text::FullTextField;
+use crate::{
+    compute::sql_normalizer::{ScoreColumnPlacement, ScoreConfig, ScoreLimit, ScoreOrder},
+    segment::field_store::text::FullTextField,
+};
 
 /// Context for full-text search execution
 /// Stores the index and maintains document scores
@@ -330,46 +336,92 @@ fn match_text(value: &str, tokens: &[String]) -> bool {
     tokens.iter().all(|token| haystack.contains(token))
 }
 
-/// Virtual _score column
-///
-/// This is injected into query results when ORDER BY _score is detected.
-/// Scores are aligned with the physical row order in each RecordBatch.
-pub fn add_score_column(
+/// Virtual _score column injector
+fn inject_score_column(
     batch: &RecordBatch,
     context: &FullTextContext,
+    placement: &ScoreColumnPlacement,
 ) -> DataFusionResult<RecordBatch> {
-    // Build score array by aligning with the row positions inside this batch
     let scores: Vec<f32> = (0..batch.num_rows())
         .map(|row_idx| context.get_score(row_idx as u32))
         .collect();
+    let score_array: ArrayRef = Arc::new(Float32Array::from(scores));
 
-    let score_array = Float32Array::from(scores);
+    match placement {
+        ScoreColumnPlacement::Append { field_name } => {
+            let mut fields = batch.schema().fields().to_vec();
+            fields.push(Arc::new(Field::new(field_name, DataType::Float32, false)));
 
-    // Add _score column to batch
-    let mut fields = batch.schema().fields().to_vec();
-    fields.push(Arc::new(Field::new("_score", DataType::Float32, false)));
+            let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+            columns.push(score_array);
 
-    let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
-    columns.push(Arc::new(score_array));
+            let new_schema = Arc::new(Schema::new(fields));
+            RecordBatch::try_new(new_schema, columns).map_err(|e| {
+                DataFusionError::Execution(format!("Failed to append _score column: {}", e))
+            })
+        }
+        ScoreColumnPlacement::Replace { index, .. } => {
+            if *index >= batch.num_columns() {
+                return Err(DataFusionError::Execution(format!(
+                    "_score alias index {} out of bounds ({} columns)",
+                    index,
+                    batch.num_columns()
+                )));
+            }
 
-    let new_schema = Arc::new(datafusion::arrow::datatypes::Schema::new(fields));
-    RecordBatch::try_new(new_schema, columns)
-        .map_err(|e| DataFusionError::Execution(format!("Failed to add _score column: {}", e)))
+            let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+            columns[*index] = score_array;
+            RecordBatch::try_new(batch.schema(), columns).map_err(|e| {
+                DataFusionError::Execution(format!("Failed to replace _score column: {}", e))
+            })
+        }
+    }
 }
 
-/// Wrap a `SendableRecordBatchStream` so each batch gains a `_score` column.
-pub fn wrap_stream_with_scores(
+pub fn build_score_stream(
     inner: SendableRecordBatchStream,
     context: Arc<FullTextContext>,
+    score: &ScoreConfig,
 ) -> SendableRecordBatchStream {
-    let schema = append_score_schema(&inner.schema());
-    Box::pin(ScoreAugmentedStream::new(inner, context, schema))
+    let placement = score
+        .placement
+        .clone()
+        .unwrap_or(ScoreColumnPlacement::Append {
+            field_name: "_score".to_string(),
+        });
+    let column_name = placement.field_name().to_string();
+    let stream = wrap_stream_with_scores(inner, context, placement.clone());
+
+    if let Some(order) = score.order {
+        Box::pin(ScoreSortStream::new(
+            stream,
+            column_name,
+            order,
+            score.limit,
+        ))
+    } else {
+        stream
+    }
 }
 
-fn append_score_schema(base: &SchemaRef) -> SchemaRef {
+fn wrap_stream_with_scores(
+    inner: SendableRecordBatchStream,
+    context: Arc<FullTextContext>,
+    placement: ScoreColumnPlacement,
+) -> SendableRecordBatchStream {
+    let schema = match &placement {
+        ScoreColumnPlacement::Append { field_name } => {
+            append_score_schema(&inner.schema(), field_name)
+        }
+        ScoreColumnPlacement::Replace { .. } => inner.schema(),
+    };
+    Box::pin(ScoreAugmentedStream::new(inner, context, schema, placement))
+}
+
+fn append_score_schema(base: &SchemaRef, field_name: &str) -> SchemaRef {
     let mut fields: Vec<datafusion::arrow::datatypes::Field> =
         base.fields().iter().map(|f| f.as_ref().clone()).collect();
-    fields.push(Field::new("_score", DataType::Float32, false));
+    fields.push(Field::new(field_name, DataType::Float32, false));
     Arc::new(Schema::new_with_metadata(fields, base.metadata().clone()))
 }
 
@@ -377,6 +429,7 @@ struct ScoreAugmentedStream {
     inner: SendableRecordBatchStream,
     context: Arc<FullTextContext>,
     schema: SchemaRef,
+    placement: ScoreColumnPlacement,
 }
 
 impl Unpin for ScoreAugmentedStream {}
@@ -386,11 +439,13 @@ impl ScoreAugmentedStream {
         inner: SendableRecordBatchStream,
         context: Arc<FullTextContext>,
         schema: SchemaRef,
+        placement: ScoreColumnPlacement,
     ) -> Self {
         Self {
             inner,
             context,
             schema,
+            placement,
         }
     }
 }
@@ -402,7 +457,7 @@ impl Stream for ScoreAugmentedStream {
         let this = self.as_mut().get_mut();
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                let result = add_score_column(&batch, &this.context);
+                let result = inject_score_column(&batch, &this.context, &this.placement);
                 this.context.clear_scores();
                 Poll::Ready(Some(result))
             }
@@ -417,6 +472,144 @@ impl Stream for ScoreAugmentedStream {
 }
 
 impl RecordBatchStream for ScoreAugmentedStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+struct ScoreSortStream {
+    inner: SendableRecordBatchStream,
+    schema: SchemaRef,
+    column_name: String,
+    order: ScoreOrder,
+    limit: Option<ScoreLimit>,
+    buffer: Vec<RecordBatch>,
+    finished: bool,
+    pending_batch: Option<RecordBatch>,
+}
+
+impl ScoreSortStream {
+    fn new(
+        inner: SendableRecordBatchStream,
+        column_name: String,
+        order: ScoreOrder,
+        limit: Option<ScoreLimit>,
+    ) -> Self {
+        Self {
+            schema: inner.schema(),
+            inner,
+            column_name,
+            order,
+            limit,
+            buffer: Vec::new(),
+            finished: false,
+            pending_batch: None,
+        }
+    }
+
+    fn finalize(&mut self) -> DataFusionResult<()> {
+        if self.finished {
+            return Ok(());
+        }
+
+        let batch = self.build_sorted_batch()?;
+        self.pending_batch = Some(batch);
+        self.finished = true;
+        self.buffer.clear();
+        Ok(())
+    }
+
+    fn build_sorted_batch(&mut self) -> DataFusionResult<RecordBatch> {
+        if self.buffer.is_empty() {
+            return Ok(RecordBatch::new_empty(self.schema.clone()));
+        }
+
+        let batch_refs: Vec<&RecordBatch> = self.buffer.iter().collect();
+        let combined = concat_batches(&self.schema, batch_refs).map_err(|e| {
+            DataFusionError::Execution(format!("Failed to concatenate batches: {}", e))
+        })?;
+
+        let score_index = self.schema.index_of(&self.column_name).map_err(|_| {
+            DataFusionError::Execution(format!(
+                "_score column '{}' not found in schema",
+                self.column_name
+            ))
+        })?;
+
+        let sort_columns = vec![SortColumn {
+            values: combined.column(score_index).clone(),
+            options: Some(SortOptions {
+                descending: matches!(self.order, ScoreOrder::Desc),
+                nulls_first: false,
+            }),
+        }];
+
+        let indices = lexsort_to_indices(&sort_columns, None)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to sort by _score: {}", e)))?;
+
+        let mut sorted_columns = Vec::with_capacity(combined.num_columns());
+        for column in combined.columns() {
+            let taken = take(column.as_ref(), &indices, None).map_err(|e| {
+                DataFusionError::Execution(format!("Failed to reorder column: {}", e))
+            })?;
+            sorted_columns.push(taken);
+        }
+
+        let sorted_batch =
+            RecordBatch::try_new(self.schema.clone(), sorted_columns).map_err(|e| {
+                DataFusionError::Execution(format!("Failed to build sorted batch: {}", e))
+            })?;
+
+        let total = sorted_batch.num_rows();
+        let offset = self.limit.and_then(|l| l.offset).unwrap_or(0);
+
+        if offset >= total {
+            return Ok(RecordBatch::new_empty(self.schema.clone()));
+        }
+
+        let remaining = total - offset;
+        let wanted = self.limit.and_then(|l| l.limit).unwrap_or(remaining);
+        let len = wanted.min(remaining);
+
+        Ok(sorted_batch.slice(offset, len))
+    }
+}
+
+impl Stream for ScoreSortStream {
+    type Item = DataFusionResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(batch) = self.pending_batch.take() {
+                return Poll::Ready(Some(Ok(batch)));
+            }
+
+            if self.finished {
+                return Poll::Ready(None);
+            }
+
+            match self.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    self.buffer.push(batch);
+                }
+                Poll::Ready(Some(Err(err))) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(err)));
+                }
+                Poll::Ready(None) => match self.finalize() {
+                    Ok(()) => {}
+                    Err(err) => {
+                        self.finished = true;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                },
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl RecordBatchStream for ScoreSortStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

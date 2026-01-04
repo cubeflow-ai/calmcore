@@ -203,7 +203,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for Postgres {
         results: QueryResultWriter<W>,
     ) -> Result<(), Self::Error> {
         match self.prepared.get_mut(id as usize) {
-            None => Ok(results.error(ErrorKind::ER_NO, b"no such prepared statement")?,),
+            None => Ok(results.error(ErrorKind::ER_NO, b"no such prepared statement")?),
             Some(&mut Prepared { ref mut stmt, .. }) => {
                 // this is a little nasty because we have to take MySQL-encoded arguments and
                 // massage them into &ToSql things, which is what postgres::Statement::query takes.

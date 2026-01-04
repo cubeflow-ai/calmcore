@@ -550,8 +550,7 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                         log::info!("✅ Successfully flushed {} tables", table_names.len());
                         results.completed(0, 0)
                     } else {
-                        results
-                            .error(ErrorKind::ER_PARSE_ERROR, b"Invalid FLUSH TABLES syntax")
+                        results.error(ErrorKind::ER_PARSE_ERROR, b"Invalid FLUSH TABLES syntax")
                     }
                 })
             });
@@ -653,7 +652,10 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                 None
             } else if let Some(after_from) = rest.strip_prefix("from ") {
                 Some(after_from.trim().to_string())
-            } else { rest.strip_prefix("in ").map(|after_in| after_in.trim().to_string()) };
+            } else {
+                rest.strip_prefix("in ")
+                    .map(|after_in| after_in.trim().to_string())
+            };
 
             let schema = Arc::new(ArrowSchema::new(vec![
                 Field::new("Table", DataType::Utf8, false),

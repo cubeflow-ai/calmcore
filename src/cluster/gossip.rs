@@ -24,7 +24,6 @@ use tokio::sync::Mutex;
 use crate::config::cluster::ClusterSettings;
 use crate::utils::error::{CoreError, CoreResult};
 
-
 pub struct GossipManager {
     chitchat_handle: ChitchatHandle,
 }

@@ -1,11 +1,11 @@
 //! Arrow Flight Action 定义（控制面协议）
 
-use serde::{Deserialize, Serialize};
 use crate::{
     catalog::table_meta::PartitionStrategy,
     schema::Schema,
     utils::error::{CoreError, CoreResult},
 };
+use serde::{Deserialize, Serialize};
 
 /// Flight Action 类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +69,7 @@ impl FlightAction {
     pub fn to_flight_action(&self) -> CoreResult<arrow_flight::Action> {
         let json = serde_json::to_string(self)
             .map_err(|e| CoreError::Internal(format!("Failed to serialize action: {}", e)))?;
-        
+
         Ok(arrow_flight::Action {
             r#type: "calm_rpc".to_string(),
             body: json.into_bytes().into(),
@@ -80,7 +80,7 @@ impl FlightAction {
     pub fn from_flight_action(action: &arrow_flight::Action) -> CoreResult<Self> {
         let json = String::from_utf8(action.body.to_vec())
             .map_err(|e| CoreError::Internal(format!("Invalid UTF-8 in action body: {}", e)))?;
-        
+
         serde_json::from_str(&json)
             .map_err(|e| CoreError::Internal(format!("Failed to deserialize action: {}", e)))
     }
@@ -91,7 +91,7 @@ impl FlightActionResponse {
     pub fn to_flight_result(&self) -> CoreResult<arrow_flight::Result> {
         let json = serde_json::to_string(self)
             .map_err(|e| CoreError::Internal(format!("Failed to serialize response: {}", e)))?;
-        
+
         Ok(arrow_flight::Result {
             body: json.into_bytes().into(),
         })
@@ -101,7 +101,7 @@ impl FlightActionResponse {
     pub fn from_flight_result(result: &arrow_flight::Result) -> CoreResult<Self> {
         let json = String::from_utf8(result.body.to_vec())
             .map_err(|e| CoreError::Internal(format!("Invalid UTF-8 in result body: {}", e)))?;
-        
+
         serde_json::from_str(&json)
             .map_err(|e| CoreError::Internal(format!("Failed to deserialize response: {}", e)))
     }

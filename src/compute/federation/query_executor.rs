@@ -12,7 +12,7 @@ use datafusion_federation::{default_session_state, FederatedTableProviderAdaptor
 use crate::catalog::Catalog;
 use crate::cluster::ClusterManager;
 use crate::compute::{
-    udf::fulltext_udf::{register_fulltext_udfs, wrap_stream_with_scores},
+    udf::fulltext_udf::{build_score_stream, register_fulltext_udfs},
     NormalizedSql,
 };
 use crate::engine::Engine;
@@ -217,7 +217,7 @@ impl FederatedQueryExecutor {
             .map_err(|e| CoreError::Internal(format!("Failed to execute query: {}", e)))?;
 
         let stream = if normalized.needs_score_column {
-            wrap_stream_with_scores(stream, fulltext_context.clone())
+            build_score_stream(stream, fulltext_context.clone(), &normalized.score)
         } else {
             stream
         };

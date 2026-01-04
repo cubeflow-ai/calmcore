@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-
 use crate::catalog::TableMeta;
 use crate::utils::error::{CoreError, CoreResult};
 

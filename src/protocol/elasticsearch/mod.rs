@@ -1730,8 +1730,6 @@ fn convert_es_sort_to_sql(sort: &Value) -> Option<String> {
         log::error!("⚠️  [convert_es_sort_to_sql] Sort is neither array nor object");
     }
 
-    
-
     if order_clauses.is_empty() {
         None
     } else {

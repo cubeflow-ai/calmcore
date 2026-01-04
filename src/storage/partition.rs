@@ -1,8 +1,6 @@
 use std::{
     path::PathBuf,
-    sync::{
-        Arc, Mutex, RwLock,
-    },
+    sync::{Arc, Mutex, RwLock},
 };
 
 use datafusion::arrow::{self as arrow, array::RecordBatch};

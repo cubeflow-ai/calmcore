@@ -16,5 +16,8 @@ pub mod udf;
 
 // Re-exports
 pub use federation::FederatedQueryExecutor;
-pub use sql_normalizer::{NormalizedSql, PartitionFilters, SqlNormalizer};
+pub use sql_normalizer::{
+    NormalizedSql, PartitionFilters, ScoreColumnPlacement, ScoreConfig, ScoreLimit, ScoreOrder,
+    SqlNormalizer,
+};
 pub use table_provider::{PartitionTableProvider, UnionTableProvider};

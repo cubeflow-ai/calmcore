@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-
 use crate::partition::Partition;
 use crate::schema::Schema;
 use crate::utils::error::CoreResult;

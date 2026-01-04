@@ -430,8 +430,12 @@ fn test_union_leaf_correctness() {
     assert!(reader.has_union_leaf(), "应该启用union_leaf");
     assert_eq!(reader.len(), 5000, "应该有5000个键");
 
-    println!("  ✓ Reader创建成功: len={}, has_union_leaf={}", reader.len(), reader.has_union_leaf());
-    
+    println!(
+        "  ✓ Reader创建成功: len={}, has_union_leaf={}",
+        reader.len(),
+        reader.has_union_leaf()
+    );
+
     // 先测试前几个key
     println!("  测试前10个key:");
     for key in 0..10u32 {
@@ -445,14 +449,8 @@ fn test_union_leaf_correctness() {
     println!("  测试抽样keys:");
     let test_keys = vec![0, 100, 200, 300, 400, 500, 1000, 2000, 3000, 4000, 4900];
     for &key in &test_keys {
-        let bitmap = reader
-            .get(&key)
-            .expect(&format!("应该能找到key {}", key));
-        assert!(
-            bitmap.contains(key),
-            "Key {} 的bitmap应该包含key本身",
-            key
-        );
+        let bitmap = reader.get(&key).expect(&format!("应该能找到key {}", key));
+        assert!(bitmap.contains(key), "Key {} 的bitmap应该包含key本身", key);
         assert!(
             bitmap.contains(key + 1),
             "Key {} 的bitmap应该包含key+1",
