@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use arrow_flight::{encode::FlightDataEncoderBuilder, FlightClient, FlightDescriptor, PutResult};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -6,7 +6,10 @@ use datafusion::datasource::empty::EmptyTable;
 use futures::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinHandle,
+};
 use tokio_serde::formats::Bincode;
 use tonic::transport::Channel as TonicChannel;
 
@@ -90,6 +93,66 @@ impl Default for Locker {
     }
 }
 
+struct FlightChannelCache {
+    channels: RwLock<HashMap<String, TonicChannel>>,
+    connect_timeout: Duration,
+}
+
+impl FlightChannelCache {
+    fn new(connect_timeout: Duration) -> Self {
+        Self {
+            channels: RwLock::new(HashMap::new()),
+            connect_timeout,
+        }
+    }
+
+    async fn get_or_connect(&self, node_id: &str) -> CoreResult<TonicChannel> {
+        if let Some(channel) = self.channels.read().await.get(node_id) {
+            return Ok(channel.clone());
+        }
+
+        let channel = self.build_channel(node_id).await?;
+        let mut guard = self.channels.write().await;
+        let entry = guard
+            .entry(node_id.to_string())
+            .or_insert_with(|| channel.clone());
+        Ok(entry.clone())
+    }
+
+    async fn invalidate(&self, node_id: &str) {
+        let mut guard = self.channels.write().await;
+        guard.remove(node_id);
+    }
+
+    async fn build_channel(&self, node_id: &str) -> CoreResult<TonicChannel> {
+        let addr = keys::parse_flight_address_from_node_id(node_id)
+            .ok_or_else(|| CoreError::Internal(format!("Invalid node_id format: {}", node_id)))?;
+
+        let endpoint = format!("http://{}", addr);
+        log::info!(
+            "🔌 [Flight] Connecting to node '{}' at {}",
+            node_id,
+            &endpoint
+        );
+
+        let endpoint_builder = TonicChannel::from_shared(endpoint.clone())
+            .map_err(|e| {
+                log::error!("❌ [Flight] Invalid endpoint '{}': {}", &endpoint, e);
+                CoreError::Internal(format!("Invalid endpoint: {}", e))
+            })?
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .connect_timeout(self.connect_timeout);
+
+        let channel = endpoint_builder.connect().await.map_err(|e| {
+            log::error!("❌ [Flight] Failed to connect to '{}': {}", &endpoint, e);
+            CoreError::Network(format!("Failed to connect: {}", e))
+        })?;
+
+        log::info!("✅ [Flight] Connected to node '{}'", node_id);
+        Ok(channel)
+    }
+}
+
 impl Locker {
     pub fn new() -> Self {
         Self {
@@ -105,6 +168,7 @@ pub struct CalmService {
     pub(crate) cluster_manager: ClusterManagerRef,
     pub(crate) engine: Arc<Engine>,
     locker: Arc<Locker>,
+    flight_channel_cache: Arc<FlightChannelCache>,
 }
 
 impl CalmService {
@@ -122,11 +186,14 @@ impl CalmService {
         // 创建 Engine
         let engine = Engine::new(&conf)?;
 
+        let flight_channel_cache = Arc::new(FlightChannelCache::new(Duration::from_secs(5)));
+
         let calm_service = Arc::new(Self {
             catalog,
             cluster_manager,
             engine,
             locker: Arc::new(Locker::new()),
+            flight_channel_cache,
         });
 
         calm_service.clone().init(&conf).await?;
@@ -377,31 +444,7 @@ impl CalmService {
 
     /// 创建 Arrow Flight 客户端连接到远程节点
     async fn create_flight_client(&self, node_id: &str) -> CoreResult<FlightClient> {
-        // 从 node_id 直接解析出 Flight 地址
-        use crate::cluster::keys;
-        let addr = keys::parse_flight_address_from_node_id(node_id)
-            .ok_or_else(|| CoreError::Internal(format!("Invalid node_id format: {}", node_id)))?;
-
-        let endpoint = format!("http://{}", addr);
-        log::info!(
-            "🔌 [Flight] Connecting to node '{}' at {}",
-            node_id,
-            &endpoint
-        );
-
-        let channel = TonicChannel::from_shared(endpoint.clone())
-            .map_err(|e| {
-                log::error!("❌ [Flight] Invalid endpoint '{}': {}", &endpoint, e);
-                CoreError::Internal(format!("Invalid endpoint: {}", e))
-            })?
-            .connect()
-            .await
-            .map_err(|e| {
-                log::error!("❌ [Flight] Failed to connect to '{}': {}", &endpoint, e);
-                CoreError::Network(format!("Failed to connect: {}", e))
-            })?;
-
-        log::info!("✅ [Flight] Connected to node '{}'", node_id);
+        let channel = self.flight_channel_cache.get_or_connect(node_id).await?;
         Ok(FlightClient::new(channel))
     }
 
@@ -442,18 +485,29 @@ impl CalmService {
         log::info!("📡 [Flight] Calling do_put...");
 
         // 调用 do_put 发送数据
-        let response = client.do_put(encoder).await.map_err(|e| {
-            log::error!("❌ [Flight] do_put failed: {}", e);
-            CoreError::Network(format!("Flight do_put failed: {}", e))
-        })?;
+        let response = match client.do_put(encoder).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.flight_channel_cache.invalidate(node_id).await;
+                log::error!("❌ [Flight] do_put failed: {}", e);
+                return Err(CoreError::Network(format!("Flight do_put failed: {}", e)));
+            }
+        };
 
         log::info!("📡 [Flight] do_put returned, reading response...");
 
         // 读取响应以确认完成
-        let _results: Vec<PutResult> = response.try_collect().await.map_err(|e| {
-            log::error!("❌ [Flight] Failed to read do_put response: {}", e);
-            CoreError::Network(format!("Failed to read do_put response: {}", e))
-        })?;
+        let _results: Vec<PutResult> = match response.try_collect().await {
+            Ok(results) => results,
+            Err(e) => {
+                self.flight_channel_cache.invalidate(node_id).await;
+                log::error!("❌ [Flight] Failed to read do_put response: {}", e);
+                return Err(CoreError::Network(format!(
+                    "Failed to read do_put response: {}",
+                    e
+                )));
+            }
+        };
 
         log::info!(
             "✅ [Flight] Successfully sent batch to remote partition '{}' on node '{}'",
@@ -677,7 +731,7 @@ impl CalmService {
     ) -> CoreResult<usize> {
         use crate::storage::router::Router;
 
-        log::info!(
+        log::debug!(
             "📝 [CalmService] Inserting {} rows to table '{}'",
             batch.num_rows(),
             table_name
@@ -812,7 +866,7 @@ impl CalmService {
             }
         }
 
-        log::info!(
+        log::debug!(
             "✅ [CalmService] Successfully inserted {} rows to table '{}'",
             total_inserted,
             table_name

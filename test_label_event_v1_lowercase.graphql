@@ -48,7 +48,7 @@ mutation {
         datetimeRange: {
           field: "updatetime"
           granularity: DAY
-          parallelism: 2
+          parallelism: 5
         }
       }
     }

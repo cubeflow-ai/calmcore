@@ -34,16 +34,6 @@ impl Engine {
             table_name
         );
 
-        println!(
-            "Available partitions in table '{:?}':",
-            self.partitions
-                .read()
-                .await
-                .keys()
-                .filter(|(t_name, _)| t_name == table_name)
-                .map(|(_, p_name)| p_name)
-                .collect::<Vec<_>>()
-        );
         // 获取 partition
         let partition = self
             .get_partition(table_name, partition_name)

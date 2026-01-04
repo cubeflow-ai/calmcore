@@ -107,7 +107,7 @@ impl ElasticsearchServer {
 
         let normalized_docs: Vec<Value> = docs.into_iter().map(normalize_document_keys).collect();
 
-        log::info!("📝 [ES Insert] After normalization: {:?}", normalized_docs);
+        log::debug!("📝 [ES Insert] After normalization: {:?}", normalized_docs);
 
         let batch = crate::utils::arrow_utils::json_to_record_batch(
             &normalized_docs,
