@@ -565,8 +565,9 @@ impl CalmService {
         local_only: bool,
     ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
         log::info!(
-            "🚀 [CalmService] Executing{} query: {}",
+            "🚀 [CalmService] Executing{} query (local_only={}): {}",
             if local_only { " LOCAL" } else { "" },
+            local_only,
             sql
         );
 
@@ -583,18 +584,34 @@ impl CalmService {
     ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
         use datafusion::prelude::*;
 
-        if let Some(cm) = self.cluster_manager.as_ref() {
-            use crate::compute::federation::FederatedQueryExecutor;
+        log::info!(
+            "🔍 [execute_normalized_query] local_only={}, has_cluster_manager={}",
+            local_only,
+            self.cluster_manager.as_ref().is_some()
+        );
 
-            let executor =
-                FederatedQueryExecutor::new(self.catalog.clone(), self.engine.clone(), cm.clone());
+        // 🔧 关键修复：local_only=true 时强制使用单机执行路径，避免递归调用 Federation
+        if !local_only {
+            if let Some(cm) = self.cluster_manager.as_ref() {
+                use crate::compute::federation::FederatedQueryExecutor;
 
-            return executor
-                .execute_with_partitions(normalized, partition_hint, local_only)
-                .await;
+                let executor = FederatedQueryExecutor::new(
+                    self.catalog.clone(),
+                    self.engine.clone(),
+                    cm.clone(),
+                );
+
+                return executor
+                    .execute_with_partitions(normalized, partition_hint, local_only)
+                    .await;
+            }
         }
 
-        // 单机模式下直接使用 DataFusion 执行改写后的 SQL
+        // 单机模式或 local_only=true 时直接使用 DataFusion 执行改写后的 SQL
+        log::info!(
+            "🏠 [execute_normalized_query] Using single-node execution path (local_only={})",
+            local_only
+        );
         let ctx = SessionContext::new();
         let fulltext_context = register_fulltext_udfs(&ctx);
         if normalized.needs_score_column {

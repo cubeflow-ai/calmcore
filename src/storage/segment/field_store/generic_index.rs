@@ -15,10 +15,11 @@ use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
     marker::PhantomData,
-    sync::{Arc, Mutex, RwLock},
+    sync::Arc,
 };
 
 use mem_btree::persist::UnionLeafSerializer;
+use parking_lot::{Mutex, RwLock};
 
 /// Union leaf for bitmap aggregation - stores combined bitmap of all values in chunk
 /// This enables significant performance improvements for range queries
@@ -36,12 +37,12 @@ impl BitmapUnionLeaf {
 
 impl UnionLeafSerializer<roaring::RoaringBitmap> for BitmapUnionLeaf {
     fn add_value(&self, value: &roaring::RoaringBitmap) {
-        let mut guard = self.union_bitmap.lock().unwrap();
+        let mut guard = self.union_bitmap.lock();
         *guard = &*guard | value;
     }
 
     fn release<'a>(&self) -> roaring::RoaringBitmap {
-        let mut guard = self.union_bitmap.lock().unwrap();
+        let mut guard = self.union_bitmap.lock();
         let result = guard.clone();
         *guard = roaring::RoaringBitmap::new();
         result
@@ -106,7 +107,7 @@ impl<K: IndexKey> Clone for GenericIndexedField<K> {
     fn clone(&self) -> Self {
         Self {
             field: self.field.clone(),
-            indexs: RwLock::new(self.indexs.read().unwrap().clone()),
+            indexs: RwLock::new(self.indexs.read().clone()),
             _phantom: PhantomData,
         }
     }
@@ -155,7 +156,7 @@ impl<K: IndexKey> GenericIndexedField<K> {
         let chunk_size = persist_opt.chunk_size;
 
         // 1. 提取内存索引
-        let memory_index = self.indexs.read().unwrap();
+        let memory_index = self.indexs.read();
         let btree = match &*memory_index {
             InvertedIndex::Memory(tree) => tree,
             InvertedIndex::Disk(_) => {
@@ -167,7 +168,7 @@ impl<K: IndexKey> GenericIndexedField<K> {
         let len = btree.len();
         let iter = btree.iter().map(|item| {
             let (key, value_lock, _ttl) = &*item;
-            let ids = value_lock.read().unwrap();
+            let ids = value_lock.read();
             let bitmap = RoaringBitmap::from_sorted_iter(ids.iter().copied()).unwrap();
             Arc::new((key.clone(), bitmap, None))
         });
@@ -199,7 +200,7 @@ impl<K: IndexKey> GenericIndexedField<K> {
     #[allow(dead_code)]
     pub fn query(&self, key: &K) -> Option<RoaringBitmap> {
         let normalized_key = key.normalize(self.field.case_sensitive());
-        let indexs = self.indexs.read().unwrap();
+        let indexs = self.indexs.read();
         indexs.get_bitmap(&normalized_key)
     }
 }
@@ -250,11 +251,11 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
         }
 
         // 批量更新索引
-        let mut indexs = self.indexs.read().unwrap().clone();
+        let mut indexs = self.indexs.read().clone();
         for (k, ids) in mtp {
             indexs.extend(k, ids);
         }
-        *self.indexs.write().unwrap() = indexs;
+        *self.indexs.write() = indexs;
 
         Ok(())
     }
@@ -269,7 +270,7 @@ impl<K: IndexKey> IndexWriter for GenericIndexedField<K> {
 
     fn mget_internal_id(&self, column: &ArrayRef) -> Vec<u32> {
         let mut result_ids = Vec::new();
-        let indexs = self.indexs.read().unwrap();
+        let indexs = self.indexs.read();
 
         for (_row_idx, key) in K::extract_from_array(column) {
             let normalized_key = key.normalize(self.field.case_sensitive());
@@ -320,13 +321,13 @@ impl<K: IndexKey> PkWriter for GenericIndexedField<K> {
             }
         }
 
-        let _lock = lock.write().unwrap();
+        let _lock = lock.write();
 
         // 更新索引并收集旧值
-        let mut indexs = self.indexs.read().unwrap().clone();
+        let mut indexs = self.indexs.read().clone();
         for (k, ids) in mtp {
             if let Some(old) = indexs.insert(k, ids) {
-                cur_dels.extend(old.1.read().unwrap().iter());
+                cur_dels.extend(old.1.read().iter());
             }
         }
 
@@ -337,7 +338,7 @@ impl<K: IndexKey> PkWriter for GenericIndexedField<K> {
             }
         }
 
-        *self.indexs.write().unwrap() = indexs;
+        *self.indexs.write() = indexs;
 
         Ok(cur_dels)
     }
@@ -355,7 +356,7 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
     fn query(&self, value: &datafusion::scalar::ScalarValue) -> Option<RoaringBitmap> {
         K::from_scalar(value).and_then(|key| {
             let normalized_key = key.normalize(self.field.case_sensitive());
-            let indexs = self.indexs.read().unwrap();
+            let indexs = self.indexs.read();
             indexs.get_bitmap(&normalized_key)
         })
     }
@@ -417,7 +418,7 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
             converted
         };
 
-        let indexs = self.indexs.read().unwrap();
+        let indexs = self.indexs.read();
         let result = indexs.range_query(
             start_key.as_ref(),
             start_inclusive,
@@ -472,7 +473,7 @@ impl<K: IndexKey + std::fmt::Debug> IndexReader for GenericIndexedField<K> {
             converted
         };
 
-        let indexs = self.indexs.read().unwrap();
+        let indexs = self.indexs.read();
         // 尝试使用底层 mem_btree 的 range_union() 优化
         // 如果不支持(内存索引)，返回 None 让调用方回退到 range()
 

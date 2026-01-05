@@ -141,6 +141,14 @@ impl FederatedQueryExecutor {
                 table_name.clone(),
                 table_info.table.schema.to_arrow_schema(),
             );
+            log::info!(
+                "📊 [FederatedQueryExecutor] Table '{}' partition distribution: {:?}",
+                table_name,
+                nodes
+                    .iter()
+                    .map(|(node, parts)| (node.clone(), parts.len()))
+                    .collect::<Vec<_>>()
+            );
             table_partition_nodes.insert(table_name.clone(), nodes);
         }
 
@@ -175,15 +183,26 @@ impl FederatedQueryExecutor {
             }
 
             if nodes.is_empty() {
+                log::info!("⚠️  [FederatedQueryExecutor] Table '{}' has no partitions, registering empty table", table_name);
                 self.register_empty_table(&ctx, table_name, schema.clone())?;
                 continue;
             }
 
+            log::info!(
+                "🔍 [FederatedQueryExecutor] Table '{}' decision: nodes.len()={}, contains_my_node={}, my_node_id={}",
+                table_name,
+                nodes.len(),
+                nodes.contains_key(&my_node_id),
+                my_node_id
+            );
+
             if nodes.len() == 1 && nodes.contains_key(&my_node_id) {
                 let local_partitions = nodes.get(&my_node_id).cloned().unwrap_or_default();
                 if local_partitions.is_empty() {
+                    log::info!("🏠 [FederatedQueryExecutor] Table '{}': All local but no partitions, using empty table", table_name);
                     self.register_empty_table(&ctx, table_name, schema.clone())?;
                 } else {
+                    log::info!("🏠 [FederatedQueryExecutor] Table '{}': All {} partition(s) on local node, using local table", table_name, local_partitions.len());
                     self.register_local_table(
                         &ctx,
                         table_name,
@@ -193,6 +212,7 @@ impl FederatedQueryExecutor {
                     .await?;
                 }
             } else if !nodes.contains_key(&my_node_id) {
+                log::info!("🌐 [FederatedQueryExecutor] Table '{}': All partition(s) on remote node, using federated table", table_name);
                 let (target_node, partitions) = nodes
                     .iter()
                     .next()
@@ -201,20 +221,28 @@ impl FederatedQueryExecutor {
                 self.register_federated_table(&ctx, table_name, &target_node, partitions)
                     .await?;
             } else {
+                log::info!("🔀 [FederatedQueryExecutor] Table '{}': Partitions distributed across {} nodes, using merged table", table_name, nodes.len());
                 self.register_merged_table(&ctx, table_name, nodes, normalized.needs_score_column)
                     .await?;
             }
         }
 
+        log::info!(
+            "📝 [FederatedQueryExecutor] All tables registered, parsing SQL: {}",
+            sql
+        );
         let df = ctx
             .sql(sql)
             .await
             .map_err(|e| CoreError::Internal(format!("Failed to parse SQL: {}", e)))?;
+        log::info!("✅ [FederatedQueryExecutor] SQL parsed successfully");
 
+        log::info!("🚀 [FederatedQueryExecutor] Executing query stream...");
         let stream = df
             .execute_stream()
             .await
             .map_err(|e| CoreError::Internal(format!("Failed to execute query: {}", e)))?;
+        log::info!("✅ [FederatedQueryExecutor] Query stream created");
 
         let stream = if normalized.needs_score_column {
             build_score_stream(stream, fulltext_context.clone(), &normalized.score)
@@ -222,7 +250,7 @@ impl FederatedQueryExecutor {
             stream
         };
 
-        log::debug!("[FederatedQueryExecutor] Query execution started");
+        log::info!("✅ [FederatedQueryExecutor] Query execution started");
         Ok(stream)
     }
 
@@ -382,6 +410,11 @@ impl FederatedQueryExecutor {
             );
 
             if node_id == &my_node_id {
+                log::info!(
+                    "📝 [register_merged_table] Registering local temp table '{}' for node '{}'",
+                    temp_table_name,
+                    node_id
+                );
                 if let Some(provider) = self
                     .create_local_provider(
                         table_name,
@@ -398,15 +431,29 @@ impl FederatedQueryExecutor {
                                 e
                             ))
                         })?;
+                    log::info!(
+                        "✅ [register_merged_table] Local temp table '{}' registered",
+                        temp_table_name
+                    );
                     temp_tables.push(temp_table_name);
                 }
             } else {
+                log::info!(
+                    "🌐 [register_merged_table] Registering remote temp table '{}' for node '{}'",
+                    temp_table_name,
+                    node_id
+                );
+
                 let grpc_addr = self
                     .cluster_manager
                     .get_node_grpc_addr(node_id)
                     .ok_or_else(|| {
                         CoreError::Internal(format!("Node {} gRPC address not found", node_id))
                     })?;
+                log::info!(
+                    "🔗 [register_merged_table] Resolved gRPC address: {}",
+                    grpc_addr
+                );
 
                 let executor = Arc::new(FlightSQLExecutor::new(
                     node_id.clone(),
@@ -414,14 +461,22 @@ impl FederatedQueryExecutor {
                     self.catalog.clone(),
                     Some(partitions.clone()),
                 ));
+                log::info!("🔧 [register_merged_table] Created FlightSQLExecutor");
 
                 let provider = Arc::new(SQLFederationProvider::new(executor.clone()));
+                log::info!("🔧 [register_merged_table] Created SQLFederationProvider");
 
                 use datafusion_federation::sql::RemoteTableRef;
                 let table_ref =
                     RemoteTableRef::parse_with_default_dialect(table_name).map_err(|e| {
                         CoreError::Internal(format!("Failed to parse table name: {}", e))
                     })?;
+                log::info!(
+                    "🔧 [register_merged_table] Parsed table ref: {:?}",
+                    table_ref
+                );
+
+                log::info!("⏳ [register_merged_table] About to call SQLTableSource::new (may trigger schema fetch)...");
                 let table_source = Arc::new(
                     SQLTableSource::new(provider, table_ref)
                         .await
@@ -429,27 +484,55 @@ impl FederatedQueryExecutor {
                             CoreError::Internal(format!("Failed to create table source: {}", e))
                         })?,
                 );
+                log::info!("✅ [register_merged_table] SQLTableSource::new completed");
+
                 let federated_provider = FederatedTableProviderAdaptor::new(table_source);
 
                 ctx.register_table(&temp_table_name, Arc::new(federated_provider))
                     .map_err(|e| {
                         CoreError::Internal(format!("Failed to register remote temp table: {}", e))
                     })?;
+                log::info!(
+                    "✅ [register_merged_table] Remote temp table '{}' registered",
+                    temp_table_name
+                );
                 temp_tables.push(temp_table_name);
             }
         }
 
         if temp_tables.is_empty() {
+            log::info!("⚠️ [register_merged_table] No temp tables created, using empty table");
             self.register_empty_table(ctx, table_name, table_schema)?;
             return Ok(());
         }
 
+        log::info!(
+            "🔀 [register_merged_table] Creating union of {} temp tables: {:?}",
+            temp_tables.len(),
+            temp_tables
+        );
+
+        log::info!(
+            "📋 [register_merged_table] Step 1: Creating DataFrame from first temp table '{}'",
+            &temp_tables[0]
+        );
         let mut df = ctx
             .table(&temp_tables[0])
             .await
             .map_err(|e| CoreError::Internal(format!("Failed to create DataFrame: {}", e)))?;
+        log::info!("✅ [register_merged_table] Step 1 completed");
 
-        for temp in temp_tables.iter().skip(1) {
+        log::info!(
+            "📋 [register_merged_table] Step 2: Union remaining {} temp tables",
+            temp_tables.len() - 1
+        );
+        for (idx, temp) in temp_tables.iter().skip(1).enumerate() {
+            log::info!(
+                "  🔗 [register_merged_table] Unioning temp table {} of {}: '{}'",
+                idx + 1,
+                temp_tables.len() - 1,
+                temp
+            );
             let next_df = ctx
                 .table(temp)
                 .await
@@ -457,17 +540,25 @@ impl FederatedQueryExecutor {
             df = df
                 .union(next_df)
                 .map_err(|e| CoreError::Internal(format!("Failed to union DataFrame: {}", e)))?;
+            log::info!("  ✅ [register_merged_table] Union {} completed", idx + 1);
         }
+        log::info!("✅ [register_merged_table] Step 2 completed");
 
+        log::info!("📋 [register_merged_table] Step 3: Creating ViewTable");
         let plan = df.logical_plan().clone();
         let view = ViewTable::try_new(plan, None)
             .map_err(|e| CoreError::Internal(format!("Failed to create ViewTable: {}", e)))?;
+        log::info!("✅ [register_merged_table] Step 3 completed");
 
+        log::info!(
+            "📋 [register_merged_table] Step 4: Registering merged view '{}'",
+            table_name
+        );
         ctx.register_table(table_name, Arc::new(view))
             .map_err(|e| CoreError::Internal(format!("Failed to register merged view: {}", e)))?;
 
-        log::debug!(
-            "[FederatedQueryExecutor] Registered merged view '{}' with {} temp source(s)",
+        log::info!(
+            "✅ [register_merged_table] Registered merged view '{}' with {} temp source(s)",
             table_name,
             temp_tables.len()
         );

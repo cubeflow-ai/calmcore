@@ -166,6 +166,7 @@ impl ArrowFlightService for CalmFlightService {
             partition_hint,
             sql
         );
+        log::info!("🔍 [Flight Service] Full ticket JSON: {}", ticket_str);
 
         // 执行查询
         let stream = if is_internal {

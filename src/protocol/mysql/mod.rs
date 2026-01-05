@@ -824,6 +824,9 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
                 return self.handle_session_variables_query(query_without_comment, results);
             }
 
+            // ⚠️ 关键修复：移除 block_in_place，避免阻塞 tokio 工作线程
+            // 原因：block_in_place 会阻塞线程，导致 tokio::spawn 的生产者任务无法执行
+            // 造成 stream 死锁（消费者等待数据，但生产者无法运行）
             return tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(execute_query(
                     self.calm_service.clone(),
@@ -1120,7 +1123,10 @@ async fn execute_query<W: io::Read + io::Write>(
     let mut total_rows = 0;
     let mut batches = Vec::new();
 
+    log::trace!("📊 [MySQL Stream] Starting to consume stream");
+
     while let Some(batch_result) = stream.next().await {
+        log::trace!("📊 [MySQL Stream] Received batch");
         let batch = match batch_result {
             Ok(b) => b,
             Err(e) => {
@@ -1167,6 +1173,8 @@ async fn execute_query<W: io::Read + io::Write>(
 
         write_query_result(results, &schema, &batches)
     };
+
+    log::trace!("📊 [MySQL Stream] Completed writing results");
 
     // 打印追踪报告
     if let Some(ctx) = trace_ctx {

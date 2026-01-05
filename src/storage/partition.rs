@@ -1,7 +1,6 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex, RwLock},
-};
+use std::{path::PathBuf, sync::Arc};
+
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 
 use datafusion::arrow::{self as arrow, array::RecordBatch};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -117,14 +116,14 @@ impl Partition {
         let pk_hash = arrow_utils::array_to_hash(&pk_array);
 
         // 在所有 segments 中查找
-        let _read_guard = self.read_lock.read().unwrap();
+        let _read_guard = self.read_lock.read();
 
         let mut found_segments = Vec::new();
         let mut found_internal_ids = Vec::new();
 
         // 先查询 current segment
         {
-            let current_segment = self.current_segment.read().unwrap();
+            let current_segment = self.current_segment.read();
             if let Some(ids) = current_segment.mget_internal_id(&pk_hash, &pk_array) {
                 if !ids.is_empty() {
                     // 需要克隆 segment 的 Arc 引用
@@ -136,7 +135,7 @@ impl Partition {
         }
 
         // 查询 frozen segments
-        let frozen_segments = self.frozen_segments.read().unwrap();
+        let frozen_segments = self.frozen_segments.read();
         for (_, segment) in frozen_segments.iter() {
             if let Some(ids) = segment.mget_internal_id(&pk_hash, &pk_array) {
                 if !ids.is_empty() {
@@ -159,7 +158,7 @@ impl Partition {
         for (is_current, ids) in found_internal_ids.iter() {
             if *is_current {
                 // 从 current segment 读取
-                let current_segment = self.current_segment.read().unwrap();
+                let current_segment = self.current_segment.read();
                 if let Some(batch) = current_segment.get_documents(ids)? {
                     all_batches.push(batch);
                 }
@@ -206,8 +205,8 @@ impl Partition {
 
                 let pk_hash = arrow_utils::array_to_hash(column);
 
-                let _write_guard = self.write_lock.lock().unwrap();
-                let segments = self.frozen_segments.read().unwrap().clone();
+                let _write_guard = self.write_lock.lock();
+                let segments = self.frozen_segments.read().clone();
 
                 let dels: Vec<(Arc<Segment>, Vec<u32>)> = segments
                     .par_iter()
@@ -221,7 +220,7 @@ impl Partition {
                 self.write(&data, Some(pk_hash), Some(WriteInfo(dels)))
             }
             None => {
-                let _write_guard = self.write_lock.lock().unwrap();
+                let _write_guard = self.write_lock.lock();
                 self.write(&data, None, None)
             }
         }
@@ -252,12 +251,12 @@ impl Partition {
         // Hash the primary key values
         let pk_hash = arrow_utils::array_to_hash(pk_values);
 
-        let _write_guard = self.write_lock.lock().unwrap();
+        let _write_guard = self.write_lock.lock();
 
         let mut deleted_count = 0u64;
 
         // Search in frozen segments
-        let segments = self.frozen_segments.read().unwrap().clone();
+        let segments = self.frozen_segments.read().clone();
         for (_, segment) in segments.iter() {
             if let Some(ids) = segment.mget_internal_id(pk_hash.as_ref(), pk_values) {
                 deleted_count += ids.len() as u64;
@@ -266,7 +265,7 @@ impl Partition {
         }
 
         // Search in current segment
-        let current = self.current_segment.read().unwrap();
+        let current = self.current_segment.read();
         if let Some(ids) = current.mget_internal_id(pk_hash.as_ref(), pk_values) {
             deleted_count += ids.len() as u64;
             current.mark_del(ids);
@@ -278,7 +277,7 @@ impl Partition {
     /// Flush current active segment to frozen list (non-blocking write)
     /// The segment becomes immediately readable but not yet persisted to disk
     pub fn flush(&self, check: bool) -> CoreResult<u64> {
-        let mut current = self.current_segment.write().unwrap();
+        let mut current = self.current_segment.write();
 
         if check && current.doc_count() < self.schema.persist_policy.max_docs_per_segment {
             return Ok(0);
@@ -308,7 +307,7 @@ impl Partition {
         // 3. Move old segment to frozen list (immediately readable)
         let old_segment_arc = Arc::new(old_segment);
         {
-            let mut segments = self.frozen_segments.write().unwrap();
+            let mut segments = self.frozen_segments.write();
             segments.push((seg_id, old_segment_arc.clone()));
         }
 
@@ -352,10 +351,10 @@ impl Partition {
 
         println!(
             "  📊 frozen_segments count: {}",
-            self.frozen_segments.read().unwrap().len()
+            self.frozen_segments.read().len()
         );
         {
-            let frozen_segments = self.frozen_segments.read().unwrap();
+            let frozen_segments = self.frozen_segments.read();
             for (seg_id, segment) in frozen_segments.iter() {
                 if let Some(existing_path) = segment.get_parquet_path() {
                     println!(
@@ -401,7 +400,7 @@ impl Partition {
 
         // 2. Determine start ID for this segment (based on current segment's next_doc_id)
         let start_id = {
-            let current = self.current_segment.read().unwrap();
+            let current = self.current_segment.read();
             current.next_doc_id()
         };
         let end_id = start_id + num_rows - 1;
@@ -554,13 +553,13 @@ impl Partition {
         // 6. Add to frozen segments
         let segment_arc = Arc::new(segment);
         {
-            let mut segments = self.frozen_segments.write().unwrap();
+            let mut segments = self.frozen_segments.write();
             segments.push((seg_id, segment_arc));
         }
 
         // 7. Update current segment's start position
         {
-            let mut current = self.current_segment.write().unwrap();
+            let mut current = self.current_segment.write();
             let new_start = end_id + 1;
             *current = Segment::new(new_start, self.schema.clone());
         }
@@ -576,7 +575,7 @@ impl Partition {
     /// Get list of segments that need to be persisted (not yet persisted)
     /// 这些 segment 还在内存中，需要持久化以释放内存
     pub fn get_unpersisted_segments(&self) -> Vec<(u64, Arc<Segment>)> {
-        let segments = self.frozen_segments.read().unwrap();
+        let segments = self.frozen_segments.read();
         segments
             .iter()
             .filter(|(_, segment)| !segment.is_persisted())
@@ -588,7 +587,7 @@ impl Partition {
     /// 这个方法应该被定期调用以释放内存
     pub fn persist_unpersisted_segments(&self) -> CoreResult<Vec<u64>> {
         // 获取持久化锁，防止并发持久化
-        let _persist_guard = self.persist_lock.lock().unwrap();
+        let _persist_guard = self.persist_lock.lock();
 
         let unpersisted = self.get_unpersisted_segments();
 
@@ -633,7 +632,7 @@ impl Partition {
             .map_err(|e| CoreError::IOError(format!("Failed to create partition dir: {}", e)))?;
 
         // Find the frozen segment
-        let segments = self.frozen_segments.read().unwrap();
+        let segments = self.frozen_segments.read();
         let (_, segment) = segments
             .iter()
             .find(|(id, _)| *id == seg_id)
@@ -842,7 +841,7 @@ impl Partition {
         pk_hash: Option<Vec<u32>>,
         info: Option<WriteInfo>,
     ) -> CoreResult<Vec<u64>> {
-        let current_segment = self.current_segment.read().unwrap();
+        let current_segment = self.current_segment.read();
 
         // 写入数据
         let result = current_segment
@@ -874,15 +873,14 @@ impl Partition {
         let count: u64 = self
             .frozen_segments
             .read()
-            .unwrap()
             .iter()
             .map(|(_, segment)| segment.total_count())
             .sum();
-        count + self.current_segment.read().unwrap().total_count()
+        count + self.current_segment.read().total_count()
     }
 
     pub fn segment_count(&self) -> usize {
-        self.frozen_segments.read().unwrap().len()
+        self.frozen_segments.read().len()
     }
 
     /// 获取 Partition ID
@@ -902,14 +900,14 @@ impl Partition {
 
     /// Get read-only access to the current segment
     /// Used by PartitionTableProvider for query execution
-    pub fn get_current_segment(&self) -> std::sync::RwLockReadGuard<'_, Segment> {
-        self.current_segment.read().unwrap()
+    pub fn get_current_segment(&self) -> RwLockReadGuard<'_, Segment> {
+        self.current_segment.read()
     }
 
     /// Get read-only access to the frozen segments
     /// Used by PartitionTableProvider for query execution
-    pub fn get_frozen_segments(&self) -> std::sync::RwLockReadGuard<'_, Vec<(u64, Arc<Segment>)>> {
-        self.frozen_segments.read().unwrap()
+    pub fn get_frozen_segments(&self) -> RwLockReadGuard<'_, Vec<(u64, Arc<Segment>)>> {
+        self.frozen_segments.read()
     }
 
     /// 持久化 Partition 的所有数据（同步操作）
@@ -923,7 +921,7 @@ impl Partition {
         log::info!("[Partition {}] Starting persist_all...", self.name);
 
         // 1. Flush 当前活跃 segment
-        let current_count = self.current_segment.read().unwrap().doc_count();
+        let current_count = self.current_segment.read().doc_count();
         if current_count > 0 {
             log::info!(
                 "[Partition {}] Flushing current segment ({} records)",
@@ -977,7 +975,7 @@ impl Partition {
         // 1. 扫描 frozen segments (只读,稳定)
         {
             log::info!("📍 [Partition::scan_all] Acquiring frozen_segments lock...");
-            let frozen_segments = self.frozen_segments.read().unwrap();
+            let frozen_segments = self.frozen_segments.read();
             log::info!(
                 "📍 [Partition::scan_all] Got lock, {} frozen segments",
                 frozen_segments.len()
@@ -1026,7 +1024,7 @@ impl Partition {
         // 2. 扫描 current segment (可能正在写入)
         {
             log::info!("📍 [Partition::scan_all] Acquiring current_segment lock...");
-            let current_segment = self.current_segment.read().unwrap();
+            let current_segment = self.current_segment.read();
             log::info!(
                 "📍 [Partition::scan_all] Got lock, {} docs in current segment",
                 current_segment.doc_count()

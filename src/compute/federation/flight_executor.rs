@@ -27,12 +27,35 @@ impl FlightExecutor {
 
     /// 连接到远程节点
     async fn connect(&self) -> CoreResult<FlightClient> {
-        let channel = Channel::from_shared(self.endpoint.clone())
-            .map_err(|e| CoreError::Internal(format!("Invalid endpoint: {}", e)))?
-            .connect()
-            .await
-            .map_err(|e| CoreError::Network(format!("Failed to connect: {}", e)))?;
+        log::info!(
+            "🔌 [FlightExecutor::connect] Creating channel to endpoint: {}",
+            self.endpoint
+        );
 
+        let channel = Channel::from_shared(self.endpoint.clone()).map_err(|e| {
+            log::error!(
+                "❌ [FlightExecutor::connect] Invalid endpoint '{}': {}",
+                self.endpoint,
+                e
+            );
+            CoreError::Internal(format!("Invalid endpoint: {}", e))
+        })?;
+
+        log::info!("🔌 [FlightExecutor::connect] Channel created, connecting...");
+
+        let channel = channel.connect().await.map_err(|e| {
+            log::error!(
+                "❌ [FlightExecutor::connect] Failed to connect to '{}': {}",
+                self.endpoint,
+                e
+            );
+            CoreError::Network(format!("Failed to connect: {}", e))
+        })?;
+
+        log::info!(
+            "✅ [FlightExecutor::connect] Connected successfully to {}",
+            self.endpoint
+        );
         Ok(FlightClient::new(channel))
     }
 
@@ -42,14 +65,20 @@ impl FlightExecutor {
         sql: &str,
         partition_names: &[String],
     ) -> CoreResult<SendableRecordBatchStream> {
-        log::debug!(
-            "[FlightExecutor] Executing SQL on node '{}' with partitions {:?}: {}",
+        log::info!(
+            "🌐 [FlightExecutor] Executing SQL on node '{}' (endpoint: {}) with partitions {:?}: {}",
             self.node_id,
+            self.endpoint,
             partition_names,
             sql
         );
 
+        log::info!(
+            "🔌 [FlightExecutor] Connecting to node '{}'...",
+            self.node_id
+        );
         let mut client = self.connect().await?;
+        log::info!("✅ [FlightExecutor] Connected to node '{}'", self.node_id);
 
         // 创建结构化的 Ticket payload
         let ticket_payload = serde_json::json!({
@@ -57,25 +86,44 @@ impl FlightExecutor {
             "partition_names": partition_names,
             "internal": true,
         });
+        let ticket_json = serde_json::to_string(&ticket_payload).unwrap();
+        log::info!(
+            "📝 [FlightExecutor] Ticket JSON for node '{}': {}",
+            self.node_id,
+            ticket_json
+        );
+
         let ticket_bytes = serde_json::to_vec(&ticket_payload)
             .map_err(|e| CoreError::Internal(format!("Failed to serialize ticket: {}", e)))?;
 
         let ticket = Ticket::new(ticket_bytes);
 
         // 执行 do_get
-        let mut flight_stream = client
-            .do_get(ticket)
-            .await
-            .map_err(|e| CoreError::Network(format!("Flight do_get failed: {}", e)))?;
+        log::info!(
+            "📡 [FlightExecutor] Calling do_get on node '{}'...",
+            self.node_id
+        );
+        let mut flight_stream = client.do_get(ticket).await.map_err(|e| {
+            log::error!(
+                "❌ [FlightExecutor] do_get failed for node '{}': {}",
+                self.node_id,
+                e
+            );
+            CoreError::Network(format!("Flight do_get failed: {}", e))
+        })?;
 
-        log::debug!(
-            "[FlightExecutor] Successfully started stream from node '{}'",
+        log::info!(
+            "✅ [FlightExecutor] do_get succeeded, stream started from node '{}'",
             self.node_id
         );
 
         // FlightRecordBatchStream 的 schema 只有在收到第一条消息后才会填充，
         // 因此需要在缺失时主动触发一次读取
         if flight_stream.schema().is_none() {
+            log::info!(
+                "📋 [FlightExecutor] Schema not available, fetching first item from node '{}'",
+                self.node_id
+            );
             let first_item = flight_stream.next().await;
 
             let schema = flight_stream
@@ -85,10 +133,18 @@ impl FlightExecutor {
 
             match first_item {
                 Some(batch) => {
+                    log::info!(
+                        "✅ [FlightExecutor] Received first batch from node '{}'",
+                        self.node_id
+                    );
                     let stream = stream::once(async { batch }).chain(flight_stream);
                     return Self::adapt_record_batch_stream(schema, stream);
                 }
                 None => {
+                    log::info!(
+                        "⚠️ [FlightExecutor] Empty stream from node '{}'",
+                        self.node_id
+                    );
                     let empty_stream = stream::empty::<
                         Result<datafusion::arrow::record_batch::RecordBatch, FlightError>,
                     >();
@@ -102,6 +158,10 @@ impl FlightExecutor {
             .ok_or_else(|| CoreError::Internal("Flight stream has no schema".to_string()))?
             .clone();
 
+        log::info!(
+            "✅ [FlightExecutor] Stream ready from node '{}'",
+            self.node_id
+        );
         Self::adapt_record_batch_stream(schema, flight_stream)
     }
 

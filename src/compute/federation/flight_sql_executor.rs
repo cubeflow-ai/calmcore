@@ -9,9 +9,28 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::sql::unparser::dialect::{DefaultDialect, Dialect};
 use datafusion_federation::sql::SQLExecutor;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 
 use crate::catalog::Catalog;
 use crate::compute::federation::flight_executor::FlightExecutor;
+
+// 全局独立的 tokio runtime，专门用于执行远程查询
+// 使用 lazy_static 确保只初始化一次
+use std::sync::OnceLock;
+
+static QUERY_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn get_query_runtime() -> &'static Runtime {
+    QUERY_RUNTIME.get_or_init(|| {
+        log::info!("🚀 [FlightSQLExecutor] Creating dedicated query runtime");
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(16)
+            .thread_name("calm-query")
+            .enable_all()
+            .build()
+            .expect("Failed to create query runtime")
+    })
+}
 
 /// Flight SQL Executor
 ///
@@ -63,28 +82,74 @@ impl SQLExecutor for FlightSQLExecutor {
         query: &str,
         _schema: SchemaRef,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        log::debug!(
-            "[FlightSQLExecutor] Executing SQL on node {}: {}",
+        log::info!(
+            "🌐 [FlightSQLExecutor] Executing SQL on remote node '{}' with partitions {:?}: {}",
             self.node_id,
+            self.partition_names,
             query
         );
 
         let partition_hint = self.partition_names.clone();
-        // 使用 tokio 的 block_in_place 在同步上下文中执行异步代码
-        let stream = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                let result = if let Some(names) = partition_hint.as_ref() {
-                    self.flight_executor
-                        .execute_sql_with_partitions(query, names)
-                        .await
-                } else {
-                    self.flight_executor.execute_sql(query).await
-                };
+        let node_id = self.node_id.clone();
+        let flight_executor = self.flight_executor.clone();
+        let query = query.to_string();
 
-                result.map_err(|e| DataFusionError::External(Box::new(e)))
-            })
-        })?;
+        // 🔧 关键修复：使用全局独立的 runtime 避免死锁
+        // DataFusion 的 execute() 是同步方法，会阻塞调用线程
+        // 使用全局独立 runtime 的 spawn() 执行异步任务，通过 channel 同步获取结果
+        log::info!(
+            "🚀 [FlightSQLExecutor] Spawning task on global query runtime for node '{}'",
+            node_id
+        );
 
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+
+        // 获取全局独立的查询 runtime
+        let runtime = get_query_runtime();
+
+        // 在独立 runtime 上执行异步任务
+        runtime.spawn(async move {
+            log::info!(
+                "📡 [FlightSQLExecutor] Async task started for node '{}'",
+                node_id
+            );
+
+            let result = if let Some(names) = partition_hint.as_ref() {
+                flight_executor
+                    .execute_sql_with_partitions(&query, names)
+                    .await
+            } else {
+                flight_executor.execute_sql(&query).await
+            };
+
+            log::info!(
+                "✅ [FlightSQLExecutor] Remote call completed for node '{}'",
+                node_id
+            );
+
+            let _ = tx.send(result.map_err(|e| DataFusionError::External(Box::new(e))));
+        });
+
+        log::info!("⏳ [FlightSQLExecutor] Waiting for result from runtime...");
+
+        // 阻塞等待结果
+        let stream = rx
+            .recv()
+            .map_err(|e| {
+                DataFusionError::External(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Channel recv failed: {}", e),
+                )))
+            })?
+            .map_err(|e| {
+                log::error!("❌ [FlightSQLExecutor] Remote call failed: {}", e);
+                e
+            })?;
+
+        log::info!(
+            "✅ [FlightSQLExecutor] Stream obtained from node '{}'",
+            self.node_id
+        );
         Ok(stream)
     }
 

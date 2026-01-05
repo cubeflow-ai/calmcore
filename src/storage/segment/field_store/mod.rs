@@ -1,10 +1,6 @@
-use std::{
-    any::Any,
-    borrow::Cow,
-    collections::HashSet,
-    error::Error,
-    sync::{Arc, RwLock},
-};
+use std::{any::Any, borrow::Cow, collections::HashSet, error::Error, sync::Arc};
+
+use parking_lot::{Mutex, RwLock};
 
 use datafusion::{
     arrow::array::{ArrayRef, RecordBatch},
@@ -1157,7 +1153,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
     pub(crate) fn extend(&mut self, k: K, ids: Vec<u32>) {
         if let InvertedIndex::Memory(tree) = self {
             match tree.get(&k) {
-                Some(v) => v.write().unwrap().extend(ids),
+                Some(v) => v.write().extend(ids),
                 None => _ = tree.put(k, Arc::new(RwLock::new(ids))),
             }
         } else {
@@ -1169,7 +1165,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
     pub(crate) fn append_ids(&mut self, k: K, ids: Vec<u32>) {
         if let InvertedIndex::Memory(tree) = self {
             match tree.get(&k) {
-                Some(v) => v.write().unwrap().extend(ids),
+                Some(v) => v.write().extend(ids),
                 None => _ = tree.put(k, Arc::new(RwLock::new(ids))),
             }
         } else {
@@ -1198,7 +1194,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
             InvertedIndex::Memory(btree) => btree.get(k).map(|v| {
                 // 🔧 修复: 不能假设 Vec 是排序的,使用通用的 from_iter
                 // 并发写入时 extend() 可能导致 Vec 无序
-                let ids = v.read().unwrap();
+                let ids = v.read();
                 RoaringBitmap::from_iter(ids.iter().copied())
             }),
         }
@@ -1325,7 +1321,7 @@ impl<K: Clone + PartialOrd + Ord> InvertedIndex<K> {
                     }
 
                     if start_ok {
-                        let ids = ids_lock.read().unwrap();
+                        let ids = ids_lock.read();
                         // 🔧 修复: 不能假设 Vec 是排序的,使用通用的 from_iter
                         result |= RoaringBitmap::from_iter(ids.iter().copied());
                         matched_keys += 1;

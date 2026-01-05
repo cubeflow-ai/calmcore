@@ -346,7 +346,6 @@ async fn process_partition_segments(
         let scanner_opt = {
             let current_segment = partition.get_current_segment();
             let doc_count = current_segment.doc_count();
-
             if doc_count == 0 {
                 None
             } else {

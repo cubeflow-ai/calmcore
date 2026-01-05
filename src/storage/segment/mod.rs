@@ -19,13 +19,14 @@ use datafusion::arrow::{
     array::{ArrayRef, RecordBatch},
 };
 use itertools::Itertools;
+use parking_lot::{lock_api::RwLockReadGuard, RwLock};
 use roaring::RoaringBitmap;
 use std::{
     collections::HashMap,
     io::Read,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, RwLock,
+        Arc,
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -363,19 +364,16 @@ impl Segment {
             .as_ref()
             .and_then(|k| self.field_index.get(k))
         {
-            let fields = self.fields.read().unwrap();
+            let fields = self.fields.read();
             let pk_field: &dyn IndexWriter = &*fields[*index];
             self.write_pk(pk_field, &new_data, start_id, pk_hash, info, lock)?;
         }
 
         // 使用 RowDataStore 的 put 方法存储 RecordBatch
-        self.row_data
-            .write()
-            .unwrap()
-            .put(start_id, new_data.clone());
+        self.row_data.write().put(start_id, new_data.clone());
 
         let pk_name = self.schema.primary_key.as_deref();
-        let fields = self.fields.read().unwrap();
+        let fields = self.fields.read();
         for f in fields.iter() {
             if let Some(pk) = pk_name {
                 if f.name() == pk {
@@ -416,12 +414,12 @@ impl Segment {
 
                 let del = pk_writer.write_pk(data, start_id, info, lock)?;
                 if !del.is_empty() {
-                    self.deleted.write().unwrap().extend(del.iter());
+                    self.deleted.write().extend(del.iter());
                 }
 
                 // 将主键哈希值插入 BloomFilter
                 if let Some(hashes) = pk_hash {
-                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    let mut bloom = self.pk_bloomfilter.write();
                     for hash in hashes {
                         bloom.set(&hash);
                     }
@@ -441,12 +439,12 @@ impl Segment {
 
                 let del = pk_writer.write_pk(data, start_id, info, lock)?;
                 if !del.is_empty() {
-                    self.deleted.write().unwrap().extend(del.iter());
+                    self.deleted.write().extend(del.iter());
                 }
 
                 // 将主键哈希值插入 BloomFilter
                 if let Some(hashes) = pk_hash {
-                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    let mut bloom = self.pk_bloomfilter.write();
                     for hash in hashes {
                         bloom.set(&hash);
                     }
@@ -466,12 +464,12 @@ impl Segment {
 
                 let del = pk_writer.write_pk(data, start_id, info, lock)?;
                 if !del.is_empty() {
-                    self.deleted.write().unwrap().extend(del.iter());
+                    self.deleted.write().extend(del.iter());
                 }
 
                 // 将主键哈希值插入 BloomFilter
                 if let Some(hashes) = pk_hash {
-                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    let mut bloom = self.pk_bloomfilter.write();
                     for hash in hashes {
                         bloom.set(&hash);
                     }
@@ -491,12 +489,12 @@ impl Segment {
 
                 let del = pk_writer.write_pk(data, start_id, info, lock)?;
                 if !del.is_empty() {
-                    self.deleted.write().unwrap().extend(del.iter());
+                    self.deleted.write().extend(del.iter());
                 }
 
                 // 将主键哈希值插入 BloomFilter
                 if let Some(hashes) = pk_hash {
-                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    let mut bloom = self.pk_bloomfilter.write();
                     for hash in hashes {
                         bloom.set(&hash);
                     }
@@ -516,12 +514,12 @@ impl Segment {
 
                 let del = pk_writer.write_pk(data, start_id, info, lock)?;
                 if !del.is_empty() {
-                    self.deleted.write().unwrap().extend(del.iter());
+                    self.deleted.write().extend(del.iter());
                 }
 
                 // 将主键哈希值插入 BloomFilter
                 if let Some(hashes) = pk_hash {
-                    let mut bloom = self.pk_bloomfilter.write().unwrap();
+                    let mut bloom = self.pk_bloomfilter.write();
                     for hash in hashes {
                         bloom.set(&hash);
                     }
@@ -544,7 +542,7 @@ impl Segment {
     /// internal id is the row number in the segment + start
     pub fn mget_internal_id(&self, pk_hash: &[u32], column: &ArrayRef) -> Option<Vec<u32>> {
         // 使用 BloomFilter 进行预过滤，快速判断主键是否可能存在于当前 segment
-        let bloom = self.pk_bloomfilter.read().unwrap();
+        let bloom = self.pk_bloomfilter.read();
         let active = pk_hash
             .iter()
             .enumerate()
@@ -570,10 +568,10 @@ impl Segment {
             .unwrap();
 
         let ids = {
-            let fields = self.fields.read().unwrap();
+            let fields = self.fields.read();
             let ids = fields[index].mget_internal_id(&filtered_column);
 
-            let del_guard = self.deleted.read().unwrap();
+            let del_guard = self.deleted.read();
 
             if del_guard.is_empty() {
                 ids
@@ -592,13 +590,13 @@ impl Segment {
     }
 
     pub fn mark_del(&self, ids: Vec<u32>) {
-        self.deleted.write().unwrap().extend(ids);
+        self.deleted.write().extend(ids);
     }
 
     pub(crate) fn total_count(&self) -> u64 {
         // Use doc_id_gen as the total count (works for both active and frozen segments)
         let total = self.doc_id_gen.load(Ordering::Relaxed) as u64;
-        total - self.deleted.read().unwrap().len()
+        total - self.deleted.read().len()
     }
 
     /// Get a single document by internal doc_id
@@ -609,14 +607,14 @@ impl Segment {
         use datafusion::arrow::compute::filter_record_batch;
 
         // Check if document is deleted
-        if self.deleted.read().unwrap().contains(doc_id) {
+        if self.deleted.read().contains(doc_id) {
             return None;
         }
 
         // Find which RecordBatch contains this doc_id using floor lookup
         // BTree keys are the first doc_id in each batch
         // e.g., keys: [1, 100, 200], query 50 -> finds batch at key 1
-        let row_data = self.row_data.read().unwrap();
+        let row_data = self.row_data.read();
 
         // Use floor to find the batch containing this doc_id
         let (start_id, batch) = row_data.floor(&doc_id)?;
@@ -642,7 +640,7 @@ impl Segment {
     pub fn get_documents(&self, doc_ids: &[u32]) -> CoreResult<Option<RecordBatch>> {
         use datafusion::arrow::compute::concat_batches;
 
-        let deleted = self.deleted.read().unwrap();
+        let deleted = self.deleted.read();
 
         // Collect individual document batches
         let mut doc_batches: Vec<RecordBatch> = Vec::new();
@@ -677,8 +675,8 @@ impl Segment {
     /// Returns an iterator-like result with lazy loading
     /// Deleted documents are automatically filtered out
     pub fn scan_documents(&self) -> CoreResult<Vec<RecordBatch>> {
-        let deleted = self.deleted.read().unwrap();
-        let row_data = self.row_data.read().unwrap();
+        let deleted = self.deleted.read();
+        let row_data = self.row_data.read();
 
         // Collect all non-deleted batches
         let mut batches: Vec<RecordBatch> = Vec::new();
@@ -956,7 +954,7 @@ impl Segment {
         // 1. Persist each field's inverted index (to temp directory)
         let start = std::time::Instant::now();
         let new_fields = {
-            let fields = self.fields.read().unwrap();
+            let fields = self.fields.read();
             let mut new_fields: Vec<Box<dyn IndexWriter>> = Vec::new();
 
             for field in fields.iter() {
@@ -1027,7 +1025,7 @@ impl Segment {
         // 2. Persist pk_bloomfilter (to temp directory)
         {
             let pk_path = format!("{}/pk_bloomfilter", segment_tmp_path);
-            let pk_bloom = self.pk_bloomfilter.read().unwrap();
+            let pk_bloom = self.pk_bloomfilter.read();
 
             // Use bloomfilter's built-in serialization (includes header with k_num and seed)
             let buffer = pk_bloom.to_bytes();
@@ -1040,7 +1038,7 @@ impl Segment {
         // 3. Persist deleted bitmap (current segment, to temp directory)
         {
             let deleted_path = format!("{}/deleted", segment_tmp_path);
-            let deleted = self.deleted.read().unwrap();
+            let deleted = self.deleted.read();
 
             let mut file = std::fs::File::create(&deleted_path)
                 .map_err(|e| CoreError::IOError(format!("Failed to create deleted file: {}", e)))?;
@@ -1056,7 +1054,7 @@ impl Segment {
         let mut history_snapshot: Vec<(u64, u64, RoaringBitmap)> = Vec::new(); // (start, end, bitmap)
 
         for (_seg_id, segment) in history_segments {
-            let history_deleted = segment.deleted.read().unwrap().clone();
+            let history_deleted = segment.deleted.read().clone();
 
             if history_deleted.is_empty() {
                 continue; // Skip empty deletes
@@ -1092,7 +1090,7 @@ impl Segment {
 
         // 4. Persist row_data (skip for external Parquet references)
         let is_external_parquet = {
-            let row_data = self.row_data.read().unwrap();
+            let row_data = self.row_data.read();
             matches!(*row_data, RowDataStore::Parquet(_))
         };
 
@@ -1103,8 +1101,8 @@ impl Segment {
                 .map_err(|e| CoreError::IOError(format!("Failed to create rowdata dir: {}", e)))?;
 
             // Clone row_data (fast - microseconds due to pointer implementation)
-            let row_data_clone = self.row_data.read().unwrap().clone();
-            let deleted = self.deleted.read().unwrap().clone();
+            let row_data_clone = self.row_data.read().clone();
+            let deleted = self.deleted.read().clone();
 
             // Persist row data using TreeWriter
             self.persist_row_data(&rowdata_path, row_data_clone, &deleted)?;
@@ -1157,7 +1155,7 @@ impl Segment {
 
         // 🔑 关键：只有 rename 成功后才替换 fields 和 row_data
         // 这样 rename 失败时还可以重试
-        *self.fields.write().unwrap() = new_fields;
+        *self.fields.write() = new_fields;
 
         // Phase 3: Replace historical deleted files back to their segments
         if !history_snapshot.is_empty() {
@@ -1197,7 +1195,7 @@ impl Segment {
                     parquet_path
                 )));
             };
-            *self.row_data.write().unwrap() = disk_row_data;
+            *self.row_data.write() = disk_row_data;
         } else {
             log::info!("  Keeping external Parquet reference (no row_data replacement)");
         }
@@ -1465,7 +1463,7 @@ impl Segment {
     /// Check if this segment references an external data file (e.g., Parquet)
     /// Returns true if the segment uses an external file instead of internal storage
     pub fn is_external_reference(&self) -> bool {
-        let row_data = self.row_data.read().unwrap();
+        let row_data = self.row_data.read();
         matches!(*row_data, RowDataStore::Parquet(_))
     }
 
@@ -1497,13 +1495,15 @@ impl Segment {
 
     /// Get the count of deleted documents
     pub fn deleted_count(&self) -> u64 {
-        self.deleted.read().unwrap().len()
+        self.deleted.read().len()
     }
 
     /// Get the fields (IndexWriter) vector
     /// This is used by PartitionTableProvider to convert IndexWriter to IndexReader
-    pub fn get_fields(&self) -> std::sync::RwLockReadGuard<'_, Vec<Box<dyn IndexWriter>>> {
-        self.fields.read().unwrap()
+    pub fn get_fields(
+        &self,
+    ) -> RwLockReadGuard<'_, parking_lot::RawRwLock, Vec<Box<dyn IndexWriter + 'static>>> {
+        self.fields.read()
     }
 
     /// Get cloned IndexReaders from this segment
@@ -1512,7 +1512,7 @@ impl Segment {
     pub fn get_index_readers(&self) -> std::collections::HashMap<String, Box<dyn IndexReader>> {
         use std::collections::HashMap;
 
-        let fields = self.fields.read().unwrap();
+        let fields = self.fields.read();
         let mut readers = HashMap::new();
 
         for field_writer in fields.iter() {
@@ -1550,6 +1550,7 @@ impl Segment {
             {
                 readers.insert(name, Box::new(timestamp.clone()) as Box<dyn IndexReader>);
             } else if let Some(fulltext) = field_writer.as_any().downcast_ref::<FullTextField>() {
+                //TODO: ANSJ
                 // readers.insert(name, Box::new(fulltext.clone()) as Box<dyn IndexReader>);
             }
         }
@@ -1564,7 +1565,7 @@ impl Segment {
         field_name: &str,
         value: &datafusion::scalar::ScalarValue,
     ) -> Option<RoaringBitmap> {
-        let fields = self.fields.read().unwrap();
+        let fields = self.fields.read();
         let index = self.field_index.get(field_name)?;
         let field_writer = fields.get(*index)?;
 
@@ -1613,7 +1614,7 @@ impl Segment {
         end: &datafusion::scalar::ScalarValue,
         end_inclusive: bool,
     ) -> Option<RoaringBitmap> {
-        let fields = self.fields.read().unwrap();
+        let fields = self.fields.read();
         let index = self.field_index.get(field_name)?;
         let field_writer = fields.get(*index)?;
 
@@ -1674,12 +1675,12 @@ impl Segment {
 
     /// Get a clone of the deleted bitmap
     pub fn get_deleted(&self) -> RoaringBitmap {
-        self.deleted.read().unwrap().clone()
+        self.deleted.read().clone()
     }
 
     /// Get a clone of the row data
     pub fn get_row_data(&self) -> RowDataStore {
-        self.row_data.read().unwrap().clone()
+        self.row_data.read().clone()
     }
 
     /// Persist row_data to disk using Parquet format
