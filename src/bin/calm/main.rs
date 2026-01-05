@@ -155,6 +155,10 @@ fn init_logger(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = env_logger::Builder::new();
     builder.filter_level(log_level);
 
+    // 屏蔽 tower/h2 的内部请求处理日志
+    builder.filter_module("tower", log::LevelFilter::Warn);
+    builder.filter_module("h2", log::LevelFilter::Warn);
+
     // 设置日志格式
     builder.format(|buf, record| {
         writeln!(

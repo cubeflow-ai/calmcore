@@ -124,7 +124,7 @@ fn generate_coordinator_route(input_fn: ItemFn) -> TokenStream {
             let trace_info = format!("[{}]", #fn_name_str);
 
             if self.am_i_coord_node() {
-                log::info!("📋 [CoordNode] {} executing with params: {}", trace_info, #log_params);
+                log::debug!("[CoordNode] {} executing with params: {}", trace_info, #log_params);
                 // 协调者直接执行方法体
                 #body
             } else {

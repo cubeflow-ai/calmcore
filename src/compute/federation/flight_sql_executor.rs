@@ -82,10 +82,9 @@ impl SQLExecutor for FlightSQLExecutor {
         query: &str,
         _schema: SchemaRef,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        log::info!(
-            "🌐 [FlightSQLExecutor] Executing SQL on remote node '{}' with partitions {:?}: {}",
+        log::debug!(
+            "[FlightSQLExecutor] Executing remote query on node '{}': {}",
             self.node_id,
-            self.partition_names,
             query
         );
 
@@ -94,26 +93,11 @@ impl SQLExecutor for FlightSQLExecutor {
         let flight_executor = self.flight_executor.clone();
         let query = query.to_string();
 
-        // 🔧 关键修复：使用全局独立的 runtime 避免死锁
-        // DataFusion 的 execute() 是同步方法，会阻塞调用线程
-        // 使用全局独立 runtime 的 spawn() 执行异步任务，通过 channel 同步获取结果
-        log::info!(
-            "🚀 [FlightSQLExecutor] Spawning task on global query runtime for node '{}'",
-            node_id
-        );
-
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-
-        // 获取全局独立的查询 runtime
         let runtime = get_query_runtime();
 
         // 在独立 runtime 上执行异步任务
         runtime.spawn(async move {
-            log::info!(
-                "📡 [FlightSQLExecutor] Async task started for node '{}'",
-                node_id
-            );
-
             let result = if let Some(names) = partition_hint.as_ref() {
                 flight_executor
                     .execute_sql_with_partitions(&query, names)
@@ -122,15 +106,8 @@ impl SQLExecutor for FlightSQLExecutor {
                 flight_executor.execute_sql(&query).await
             };
 
-            log::info!(
-                "✅ [FlightSQLExecutor] Remote call completed for node '{}'",
-                node_id
-            );
-
             let _ = tx.send(result.map_err(|e| DataFusionError::External(Box::new(e))));
         });
-
-        log::info!("⏳ [FlightSQLExecutor] Waiting for result from runtime...");
 
         // 阻塞等待结果
         let stream = rx
@@ -142,14 +119,14 @@ impl SQLExecutor for FlightSQLExecutor {
                 )))
             })?
             .map_err(|e| {
-                log::error!("❌ [FlightSQLExecutor] Remote call failed: {}", e);
+                log::error!(
+                    "[FlightSQLExecutor] Remote query failed on '{}': {}",
+                    node_id,
+                    e
+                );
                 e
             })?;
 
-        log::info!(
-            "✅ [FlightSQLExecutor] Stream obtained from node '{}'",
-            self.node_id
-        );
         Ok(stream)
     }
 

@@ -27,35 +27,26 @@ impl FlightExecutor {
 
     /// 连接到远程节点
     async fn connect(&self) -> CoreResult<FlightClient> {
-        log::info!(
-            "🔌 [FlightExecutor::connect] Creating channel to endpoint: {}",
-            self.endpoint
-        );
+        log::debug!("[FlightExecutor] Connecting to {}", self.endpoint);
 
         let channel = Channel::from_shared(self.endpoint.clone()).map_err(|e| {
             log::error!(
-                "❌ [FlightExecutor::connect] Invalid endpoint '{}': {}",
+                "[FlightExecutor] Invalid endpoint '{}': {}",
                 self.endpoint,
                 e
             );
             CoreError::Internal(format!("Invalid endpoint: {}", e))
         })?;
 
-        log::info!("🔌 [FlightExecutor::connect] Channel created, connecting...");
-
         let channel = channel.connect().await.map_err(|e| {
             log::error!(
-                "❌ [FlightExecutor::connect] Failed to connect to '{}': {}",
+                "[FlightExecutor] Failed to connect to '{}': {}",
                 self.endpoint,
                 e
             );
             CoreError::Network(format!("Failed to connect: {}", e))
         })?;
 
-        log::info!(
-            "✅ [FlightExecutor::connect] Connected successfully to {}",
-            self.endpoint
-        );
         Ok(FlightClient::new(channel))
     }
 
@@ -65,20 +56,14 @@ impl FlightExecutor {
         sql: &str,
         partition_names: &[String],
     ) -> CoreResult<SendableRecordBatchStream> {
-        log::info!(
-            "🌐 [FlightExecutor] Executing SQL on node '{}' (endpoint: {}) with partitions {:?}: {}",
+        log::debug!(
+            "[FlightExecutor] Executing SQL on '{}': {}",
             self.node_id,
-            self.endpoint,
-            partition_names,
             sql
         );
 
-        log::info!(
-            "🔌 [FlightExecutor] Connecting to node '{}'...",
-            self.node_id
-        );
         let mut client = self.connect().await?;
-        log::info!("✅ [FlightExecutor] Connected to node '{}'", self.node_id);
+        log::debug!("✅ [FlightExecutor] Connected to node '{}'", self.node_id);
 
         // 创建结构化的 Ticket payload
         let ticket_payload = serde_json::json!({
@@ -87,7 +72,7 @@ impl FlightExecutor {
             "internal": true,
         });
         let ticket_json = serde_json::to_string(&ticket_payload).unwrap();
-        log::info!(
+        log::debug!(
             "📝 [FlightExecutor] Ticket JSON for node '{}': {}",
             self.node_id,
             ticket_json
@@ -99,7 +84,7 @@ impl FlightExecutor {
         let ticket = Ticket::new(ticket_bytes);
 
         // 执行 do_get
-        log::info!(
+        log::debug!(
             "📡 [FlightExecutor] Calling do_get on node '{}'...",
             self.node_id
         );
@@ -112,7 +97,7 @@ impl FlightExecutor {
             CoreError::Network(format!("Flight do_get failed: {}", e))
         })?;
 
-        log::info!(
+        log::debug!(
             "✅ [FlightExecutor] do_get succeeded, stream started from node '{}'",
             self.node_id
         );
@@ -133,7 +118,7 @@ impl FlightExecutor {
 
             match first_item {
                 Some(batch) => {
-                    log::info!(
+                    log::debug!(
                         "✅ [FlightExecutor] Received first batch from node '{}'",
                         self.node_id
                     );
@@ -158,10 +143,6 @@ impl FlightExecutor {
             .ok_or_else(|| CoreError::Internal("Flight stream has no schema".to_string()))?
             .clone();
 
-        log::info!(
-            "✅ [FlightExecutor] Stream ready from node '{}'",
-            self.node_id
-        );
         Self::adapt_record_batch_stream(schema, flight_stream)
     }
 

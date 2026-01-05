@@ -160,13 +160,13 @@ impl ArrowFlightService for CalmFlightService {
             })
             .filter(|partitions| !partitions.is_empty());
 
-        log::info!(
+        log::debug!(
             "🛩️  [Flight Service] Executing SQL query (internal={}, partitions={:?}): {}",
             is_internal,
             partition_hint,
             sql
         );
-        log::info!("🔍 [Flight Service] Full ticket JSON: {}", ticket_str);
+        log::debug!("[Flight Service] Full ticket JSON: {}", ticket_str);
 
         // 执行查询
         let stream = if is_internal {
@@ -217,11 +217,11 @@ impl ArrowFlightService for CalmFlightService {
         use arrow_flight::decode::FlightRecordBatchStream;
         use datafusion::arrow::record_batch::RecordBatch;
 
-        log::info!("📥 [Flight] Received do_put request");
+        log::debug!("[Flight] Received do_put request");
 
         let mut stream = request.into_inner();
 
-        log::info!("📥 [Flight] Reading first message...");
+        log::debug!("[Flight] Reading first message...");
 
         // 第一个消息包含 FlightDescriptor（表名和分区名）
         let first_message = stream
@@ -236,7 +236,7 @@ impl ArrowFlightService for CalmFlightService {
                 Status::invalid_argument("Empty stream")
             })?;
 
-        log::info!("📥 [Flight] Parsing FlightDescriptor...");
+        log::debug!("[Flight] Parsing FlightDescriptor...");
 
         // 从 FlightData 中提取 FlightDescriptor
         let descriptor_bytes = first_message.flight_descriptor.as_ref().ok_or_else(|| {
@@ -258,8 +258,8 @@ impl ArrowFlightService for CalmFlightService {
         let table_name = descriptor_bytes.path[0].clone();
         let partition_name = descriptor_bytes.path[1].clone();
 
-        log::info!(
-            "📥 [Flight] do_put: table='{}', partition='{}'",
+        log::debug!(
+            "[Flight] do_put: table='{}', partition='{}'",
             table_name,
             partition_name
         );
@@ -314,7 +314,7 @@ impl ArrowFlightService for CalmFlightService {
             total_rows += rows;
         }
 
-        log::info!("✅ [Flight] do_put completed: {} rows inserted", total_rows);
+        log::debug!("[Flight] do_put completed: {} rows inserted", total_rows);
 
         // 返回结果流
         let result = PutResult {

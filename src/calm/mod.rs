@@ -456,8 +456,8 @@ impl CalmService {
         partition_name: &str,
         batch: RecordBatch,
     ) -> CoreResult<()> {
-        log::info!(
-            "📡 [Flight] Starting do_put to node '{}' for partition '{}'",
+        log::debug!(
+            "[Flight] do_put to '{}' for partition '{}'",
             node_id,
             partition_name
         );
@@ -468,8 +468,8 @@ impl CalmService {
         let descriptor =
             FlightDescriptor::new_path(vec![table_name.to_string(), partition_name.to_string()]);
 
-        log::info!(
-            "📡 [Flight] Sending {} rows to {}/{}",
+        log::debug!(
+            "[Flight] Sending {} rows to {}/{}",
             batch.num_rows(),
             table_name,
             partition_name
@@ -506,7 +506,7 @@ impl CalmService {
             };
 
         let duration = start.elapsed();
-        log::info!("📡 [Flight] do_put completed in {:?}", duration);
+        log::debug!("[Flight] do_put completed in {:?}", duration);
 
         // 读取响应以确认完成
         let _results: Vec<PutResult> = match response.try_collect().await {
@@ -521,8 +521,8 @@ impl CalmService {
             }
         };
 
-        log::info!(
-            "✅ [Flight] Successfully sent batch to remote partition '{}' on node '{}'",
+        log::debug!(
+            "[Flight] Successfully sent batch to remote partition '{}' on node '{}'",
             partition_name,
             node_id
         );
@@ -564,8 +564,8 @@ impl CalmService {
         partition_hint: Option<&[String]>,
         local_only: bool,
     ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
-        log::info!(
-            "🚀 [CalmService] Executing{} query (local_only={}): {}",
+        log::debug!(
+            "[CalmService] Executing{} query (local_only={}): {}",
             if local_only { " LOCAL" } else { "" },
             local_only,
             sql
@@ -584,7 +584,7 @@ impl CalmService {
     ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
         use datafusion::prelude::*;
 
-        log::info!(
+        log::debug!(
             "🔍 [execute_normalized_query] local_only={}, has_cluster_manager={}",
             local_only,
             self.cluster_manager.as_ref().is_some()
@@ -608,8 +608,8 @@ impl CalmService {
         }
 
         // 单机模式或 local_only=true 时直接使用 DataFusion 执行改写后的 SQL
-        log::info!(
-            "🏠 [execute_normalized_query] Using single-node execution path (local_only={})",
+        log::debug!(
+            "[execute_normalized_query] Using single-node execution path (local_only={})",
             local_only
         );
         let ctx = SessionContext::new();

@@ -62,8 +62,8 @@ impl PartitionTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Arc<dyn ExecutionPlan> {
-        log::info!(
-            "🔍 [PartitionTableProvider::scan_partition] Starting scan for partition {}, projection={:?}, filters={}, limit={:?}",
+        log::debug!(
+            "[PartitionTableProvider::scan_partition] Starting scan for partition {}, projection={:?}, filters={}, limit={:?}",
             self.partition.name(),
             projection,
             filters.len(),
@@ -192,7 +192,7 @@ impl PartitionExec {
     ) -> Self {
         // Debug logging for schema and projection
         if let Some(ref proj) = projection {
-            log::info!(
+            log::debug!(
                 "🔍 [PartitionExec::new] Creating with projection: {:?}, schema fields: {}",
                 proj,
                 schema.fields().len()
