@@ -146,10 +146,9 @@ impl TableProvider for PartitionTableProvider {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
-        // 策略：全部返回 Inexact,更保险
-        // 这样 DataFusion 不会过度优化(比如 COUNT 的空 projection)
-        // 同时我们在 scan() 中仍然可以充分利用索引
-        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+        // 策略：返回 Exact 让 DataFusion 可以正确优化 COUNT(*) 为空投影
+        // 我们的索引系统可以处理各种过滤条件，不支持的会在 SegmentScanner 中回退到 DataFusion 过滤
+        Ok(vec![TableProviderFilterPushDown::Exact; filters.len()])
     }
 
     async fn scan(
@@ -341,10 +340,11 @@ async fn process_partition_segments(
     emit_internal_id: bool,
     tx: mpsc::Sender<Result<RecordBatch>>,
 ) -> Result<()> {
-    // 1. 处理 current_segment
+    // 1. 处理 current_segment (快照模式)
     {
         let scanner_opt = {
-            let current_segment = partition.get_current_segment();
+            let current_segment_arc = partition.get_current_segment();
+            let current_segment = current_segment_arc.read();
             let doc_count = current_segment.doc_count();
             if doc_count == 0 {
                 None
@@ -370,11 +370,12 @@ async fn process_partition_segments(
         }
     }
 
-    // 2. 处理 frozen_segments (按 start 倒序)
+    // 2. 处理 frozen_segments (快照模式 - 已经是 clone 的 Vec)
     let mut scanners = {
-        let frozen_segments = partition.get_frozen_segments();
+        let frozen_segments = partition.get_frozen_segments(); // 已经是 Vec<(u64, Arc<Segment>)>
         let mut scanners = Vec::new();
 
+        let start = std::time::Instant::now();
         for (seg_id, segment) in frozen_segments.iter() {
             let doc_count = segment.doc_count();
             if doc_count == 0 {

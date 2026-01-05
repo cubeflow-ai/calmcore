@@ -96,15 +96,27 @@ impl TableProvider for RemoteTableProvider {
 
         // 3. 应用 projection
         if let Some(proj) = projection {
-            let exprs: Vec<Expr> = proj
-                .iter()
-                .map(|i| {
-                    Expr::Column(datafusion::common::Column::from(
-                        self.schema.field(*i).name(),
-                    ))
-                })
-                .collect();
-            plan_builder = plan_builder.project(exprs)?;
+            if proj.is_empty() {
+                // 🚀 COUNT(*) 优化：空投影表示聚合查询，投影一个常量列以保持有效性
+                // 远程节点会返回最小数据量（只有行数，无实际列数据）
+                log::debug!(
+                    "[RemoteTableProvider] Empty projection detected (COUNT query), using minimal projection"
+                );
+                plan_builder = plan_builder.project(vec![Expr::Literal(
+                    datafusion::scalar::ScalarValue::Int32(Some(1)),
+                    None,
+                )])?;
+            } else {
+                let exprs: Vec<Expr> = proj
+                    .iter()
+                    .map(|i| {
+                        Expr::Column(datafusion::common::Column::from(
+                            self.schema.field(*i).name(),
+                        ))
+                    })
+                    .collect();
+                plan_builder = plan_builder.project(exprs)?;
+            }
         }
 
         // 4. 应用 limit

@@ -1656,6 +1656,7 @@ struct SegmentStream {
     limit: Option<usize>, // LIMIT 下推：如果设置，只返回这么多行
     rows_returned: usize, // 已经返回的行数（用于 LIMIT）
     pending_batches: std::vec::IntoIter<RecordBatch>,
+    count_only_mode: bool, // 🚀 COUNT 优化：只返回行数，不读取实际数据
 }
 
 impl SegmentStream {
@@ -1667,11 +1668,21 @@ impl SegmentStream {
         chunk_size: usize,
         limit: Option<usize>,
     ) -> Self {
+        // 🚀 COUNT(*) 优化检测：
+        // 如果 projection 为空数组 Some([])，说明是 COUNT(*) 或纯聚合查询
+        // 这时我们可以完全不读取数据，只返回正确行数的空 batch
+        let count_only_mode = projection.as_ref().is_some_and(|p| p.is_empty());
+
+        if count_only_mode {
+            log::debug!("🚀 [SegmentStream] COUNT ONLY MODE ACTIVATED - will not read any data!");
+        }
+
         log::debug!(
-            "🔍 [SegmentStream::new] Total doc_ids={}, will process in chunks of {} storage batches, limit={:?}",
+            "🔍 [SegmentStream::new] Total doc_ids={}, will process in chunks of {} storage batches, limit={:?}, count_only={}",
             matched_docs.len(),
             chunk_size,
-            limit
+            limit,
+            count_only_mode
         );
 
         Self {
@@ -1683,6 +1694,7 @@ impl SegmentStream {
             limit,
             rows_returned: 0,
             pending_batches: Vec::new().into_iter(),
+            count_only_mode,
         }
     }
 
@@ -1798,6 +1810,32 @@ impl SegmentStream {
                         result_batches.push(batch);
                     } else {
                         log::warn!("  [SegmentStream] Failed to create empty projection batch with {} rows", row_count);
+                    }
+                }
+            }
+
+            // 🚀 关键修复：空投影也需要合并小 batch（Memory 模式下会产生大量单行 batch）
+            if result_batches.len() > 5 {
+                log::debug!(
+                    "🔧 [SegmentStream] COUNT: Merging {} empty batches into one",
+                    result_batches.len()
+                );
+                match datafusion::arrow::compute::concat_batches(&self.schema, &result_batches) {
+                    Ok(merged_batch) => {
+                        log::debug!(
+                            "✅ [SegmentStream] COUNT: Merged into 1 batch with {} rows",
+                            merged_batch.num_rows()
+                        );
+                        self.rows_returned += merged_batch.num_rows();
+                        return Ok(vec![merged_batch]);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "⚠️  [SegmentStream] COUNT: Failed to merge batches: {}, returning {} batches",
+                            e,
+                            result_batches.len()
+                        );
+                        // 合并失败，继续使用原始 batches
                     }
                 }
             }
@@ -1918,6 +1956,32 @@ impl SegmentStream {
         // 更新已返回的行数（用于 LIMIT 下推）
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
         self.rows_returned += total_rows;
+
+        // 🚀 内存优化：合并小 batch 成大 batch（特别是 Memory 模式下的单行 batch）
+        // 如果有多个小 batch，合并它们以减少 channel 传输和 DataFusion 处理开销
+        if result_batches.len() > 10 {
+            log::debug!(
+                "🔧 [SegmentStream] Merging {} small batches into one large batch",
+                result_batches.len()
+            );
+            match datafusion::arrow::compute::concat_batches(&self.schema, &result_batches) {
+                Ok(merged_batch) => {
+                    log::debug!(
+                        "✅ [SegmentStream] Merged into 1 batch with {} rows",
+                        merged_batch.num_rows()
+                    );
+                    return Ok(vec![merged_batch]);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "⚠️  [SegmentStream] Failed to merge batches: {}, returning {} batches",
+                        e,
+                        result_batches.len()
+                    );
+                    return Ok(result_batches);
+                }
+            }
+        }
 
         Ok(result_batches)
     }

@@ -141,8 +141,9 @@ impl Engine {
             }
             drop(frozen);
 
-            // current segment
-            let current = partition.get_current_segment();
+            // current segment (快照模式)
+            let current_arc = partition.get_current_segment();
+            let current = current_arc.read();
             let age = current.created_since_start();
             let now_ts_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

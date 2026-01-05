@@ -394,7 +394,8 @@ impl NaturalOrderExecutor {
             // ⚠️ 跳过 current segment (Memory 类型)
             // Natural order 只适用于已持久化的 Parquet segments
             // current segment 的数据还在写入,顺序不稳定
-            let current_segment = partition.get_current_segment();
+            let current_segment_arc = partition.get_current_segment();
+            let current_segment = current_segment_arc.read();
             if current_segment.doc_count() > 0 {
                 log::debug!(
                     "⏭️  [NaturalOrder] Skipping current segment in partition '{}' ({} docs, Memory type)",
@@ -402,6 +403,7 @@ impl NaturalOrderExecutor {
                     current_segment.doc_count()
                 );
             }
+            drop(current_segment);
 
             // 收集 frozen segments (Parquet 类型)
             let frozen_segments = partition.get_frozen_segments();
@@ -572,10 +574,11 @@ impl NaturalOrderExecutor {
                 CoreError::NotExisted(format!("Partition {} not found", partition_name))
             })?;
 
-        // 获取 segment 数据
+        // 获取 segment 数据 (快照模式)
         let (schema, index_readers, doc_count, deleted, row_data, segment_start) =
             if segment_id == "current" {
-                let current_segment = partition.get_current_segment();
+                let current_segment_arc = partition.get_current_segment();
+                let current_segment = current_segment_arc.read();
                 let schema = partition.arrow_schema.clone();
                 let index_readers = current_segment.get_index_readers();
                 let doc_count = current_segment.doc_count();

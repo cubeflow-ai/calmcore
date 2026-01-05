@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use parking_lot::{Mutex, RwLock, RwLockReadGuard};
+use parking_lot::{Mutex, RwLock};
 
 use datafusion::arrow::{self as arrow, array::RecordBatch};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -23,8 +23,8 @@ pub type PersistNotifyCallback = mpsc::UnboundedSender<(String, String)>;
 pub struct Partition {
     pub name: String,
     table_name: String,
-    current_segment: RwLock<Segment>,
-    frozen_segments: RwLock<Vec<(u64, Arc<Segment>)>>, // (seg_id, segment)
+    current_segment: Arc<RwLock<Segment>>,
+    frozen_segments: Arc<RwLock<Vec<(u64, Arc<Segment>)>>>, // (seg_id, segment)
     base_dir: PathBuf,
     schema: Arc<Schema>,
     pub arrow_schema: Arc<datafusion::arrow::datatypes::Schema>,
@@ -61,8 +61,8 @@ impl Partition {
             base_dir,
             schema: schema.clone(),
             arrow_schema,
-            current_segment: RwLock::new(Segment::new(0, schema)),
-            frozen_segments: RwLock::new(vec![]),
+            current_segment: Arc::new(RwLock::new(Segment::new(0, schema))),
+            frozen_segments: Arc::new(RwLock::new(vec![])),
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
             persist_lock: Mutex::new(()),
@@ -826,8 +826,8 @@ impl Partition {
             base_dir,
             schema,
             arrow_schema,
-            current_segment: RwLock::new(current_segment),
-            frozen_segments: RwLock::new(frozen_segments),
+            current_segment: Arc::new(RwLock::new(current_segment)),
+            frozen_segments: Arc::new(RwLock::new(frozen_segments)),
             read_lock: RwLock::new(()),
             write_lock: Mutex::new(()),
             persist_lock: Mutex::new(()),
@@ -900,14 +900,16 @@ impl Partition {
 
     /// Get read-only access to the current segment
     /// Used by PartitionTableProvider for query execution
-    pub fn get_current_segment(&self) -> RwLockReadGuard<'_, Segment> {
-        self.current_segment.read()
+    /// Get a snapshot of the current segment (快照模式，不持有锁)
+    /// Returns Arc<RwLock<Segment>> which can be used without blocking writes
+    pub fn get_current_segment(&self) -> Arc<RwLock<Segment>> {
+        Arc::clone(&self.current_segment)
     }
 
-    /// Get read-only access to the frozen segments
-    /// Used by PartitionTableProvider for query execution
-    pub fn get_frozen_segments(&self) -> RwLockReadGuard<'_, Vec<(u64, Arc<Segment>)>> {
-        self.frozen_segments.read()
+    /// Get a snapshot of frozen segments (快照模式，不持有锁)
+    /// Returns cloned Vec which can be used without blocking writes
+    pub fn get_frozen_segments(&self) -> Vec<(u64, Arc<Segment>)> {
+        self.frozen_segments.read().clone()
     }
 
     /// 持久化 Partition 的所有数据（同步操作）

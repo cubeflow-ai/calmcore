@@ -433,8 +433,9 @@ impl CalmRpcService for CalmService {
         }
         drop(frozen_segments);
 
-        // 获取当前 segment
-        let current_segment = partition.get_current_segment();
+        // 获取当前 segment (快照模式)
+        let current_segment_arc = partition.get_current_segment();
+        let current_segment = current_segment_arc.read();
         segments.push(SegmentDetail {
             segment_id: 0,
             doc_count: current_segment.doc_count(),
@@ -444,6 +445,7 @@ impl CalmRpcService for CalmService {
             is_external_reference: false,
             external_data_path: None,
         });
+        drop(current_segment);
 
         Ok(PartitionDetail {
             segments,

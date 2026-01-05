@@ -136,7 +136,7 @@ impl TableProvider for UnionTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        log::info!(
+        log::debug!(
             "📊 [UnionTableProvider::scan] Scanning {} partitions, projection={:?}, filters={}, limit={:?}",
             self.partitions.len(),
             projection,
