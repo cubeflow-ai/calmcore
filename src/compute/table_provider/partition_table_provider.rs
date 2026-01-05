@@ -89,7 +89,7 @@ impl PartitionTableProvider {
         let index_readers = segment.get_index_readers();
 
         // Commented for cleaner logs
-        // println!("[DEBUG] create_segment_scanner: index_readers keys = {:?}", index_readers.keys().collect::<Vec<_>>());
+        // log::error!("[DEBUG] create_segment_scanner: index_readers keys = {:?}", index_readers.keys().collect::<Vec<_>>());
 
         // Get doc_count
         let doc_count = segment.doc_count();
@@ -364,7 +364,7 @@ async fn process_partition_segments(
                     emit_internal_id,
                     current_segment.start,
                 ));
-                println!(
+                log::error!(
                     "    ⏱️ ================================== Created SegmentScanner for current_segment in {:?}",
                     start.elapsed()
                 );
@@ -376,7 +376,7 @@ async fn process_partition_segments(
         if let Some(scanner) = scanner_opt {
             let start = std::time::Instant::now();
             process_segment(&scanner, &filters, &projection, &tx).await?;
-            println!(
+            log::error!(
                 "    ⏱️ ================================== Processed current_segment in {:?}",
                 start.elapsed()
             );
@@ -412,7 +412,7 @@ async fn process_partition_segments(
             );
             scanners.push((*seg_id, segment.start, scanner));
         }
-        println!(
+        log::error!(
             "    ⏱️ ================================== Created SegmentScanners for {} frozen segments in {:?}",
             scanners.len(),
             start.elapsed()
@@ -427,7 +427,7 @@ async fn process_partition_segments(
     for (seg_id, _start, scanner) in scanners {
         let start = std::time::Instant::now();
         process_segment(&scanner, &filters, &projection, &tx).await?;
-        println!(
+        log::error!(
             "    ⏱️ ================================== Processed frozen segment {} in {:?}",
             seg_id,
             start.elapsed()
@@ -444,7 +444,7 @@ async fn process_segment(
     projection: &Option<Vec<usize>>,
     tx: &mpsc::Sender<Result<RecordBatch>>,
 ) -> Result<()> {
-    println!(
+    log::error!(
         "        🔍 [process_segment] Called with projection={:?}",
         projection
     );
@@ -453,12 +453,12 @@ async fn process_segment(
         Some(p) => p,
         None => return Ok(()),
     };
-    println!("        ⏱️ create_plan took {:?}", start.elapsed());
+    log::error!("        ⏱️ create_plan took {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
     let context = Arc::new(TaskContext::default());
     let mut stream = plan.execute(0, context)?;
-    println!("        ⏱️ execute took {:?}", start.elapsed());
+    log::error!("        ⏱️ execute took {:?}", start.elapsed());
 
     // 逐批发送数据到 channel
     let start = std::time::Instant::now();
@@ -477,7 +477,7 @@ async fn process_segment(
             return Ok(());
         }
     }
-    println!(
+    log::error!(
         "        ⏱️ streaming {} batches ({} rows) took {:?}",
         batch_count,
         row_count,
