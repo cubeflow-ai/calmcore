@@ -146,9 +146,10 @@ impl TableProvider for PartitionTableProvider {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
-        // 策略：返回 Exact 让 DataFusion 可以正确优化 COUNT(*) 为空投影
-        // 我们的索引系统可以处理各种过滤条件，不支持的会在 SegmentScanner 中回退到 DataFusion 过滤
-        Ok(vec![TableProviderFilterPushDown::Exact; filters.len()])
+        // 策略：全部返回 Inexact,更保险
+        // 这样 DataFusion 不会过度优化(比如 COUNT 的空 projection)
+        // 同时我们在 scan() 中仍然可以充分利用索引
+        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 
     async fn scan(
@@ -353,7 +354,8 @@ async fn process_partition_segments(
                     "  [PartitionExec] Processing current_segment: {} docs",
                     doc_count
                 );
-                Some(SegmentScanner::new(
+                let start = std::time::Instant::now();
+                let v = Some(SegmentScanner::new(
                     schema.clone(),
                     current_segment.get_row_data(),
                     current_segment.get_index_readers(),
@@ -361,12 +363,23 @@ async fn process_partition_segments(
                     current_segment.get_deleted(),
                     emit_internal_id,
                     current_segment.start,
-                ))
+                ));
+                println!(
+                    "    ⏱️ ================================== Created SegmentScanner for current_segment in {:?}",
+                    start.elapsed()
+                );
+
+                v
             }
         };
 
         if let Some(scanner) = scanner_opt {
+            let start = std::time::Instant::now();
             process_segment(&scanner, &filters, &projection, &tx).await?;
+            println!(
+                "    ⏱️ ================================== Processed current_segment in {:?}",
+                start.elapsed()
+            );
         }
     }
 
@@ -399,6 +412,11 @@ async fn process_partition_segments(
             );
             scanners.push((*seg_id, segment.start, scanner));
         }
+        println!(
+            "    ⏱️ ================================== Created SegmentScanners for {} frozen segments in {:?}",
+            scanners.len(),
+            start.elapsed()
+        );
         scanners
     };
 
@@ -406,8 +424,14 @@ async fn process_partition_segments(
     scanners.sort_by(|a, b| b.1.cmp(&a.1));
 
     // 串行处理
-    for (_seg_id, _start, scanner) in scanners {
+    for (seg_id, _start, scanner) in scanners {
+        let start = std::time::Instant::now();
         process_segment(&scanner, &filters, &projection, &tx).await?;
+        println!(
+            "    ⏱️ ================================== Processed frozen segment {} in {:?}",
+            seg_id,
+            start.elapsed()
+        );
     }
 
     Ok(())
@@ -420,21 +444,45 @@ async fn process_segment(
     projection: &Option<Vec<usize>>,
     tx: &mpsc::Sender<Result<RecordBatch>>,
 ) -> Result<()> {
+    println!(
+        "        🔍 [process_segment] Called with projection={:?}",
+        projection
+    );
+    let start = std::time::Instant::now();
     let plan = match scanner.create_plan(filters, projection.as_ref(), None, None) {
         Some(p) => p,
         None => return Ok(()),
     };
+    println!("        ⏱️ create_plan took {:?}", start.elapsed());
 
+    let start = std::time::Instant::now();
     let context = Arc::new(TaskContext::default());
     let mut stream = plan.execute(0, context)?;
+    println!("        ⏱️ execute took {:?}", start.elapsed());
 
     // 逐批发送数据到 channel
+    let start = std::time::Instant::now();
+    let mut batch_count = 0;
+    let mut row_count = 0;
     while let Some(result) = futures::StreamExt::next(&mut stream).await {
+        match &result {
+            Ok(batch) => {
+                batch_count += 1;
+                row_count += batch.num_rows();
+            }
+            Err(_) => {}
+        }
         if tx.send(result).await.is_err() {
             // Channel 关闭，停止发送
             return Ok(());
         }
     }
+    println!(
+        "        ⏱️ streaming {} batches ({} rows) took {:?}",
+        batch_count,
+        row_count,
+        start.elapsed()
+    );
 
     Ok(())
 }
