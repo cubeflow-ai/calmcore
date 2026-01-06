@@ -17,7 +17,6 @@ use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
 use super::flight_executor::FlightExecutor;
-use super::flight_sql_executor::FlightSQLExecutor;
 
 /// 联邦查询执行器
 ///
