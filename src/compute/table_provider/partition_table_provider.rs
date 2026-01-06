@@ -305,7 +305,7 @@ impl ExecutionPlan for PartitionExec {
         let output_schema = self.schema.clone();
         let filters = self.filters.clone();
         let projection = self.projection.clone();
-        let _limit = self.limit;
+        let limit = self.limit;
         let emit_internal_id = self.emit_internal_id;
 
         // 创建 bounded channel: 容量 10
@@ -318,6 +318,7 @@ impl ExecutionPlan for PartitionExec {
                 full_schema,
                 filters,
                 projection,
+                limit,
                 emit_internal_id,
                 tx,
             )
@@ -338,9 +339,11 @@ async fn process_partition_segments(
     schema: SchemaRef,
     filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
+    limit: Option<usize>,
     emit_internal_id: bool,
     tx: mpsc::Sender<Result<RecordBatch>>,
 ) -> Result<()> {
+    let mut rows_sent = 0usize;
     // 1. 处理 current_segment (快照模式)
     {
         let scanner_opt = {
@@ -375,11 +378,20 @@ async fn process_partition_segments(
 
         if let Some(scanner) = scanner_opt {
             let start = std::time::Instant::now();
-            process_segment(&scanner, &filters, &projection, &tx).await?;
+            let sent = process_segment(&scanner, &filters, &projection, limit, &mut rows_sent, &tx)
+                .await?;
             log::error!(
-                "    ⏱️ ================================== Processed current_segment in {:?}",
-                start.elapsed()
+                "    ⏱️ ================================== Processed current_segment in {:?}, sent {} rows (total={})",
+                start.elapsed(),
+                sent,
+                rows_sent
             );
+            // 达到 limit 后提前返回
+            if let Some(lim) = limit {
+                if rows_sent >= lim {
+                    return Ok(());
+                }
+            }
         }
     }
 
@@ -426,12 +438,21 @@ async fn process_partition_segments(
     // 串行处理
     for (seg_id, _start, scanner) in scanners {
         let start = std::time::Instant::now();
-        process_segment(&scanner, &filters, &projection, &tx).await?;
+        let sent =
+            process_segment(&scanner, &filters, &projection, limit, &mut rows_sent, &tx).await?;
         log::error!(
-            "    ⏱️ ================================== Processed frozen segment {} in {:?}",
+            "    ⏱️ ================================== Processed frozen segment {} in {:?}, sent {} rows (total={})",
             seg_id,
-            start.elapsed()
+            start.elapsed(),
+            sent,
+            rows_sent
         );
+        // 达到 limit 后提前返回
+        if let Some(lim) = limit {
+            if rows_sent >= lim {
+                return Ok(());
+            }
+        }
     }
 
     Ok(())
@@ -442,8 +463,11 @@ async fn process_segment(
     scanner: &SegmentScanner,
     filters: &[Expr],
     projection: &Option<Vec<usize>>,
+    limit: Option<usize>,
+    rows_sent: &mut usize,
     tx: &mpsc::Sender<Result<RecordBatch>>,
-) -> Result<()> {
+) -> Result<usize> {
+    let mut segment_rows = 0;
     log::error!(
         "        🔍 [process_segment] Called with projection={:?}",
         projection
@@ -451,7 +475,7 @@ async fn process_segment(
     let start = std::time::Instant::now();
     let plan = match scanner.create_plan(filters, projection.as_ref(), None, None) {
         Some(p) => p,
-        None => return Ok(()),
+        None => return Ok(0),
     };
     log::error!("        ⏱️ create_plan took {:?}", start.elapsed());
 
@@ -460,21 +484,50 @@ async fn process_segment(
     let mut stream = plan.execute(0, context)?;
     log::error!("        ⏱️ execute took {:?}", start.elapsed());
 
-    // 逐批发送数据到 channel
+    // 逐批发送数据到 channel，应用 limit
     let start = std::time::Instant::now();
     let mut batch_count = 0;
     let mut row_count = 0;
     while let Some(result) = futures::StreamExt::next(&mut stream).await {
-        match &result {
-            Ok(batch) => {
+        let batch = match result {
+            Ok(b) => {
                 batch_count += 1;
-                row_count += batch.num_rows();
+                let batch_rows = b.num_rows();
+                row_count += batch_rows;
+
+                // 应用 limit：可能需要截断 batch
+                if let Some(lim) = limit {
+                    let remaining = lim.saturating_sub(*rows_sent);
+                    if remaining == 0 {
+                        // 已经达到 limit，停止发送
+                        break;
+                    } else if batch_rows > remaining {
+                        // 需要截断 batch
+                        let truncated = b.slice(0, remaining);
+                        segment_rows += remaining;
+                        *rows_sent += remaining;
+                        if tx.send(Ok(truncated)).await.is_err() {
+                            return Ok(segment_rows);
+                        }
+                        break;
+                    }
+                }
+
+                segment_rows += batch_rows;
+                *rows_sent += batch_rows;
+                b
             }
-            Err(_) => {}
-        }
-        if tx.send(result).await.is_err() {
+            Err(e) => {
+                if tx.send(Err(e)).await.is_err() {
+                    return Ok(segment_rows);
+                }
+                continue;
+            }
+        };
+
+        if tx.send(Ok(batch)).await.is_err() {
             // Channel 关闭，停止发送
-            return Ok(());
+            return Ok(segment_rows);
         }
     }
     log::error!(
@@ -484,7 +537,7 @@ async fn process_segment(
         start.elapsed()
     );
 
-    Ok(())
+    Ok(segment_rows)
 }
 
 /// RecvStream: 包装 mpsc::Receiver 为 SendableRecordBatchStream
