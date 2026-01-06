@@ -1719,6 +1719,7 @@ impl SegmentStream {
         let mut total_rows = 0;
 
         // 循环读取 rowgroup，直到达到 max_rows 或 iter 空了
+        let start = std::time::Instant::now();
         while total_rows < max_rows {
             if max_rows <= total_rows {
                 break;
@@ -1750,18 +1751,20 @@ impl SegmentStream {
             }
         }
 
+        log::info!(
+            "🔍 [generate_next_chunk] type:{} Completed reading chunk: max_rows={}, total_rows={}, batches={}, elapsed={:?}",
+            self.reader.segment_type(),
+            max_rows,
+            total_rows,
+            batches.len(),
+            start.elapsed()
+        );
+
         if batches.is_empty() {
             return Ok(None);
         }
 
         self.rows_returned += total_rows as i32;
-
-        log::debug!(
-            "🔍 [generate_next_chunk] Returning {} batches with {} total rows, rows_returned so far: {}",
-            batches.len(),
-            total_rows,
-            self.rows_returned
-        );
 
         // 合并 batches
         if batches.len() == 1 {

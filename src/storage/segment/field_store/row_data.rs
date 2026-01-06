@@ -1299,6 +1299,14 @@ impl RowDataStoreReader {
         }
     }
 
+    pub fn segment_type(&self) -> &'static str {
+        match &self.reader {
+            Some(RowDataGroupReader::Parquet(_)) => "parquet",
+            Some(RowDataGroupReader::Memory(_)) => "memory",
+            None => "none",
+        }
+    }
+
     pub fn is_empty_projection(&self) -> bool {
         self.projection.is_empty()
     }
