@@ -12,7 +12,11 @@ use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
+use base64::prelude::*;
 use datafusion::arrow::ipc::writer::IpcWriteOptions;
+use datafusion::logical_expr::Expr;
+use datafusion_proto::logical_plan::from_proto;
+use datafusion_proto::logical_plan::DefaultLogicalExtensionCodec;
 use futures::{Stream, StreamExt, TryStreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
@@ -28,6 +32,162 @@ pub struct CalmFlightService {
 impl CalmFlightService {
     pub fn new(calm_service: Arc<CalmService>) -> Self {
         Self { calm_service }
+    }
+
+    /// 处理 SQL ticket
+    async fn handle_sql_ticket(
+        &self,
+        json: &serde_json::Value,
+        ticket_str: &str,
+    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream, Status> {
+        let sql = json
+            .get("sql")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Status::invalid_argument("Missing 'sql' field in ticket"))?
+            .to_string();
+
+        let is_internal = json
+            .get("internal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let partition_hint: Option<Vec<String>> = json
+            .get("partition_names")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|value| value.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|partitions| !partitions.is_empty());
+
+        log::info!(
+            "🛫️  [Flight Service] Executing SQL query (internal={}, partitions={:?}): {}",
+            is_internal,
+            partition_hint,
+            sql
+        );
+        log::debug!("[Flight Service] Full ticket JSON: {}", ticket_str);
+
+        // 执行查询
+        let stream = if is_internal {
+            if let Some(partitions) = partition_hint.as_ref() {
+                self.calm_service
+                    .execute_local_query_stream_with_partitions(&sql, partitions)
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "Local query execution failed (partitions): {}",
+                            e
+                        ))
+                    })?
+            } else {
+                self.calm_service
+                    .execute_local_query_stream(&sql)
+                    .await
+                    .map_err(|e| Status::internal(format!("Local query execution failed: {}", e)))?
+            }
+        } else {
+            self.calm_service
+                .execute_query_stream(&sql)
+                .await
+                .map_err(|e| Status::internal(format!("Query execution failed: {}", e)))?
+        };
+
+        Ok(stream)
+    }
+
+    /// 处理 scan ticket（直接 partition 扫描，支持 projection/filters/limit pushdown）
+    async fn handle_scan_ticket(
+        &self,
+        json: &serde_json::Value,
+    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream, Status> {
+        let table_name = json
+            .get("table_name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Status::invalid_argument("Missing 'table_name' in scan ticket"))?
+            .to_string();
+
+        let partition_names: Vec<String> = json
+            .get("partition_names")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| Status::invalid_argument("Missing 'partition_names' in scan ticket"))?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+
+        let projection: Option<Vec<usize>> =
+            json.get("projection")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as usize))
+                        .collect()
+                });
+
+        let limit: Option<usize> = json
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+
+        // 反序列化 filters
+        let filters: Vec<Expr> = if let Some(filters_array) =
+            json.get("filters").and_then(|v| v.as_array())
+        {
+            let codec = DefaultLogicalExtensionCodec {};
+            let ctx = datafusion::prelude::SessionContext::new();
+            let mut exprs = Vec::new();
+
+            for filter_value in filters_array {
+                if let Some(encoded_str) = filter_value.as_str() {
+                    // Base64 解码
+                    let bytes = BASE64_STANDARD
+                        .decode(encoded_str)
+                        .map_err(|e| Status::internal(format!("Failed to decode filter: {}", e)))?;
+
+                    // Protobuf 解码 (prost 0.14)
+                    use prost::Message;
+                    let proto_expr =
+                        datafusion_proto::protobuf::LogicalExprNode::decode(bytes.as_slice())
+                            .map_err(|e| {
+                                Status::internal(format!("Failed to parse filter protobuf: {}", e))
+                            })?;
+
+                    // 转换为 Expr
+                    let expr = from_proto::parse_expr(&proto_expr, &ctx, &codec).map_err(|e| {
+                        Status::internal(format!("Failed to deserialize filter: {}", e))
+                    })?;
+
+                    exprs.push(expr);
+                }
+            }
+
+            log::debug!(
+                "🛫️  [Flight Service] Deserialized {} filters for local execution",
+                exprs.len()
+            );
+            exprs
+        } else {
+            Vec::new()
+        };
+
+        log::info!(
+            "🛫️  [Flight Service] Executing scan: table={}, partitions={:?}, projection={:?}, filters={}, limit={:?}",
+            table_name,
+            partition_names,
+            projection,
+            filters.len(),
+            limit
+        );
+
+        // 执行本地 partition 扫描
+        let stream = self
+            .calm_service
+            .execute_local_partition_scan(&table_name, &partition_names, projection, filters, limit)
+            .await
+            .map_err(|e| Status::internal(format!("Local partition scan failed: {}", e)))?;
+
+        Ok(stream)
     }
 
     /// 创建 FlightServiceServer 用于 Tonic gRPC
@@ -125,7 +285,9 @@ impl ArrowFlightService for CalmFlightService {
 
     /// **核心方法**: 执行查询并返回数据流
     ///
-    /// Ticket 包含 SQL 查询，返回 RecordBatch 流
+    /// 支持两种 Ticket：
+    /// 1. SQL ticket: {"sql": "...", "internal": true}
+    /// 2. Scan ticket: {"type": "scan", "table_name": "...", "projection": [...], "filters": [...]}
     async fn do_get(
         &self,
         request: Request<Ticket>,
@@ -139,58 +301,20 @@ impl ArrowFlightService for CalmFlightService {
         let json: serde_json::Value = serde_json::from_str(&ticket_str)
             .map_err(|e| Status::invalid_argument(format!("Invalid JSON ticket: {}", e)))?;
 
-        let sql = json
-            .get("sql")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Status::invalid_argument("Missing 'sql' field in ticket"))?
-            .to_string();
+        // 根据 ticket 类型路由
+        let ticket_type = json.get("type").and_then(|v| v.as_str());
 
-        let is_internal = json
-            .get("internal")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let partition_hint: Option<Vec<String>> = json
-            .get("partition_names")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|value| value.as_str().map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|partitions| !partitions.is_empty());
-
-        log::debug!(
-            "🛩️  [Flight Service] Executing SQL query (internal={}, partitions={:?}): {}",
-            is_internal,
-            partition_hint,
-            sql
-        );
-        log::debug!("[Flight Service] Full ticket JSON: {}", ticket_str);
-
-        // 执行查询
-        let stream = if is_internal {
-            if let Some(partitions) = partition_hint.as_ref() {
-                self.calm_service
-                    .execute_local_query_stream_with_partitions(&sql, partitions)
-                    .await
-                    .map_err(|e| {
-                        Status::internal(format!(
-                            "Local query execution failed (partitions): {}",
-                            e
-                        ))
-                    })?
-            } else {
-                self.calm_service
-                    .execute_local_query_stream(&sql)
-                    .await
-                    .map_err(|e| Status::internal(format!("Local query execution failed: {}", e)))?
+        let stream = match ticket_type {
+            Some("scan") => {
+                // 新方式：结构化扫描
+                log::debug!("🛫️ [Flight Service] Handling scan ticket");
+                self.handle_scan_ticket(&json).await?
             }
-        } else {
-            self.calm_service
-                .execute_query_stream(&sql)
-                .await
-                .map_err(|e| Status::internal(format!("Query execution failed: {}", e)))?
+            _ => {
+                // 旧方式：SQL 查询（兼容性）
+                log::debug!("🛫️ [Flight Service] Handling SQL ticket");
+                self.handle_sql_ticket(&json, &ticket_str).await?
+            }
         };
 
         // 获取 schema

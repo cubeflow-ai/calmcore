@@ -558,13 +558,89 @@ impl CalmService {
             .await
     }
 
+    /// 直接扫描本地分区（用于 Arrow Flight scan ticket）
+    /// 支持 projection、filters、limit pushdown
+    pub async fn execute_local_partition_scan(
+        &self,
+        table_name: &str,
+        partition_names: &[String],
+        projection: Option<Vec<usize>>,
+        filters: Vec<datafusion::logical_expr::Expr>,
+        limit: Option<usize>,
+    ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
+        use crate::compute::table_provider::PartitionTableProvider;
+        use datafusion::prelude::*;
+
+        log::debug!(
+            "[CalmService] Direct partition scan: table={}, partitions={:?}, projection={:?}, filters={}, limit={:?}",
+            table_name,
+            partition_names,
+            projection,
+            filters.len(),
+            limit
+        );
+
+        // 获取表元数据
+        let table_info = self.catalog.get_table_info(table_name).await?;
+        let schema = Arc::new(table_info.table.schema.clone());
+
+        // 收集本地分区
+        let mut partitions = Vec::new();
+        let all_partitions = self.engine.partitions.read().await;
+        for partition_name in partition_names {
+            let key = (table_name.to_string(), partition_name.to_string());
+            if let Some(partition) = all_partitions.get(&key) {
+                partitions.push(partition.clone());
+            } else {
+                log::warn!(
+                    "[CalmService] Partition '{}' not found locally for table '{}'",
+                    partition_name,
+                    table_name
+                );
+            }
+        }
+
+        if partitions.is_empty() {
+            return Err(CoreError::NotExisted(format!(
+                "No partitions found for table '{}'",
+                table_name
+            )));
+        }
+
+        // 创建执行计划：多个 PartitionExec 通过 UnionExec 联合
+        use datafusion::physical_plan::union::UnionExec;
+
+        let mut partition_plans: Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> =
+            Vec::new();
+        for partition in partitions {
+            // 使用 PartitionTableProvider 创建执行计划
+            let provider = PartitionTableProvider::new(partition, false); // emit_internal_id = false
+            let plan = provider.scan_partition(projection.as_ref(), &filters, limit);
+            partition_plans.push(plan);
+        }
+
+        let union_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan> =
+            if partition_plans.len() == 1 {
+                partition_plans.into_iter().next().unwrap()
+            } else {
+                Arc::new(UnionExec::new(partition_plans))
+            };
+
+        // 执行计划
+        let ctx = SessionContext::new();
+        let task_ctx = ctx.task_ctx();
+        let stream = union_plan.execute(0, task_ctx)?;
+
+        Ok(stream)
+    }
+
     async fn execute_query_stream_with_options(
         &self,
         sql: &str,
         partition_hint: Option<&[String]>,
         local_only: bool,
     ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
-        log::debug!(
+        log::info!(
             "[CalmService] Executing{} query (local_only={}): {}",
             if local_only { " LOCAL" } else { "" },
             local_only,

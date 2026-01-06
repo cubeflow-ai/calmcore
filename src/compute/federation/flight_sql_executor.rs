@@ -82,6 +82,10 @@ impl SQLExecutor for FlightSQLExecutor {
         query: &str,
         _schema: SchemaRef,
     ) -> DataFusionResult<SendableRecordBatchStream> {
+        println!(
+            "🔍🔍🔍 [FlightSQLExecutor::execute] query from datafusion-federation: {}",
+            query
+        );
         log::debug!(
             "[FlightSQLExecutor] Executing remote query on node '{}': {}",
             self.node_id,

@@ -1,6 +1,7 @@
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::execution::TaskContext;
+use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -15,34 +16,53 @@ use crate::compute::federation::flight_executor::FlightExecutor;
 
 /// 远程扫描执行计划
 ///
-/// 通过 FlightExecutor 执行远程查询
+/// 通过 FlightExecutor 直接传递 projection/filters/limit 到远程节点
 pub struct RemoteScanExec {
     pub table_name: String,
     pub partition_ids: Vec<String>,
-    pub schema: SchemaRef,
-    pub sql: String,
+    /// 完整的表 schema
+    full_schema: SchemaRef,
+    /// 输出 schema（应用 projection 后）
+    output_schema: SchemaRef,
     pub projection: Option<Vec<usize>>,
+    pub filters: Vec<Expr>,
+    pub limit: Option<usize>,
     pub executor: Arc<FlightExecutor>,
     properties: PlanProperties,
 }
 
 impl RemoteScanExec {
     /// 创建新的 RemoteScanExec
+    ///
+    /// 不生成 SQL，而是直接传递 projection/filters/limit 到远程节点
     pub fn new(
         table_name: String,
         partition_ids: Vec<String>,
         schema: SchemaRef,
-        sql: String,
         projection: Option<Vec<usize>>,
+        filters: Vec<Expr>,
+        limit: Option<usize>,
         executor: Arc<FlightExecutor>,
     ) -> Self {
+        // 计算输出 schema（应用 projection）
+        let output_schema = if let Some(ref proj) = projection {
+            if proj.is_empty() {
+                Arc::new(datafusion::arrow::datatypes::Schema::empty())
+            } else {
+                let fields: Vec<_> = proj.iter().map(|i| schema.field(*i).clone()).collect();
+                Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
+            }
+        } else {
+            schema.clone()
+        };
+
         // 创建 PlanProperties
         let partitioning = Partitioning::UnknownPartitioning(1);
         let boundedness = Boundedness::Bounded;
         let emission_type = EmissionType::Incremental;
 
         let properties = PlanProperties::new(
-            datafusion::physical_expr::EquivalenceProperties::new(schema.clone()),
+            datafusion::physical_expr::EquivalenceProperties::new(output_schema.clone()),
             partitioning,
             emission_type,
             boundedness,
@@ -51,9 +71,11 @@ impl RemoteScanExec {
         Self {
             table_name,
             partition_ids,
-            schema,
-            sql,
+            full_schema: schema,
+            output_schema,
             projection,
+            filters,
+            limit,
             executor,
             properties,
         }
@@ -65,7 +87,9 @@ impl std::fmt::Debug for RemoteScanExec {
         f.debug_struct("RemoteScanExec")
             .field("table_name", &self.table_name)
             .field("partition_ids", &self.partition_ids)
-            .field("sql", &self.sql)
+            .field("projection", &self.projection)
+            .field("filters", &self.filters.len())
+            .field("limit", &self.limit)
             .finish()
     }
 }
@@ -75,9 +99,11 @@ impl Clone for RemoteScanExec {
         Self {
             table_name: self.table_name.clone(),
             partition_ids: self.partition_ids.clone(),
-            schema: self.schema.clone(),
-            sql: self.sql.clone(),
+            full_schema: self.full_schema.clone(),
+            output_schema: self.output_schema.clone(),
             projection: self.projection.clone(),
+            filters: self.filters.clone(),
+            limit: self.limit,
             executor: self.executor.clone(),
             properties: self.properties.clone(),
         }
@@ -94,7 +120,7 @@ impl ExecutionPlan for RemoteScanExec {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.output_schema.clone()
     }
 
     fn properties(&self) -> &PlanProperties {
@@ -118,22 +144,27 @@ impl ExecutionPlan for RemoteScanExec {
         _context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         log::debug!(
-            "[RemoteScanExec] Execute called for table '{}', partitions: {:?}, SQL: {}",
+            "[RemoteScanExec] Execute called for table '{}', partitions: {:?}, projection: {:?}, filters: {}, limit: {:?}",
             self.table_name,
             self.partition_ids,
-            self.sql
+            self.projection,
+            self.filters.len(),
+            self.limit
         );
 
-        // 调用 FlightExecutor 执行远程查询
+        // 调用 FlightExecutor 执行远程扫描（不是SQL）
         let executor = self.executor.clone();
-        let sql = self.sql.clone();
-        let schema = self.schema.clone();
+        let table_name = self.table_name.clone();
+        let schema = self.output_schema.clone();
         let partitions = self.partition_ids.clone();
+        let projection = self.projection.clone();
+        let filters = self.filters.clone();
+        let limit = self.limit;
 
         // 创建异步流
         let stream = futures::stream::once(async move {
             match executor
-                .execute_sql_with_partitions(&sql, &partitions)
+                .execute_scan(&table_name, &partitions, projection, filters, limit)
                 .await
             {
                 Ok(stream) => Ok(stream),

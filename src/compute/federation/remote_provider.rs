@@ -74,6 +74,12 @@ impl TableProvider for RemoteTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        println!(
+            "🔍🔍🔍 ==========================================[RemoteTableProvider::scan] projection={:?}, filters={}, limit={:?}",
+            projection,
+            filters.len(),
+            limit
+        );
         // 使用 DataFusion 官方的 plan_to_sql() 来生成 SQL
         // 注意：不要在 SQL 中包含 _partition 条件！
         // 远程节点作为 partition owner，自然只会扫描它拥有的分区
@@ -95,18 +101,11 @@ impl TableProvider for RemoteTableProvider {
         }
 
         // 3. 应用 projection
+        // 注意：不要应用空的 projection！
+        // 空 projection 会导致 schema 变成空，引起 UnionExec schema 不匹配错误
+        // 让远程节点自己根据实际查询来优化
         if let Some(proj) = projection {
-            if proj.is_empty() {
-                // 🚀 COUNT(*) 优化：空投影表示聚合查询，投影一个常量列以保持有效性
-                // 远程节点会返回最小数据量（只有行数，无实际列数据）
-                log::debug!(
-                    "[RemoteTableProvider] Empty projection detected (COUNT query), using minimal projection"
-                );
-                plan_builder = plan_builder.project(vec![Expr::Literal(
-                    datafusion::scalar::ScalarValue::Int32(Some(1)),
-                    None,
-                )])?;
-            } else {
+            if !proj.is_empty() {
                 let exprs: Vec<Expr> = proj
                     .iter()
                     .map(|i| {
@@ -130,6 +129,20 @@ impl TableProvider for RemoteTableProvider {
         let ast = plan_to_sql(&logical_plan)?;
         let sql = ast.to_string();
 
+        println!(
+            "...................================================={:?}",
+            sql
+        );
+        println!(
+            "...................================================={:#?}",
+            ast
+        );
+
+        println!(
+            "...................================================={:?}",
+            sql
+        );
+
         log::debug!(
             "[RemoteTableProvider] Generated SQL (via plan_to_sql) for remote node {} (partitions: {:?}): {}",
             self.executor.node_id(),
@@ -137,14 +150,15 @@ impl TableProvider for RemoteTableProvider {
             sql
         );
 
-        // 创建 RemoteScanExec
-        // partition_names 仅用于日志记录，远程节点会自动扫描它拥有的所有分区
+        // 创建 RemoteScanExec (新版本不使用 SQL)
+        // 直接传递 projection/filters/limit
         Ok(Arc::new(RemoteScanExec::new(
             self.table_name.clone(),
             self.partition_names.clone(),
             self.schema.clone(),
-            sql,
             projection.cloned(),
+            filters.to_vec(),
+            limit,
             self.executor.clone(),
         )))
     }

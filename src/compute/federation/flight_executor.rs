@@ -3,9 +3,14 @@
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, Ticket};
+use base64::prelude::*;
+use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion_proto::logical_plan::to_proto::serialize_expr;
+use datafusion_proto::logical_plan::DefaultLogicalExtensionCodec;
 use futures::stream::{self, StreamExt};
+use prost::Message;
 use tonic::transport::Channel;
 
 use crate::utils::error::{CoreError, CoreResult};
@@ -82,6 +87,83 @@ impl FlightExecutor {
             .map_err(|e| CoreError::Internal(format!("Failed to serialize ticket: {}", e)))?;
 
         let ticket = Ticket::new(ticket_bytes);
+
+        self.do_get_with_ticket(ticket).await
+    }
+
+    /// 执行远程扫描（直接传递 projection/filters/limit，不使用 SQL）
+    pub async fn execute_scan(
+        &self,
+        table_name: &str,
+        partition_names: &[String],
+        projection: Option<Vec<usize>>,
+        filters: Vec<Expr>,
+        limit: Option<usize>,
+    ) -> CoreResult<SendableRecordBatchStream> {
+        log::debug!(
+            "[FlightExecutor] Executing scan on '{}': table={}, partitions={:?}, projection={:?}, filters={}, limit={:?}",
+            self.node_id,
+            table_name,
+            partition_names,
+            projection,
+            filters.len(),
+            limit
+        );
+
+        // 序列化 filters
+        let filters_encoded = if !filters.is_empty() {
+            let codec = DefaultLogicalExtensionCodec {};
+            let mut proto_filters = Vec::new();
+
+            for filter in &filters {
+                let proto_expr = serialize_expr(filter, &codec).map_err(|e| {
+                    CoreError::Internal(format!("Failed to serialize filter: {}", e))
+                })?;
+
+                // 序列化为 bytes (prost 0.14)
+                let buf = proto_expr.encode_to_vec();
+
+                proto_filters.push(BASE64_STANDARD.encode(&buf));
+            }
+
+            log::debug!(
+                "[FlightExecutor] Serialized {} filters for remote pushdown",
+                proto_filters.len()
+            );
+            Some(proto_filters)
+        } else {
+            None
+        };
+
+        // 创建 scan ticket（包含序列化的 filters）
+        let ticket_payload = serde_json::json!({
+            "type": "scan",
+            "table_name": table_name,
+            "partition_names": partition_names,
+            "projection": projection,
+            "filters": filters_encoded,
+            "limit": limit,
+            "internal": true,
+        });
+
+        log::debug!(
+            "📝 [FlightExecutor] Scan ticket for node '{}': table={}, {} filters",
+            self.node_id,
+            table_name,
+            filters.len()
+        );
+
+        let ticket_bytes = serde_json::to_vec(&ticket_payload)
+            .map_err(|e| CoreError::Internal(format!("Failed to serialize ticket: {}", e)))?;
+
+        let ticket = Ticket::new(ticket_bytes);
+
+        self.do_get_with_ticket(ticket).await
+    }
+
+    /// 通用的 do_get 实现
+    async fn do_get_with_ticket(&self, ticket: Ticket) -> CoreResult<SendableRecordBatchStream> {
+        let mut client = self.connect().await?;
 
         // 执行 do_get
         log::debug!(

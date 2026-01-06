@@ -6,8 +6,6 @@ use std::sync::Arc;
 use datafusion::datasource::empty::EmptyTable;
 use datafusion::datasource::view::ViewTable;
 use datafusion::prelude::*;
-use datafusion_federation::sql::{SQLFederationProvider, SQLTableSource};
-use datafusion_federation::{default_session_state, FederatedTableProviderAdaptor};
 
 use crate::catalog::Catalog;
 use crate::cluster::ClusterManager;
@@ -18,6 +16,7 @@ use crate::compute::{
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
+use super::flight_executor::FlightExecutor;
 use super::flight_sql_executor::FlightSQLExecutor;
 
 /// 联邦查询执行器
@@ -152,8 +151,9 @@ impl FederatedQueryExecutor {
             table_partition_nodes.insert(table_name.clone(), nodes);
         }
 
-        let state = default_session_state();
-        let ctx = SessionContext::new_with_state(state);
+        // 🚀 使用 DataFusion 默认的 SessionState，而不是 datafusion-federation 的
+        // 这样避免使用 FederatedQueryPlanner，直接使用我们的 RemoteTableProvider
+        let ctx = SessionContext::new();
         let fulltext_context = register_fulltext_udfs(&ctx);
         if normalized.needs_score_column {
             fulltext_context.clear_scores();
@@ -334,29 +334,21 @@ impl FederatedQueryExecutor {
                 CoreError::Internal(format!("Node {} gRPC address not found", remote_node_id))
             })?;
 
-        let executor = Arc::new(FlightSQLExecutor::new(
-            remote_node_id.to_string(),
-            grpc_addr,
-            self.catalog.clone(),
-            Some(partition_names.clone()),
-        ));
+        // 🚀 使用我们自己的 RemoteTableProvider 而不是 datafusion-federation
+        // 这样可以完全控制投影逻辑，避免 wrap_projection() 自动展开所有列
+        let table_info = self.catalog.get_or_load_table(table_name).await?;
+        let schema = table_info.table.schema.to_arrow_schema();
 
-        let provider = Arc::new(SQLFederationProvider::new(executor.clone()));
+        let flight_executor = Arc::new(FlightExecutor::new(remote_node_id.to_string(), grpc_addr));
 
-        // 创建 SQLTableSource 然后包装为 FederatedTableProviderAdaptor
-        use datafusion_federation::sql::RemoteTableRef;
-        let table_ref = RemoteTableRef::parse_with_default_dialect(table_name)
-            .map_err(|e| CoreError::Internal(format!("Failed to parse table name: {}", e)))?;
-        let table_source = Arc::new(
-            SQLTableSource::new(provider, table_ref)
-                .await
-                .map_err(|e| {
-                    CoreError::Internal(format!("Failed to create table source: {}", e))
-                })?,
+        let remote_provider = crate::compute::federation::remote_provider::RemoteTableProvider::new(
+            table_name.to_string(),
+            partition_names,
+            schema,
+            flight_executor,
         );
-        let federated_provider = FederatedTableProviderAdaptor::new(table_source);
 
-        ctx.register_table(table_name, Arc::new(federated_provider))
+        ctx.register_table(table_name, Arc::new(remote_provider))
             .map_err(|e| {
                 CoreError::Internal(format!("Failed to register federated table: {}", e))
             })?;
@@ -392,159 +384,68 @@ impl FederatedQueryExecutor {
             nodes.keys().collect::<Vec<_>>()
         );
 
-        let mut temp_tables = Vec::new();
+        // 收集本地分区
+        let mut local_partitions = Vec::new();
+        if let Some(partition_names) = nodes.get(&my_node_id) {
+            for partition_name in partition_names {
+                match self.engine.get_partition(table_name, partition_name).await {
+                    Some(partition) => local_partitions.push(partition),
+                    None => log::warn!(
+                        "[FederatedQueryExecutor] Partition '{}' not found locally for table '{}'",
+                        partition_name,
+                        table_name
+                    ),
+                }
+            }
+        }
 
-        for (node_id, partitions) in nodes {
-            if partitions.is_empty() {
+        // 收集远程节点信息
+        let mut remote_nodes = Vec::new();
+        for (node_id, partition_names) in nodes {
+            if node_id == &my_node_id || partition_names.is_empty() {
                 continue;
             }
 
-            let temp_table_name = format!(
-                "__{}_{}",
-                table_name,
-                node_id.replace(|c: char| !c.is_alphanumeric(), "_")
-            );
+            let grpc_addr = self
+                .cluster_manager
+                .get_node_grpc_addr(node_id)
+                .ok_or_else(|| {
+                    CoreError::Internal(format!("Node {} gRPC address not found", node_id))
+                })?;
 
-            if node_id == &my_node_id {
-                log::debug!(
-                    "[register_merged_table] Registering local temp table '{}' for node '{}'",
-                    temp_table_name,
-                    node_id
-                );
-                if let Some(provider) = self
-                    .create_local_provider(
-                        table_name,
-                        partitions,
-                        table_schema.clone(),
-                        needs_internal_id,
-                    )
-                    .await?
-                {
-                    ctx.register_table(&temp_table_name, provider)
-                        .map_err(|e| {
-                            CoreError::Internal(format!(
-                                "Failed to register local temp table: {}",
-                                e
-                            ))
-                        })?;
-                    log::debug!(
-                        "[register_merged_table] Local temp table '{}' registered",
-                        temp_table_name
-                    );
-                    temp_tables.push(temp_table_name);
-                }
-            } else {
-                log::debug!(
-                    "[register_merged_table] Registering remote temp table '{}' for node '{}'",
-                    temp_table_name,
-                    node_id
-                );
-
-                let grpc_addr = self
-                    .cluster_manager
-                    .get_node_grpc_addr(node_id)
-                    .ok_or_else(|| {
-                        CoreError::Internal(format!("Node {} gRPC address not found", node_id))
-                    })?;
-                log::debug!(
-                    "[register_merged_table] Resolved gRPC address: {}",
-                    grpc_addr
-                );
-
-                let executor = Arc::new(FlightSQLExecutor::new(
-                    node_id.clone(),
-                    grpc_addr,
-                    self.catalog.clone(),
-                    Some(partitions.clone()),
-                ));
-
-                let provider = Arc::new(SQLFederationProvider::new(executor.clone()));
-
-                use datafusion_federation::sql::RemoteTableRef;
-                let table_ref =
-                    RemoteTableRef::parse_with_default_dialect(table_name).map_err(|e| {
-                        CoreError::Internal(format!("Failed to parse table name: {}", e))
-                    })?;
-                log::debug!("[register_merged_table] Parsed table ref: {:?}", table_ref);
-
-                let table_source = Arc::new(
-                    SQLTableSource::new(provider, table_ref)
-                        .await
-                        .map_err(|e| {
-                            CoreError::Internal(format!("Failed to create table source: {}", e))
-                        })?,
-                );
-
-                let federated_provider = FederatedTableProviderAdaptor::new(table_source);
-
-                ctx.register_table(&temp_table_name, Arc::new(federated_provider))
-                    .map_err(|e| {
-                        CoreError::Internal(format!("Failed to register remote temp table: {}", e))
-                    })?;
-                log::debug!(
-                    "[register_merged_table] Remote temp table '{}' registered",
-                    temp_table_name
-                );
-                temp_tables.push(temp_table_name);
-            }
-        }
-
-        if temp_tables.is_empty() {
-            self.register_empty_table(ctx, table_name, table_schema)?;
-            return Ok(());
-        }
-
-        log::debug!(
-            "[register_merged_table] Creating union of {} temp tables: {:?}",
-            temp_tables.len(),
-            temp_tables
-        );
-
-        log::debug!(
-            "[register_merged_table] Creating DataFrame from first temp table '{}'",
-            &temp_tables[0]
-        );
-        let mut df = ctx
-            .table(&temp_tables[0])
-            .await
-            .map_err(|e| CoreError::Internal(format!("Failed to create DataFrame: {}", e)))?;
-
-        log::debug!(
-            "[register_merged_table] Union remaining {} temp tables",
-            temp_tables.len() - 1
-        );
-        for (idx, temp) in temp_tables.iter().skip(1).enumerate() {
             log::debug!(
-                "[register_merged_table] Unioning temp table {} of {}: '{}'",
-                idx + 1,
-                temp_tables.len() - 1,
-                temp
+                "[register_merged_table] Adding remote node '{}' with {} partitions, addr={}",
+                node_id,
+                partition_names.len(),
+                grpc_addr
             );
-            let next_df = ctx
-                .table(temp)
-                .await
-                .map_err(|e| CoreError::Internal(format!("Failed to create DataFrame: {}", e)))?;
-            df = df
-                .union(next_df)
-                .map_err(|e| CoreError::Internal(format!("Failed to union DataFrame: {}", e)))?;
+
+            remote_nodes.push(super::mixed_provider::NodePartitions {
+                node_id: node_id.clone(),
+                partition_names: partition_names.clone(),
+                grpc_addr: Some(grpc_addr),
+            });
         }
 
-        let plan = df.logical_plan().clone();
-        let view = ViewTable::try_new(plan, None)
-            .map_err(|e| CoreError::Internal(format!("Failed to create ViewTable: {}", e)))?;
+        // 创建 MixedTableProvider
+        let mixed_provider = super::mixed_provider::MixedTableProvider::new(
+            table_name.to_string(),
+            table_schema.clone(),
+            my_node_id.clone(),
+            local_partitions,
+            remote_nodes,
+            self.engine.clone(),
+            needs_internal_id,
+        );
+
+        ctx.register_table(table_name, Arc::new(mixed_provider))
+            .map_err(|e| CoreError::Internal(format!("Failed to register mixed table: {}", e)))?;
 
         log::debug!(
-            "[register_merged_table] Registering merged view '{}'",
+            "[register_merged_table] Registered mixed table '{}'",
             table_name
         );
-        ctx.register_table(table_name, Arc::new(view))
-            .map_err(|e| CoreError::Internal(format!("Failed to register merged view: {}", e)))?;
 
-        log::debug!(
-            "[register_merged_table] Registered merged view '{}' with {} temp source(s)",
-            table_name,
-            temp_tables.len()
-        );
         Ok(())
     }
 
