@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::compute::udf::fulltext_udf::register_fulltext_udfs;
-use crate::segment::{IndexReader, RowDataStore};
+use crate::segment::{field_store::row_data::RowDataStoreReader, IndexReader, RowDataStore};
 use datafusion::scalar::ScalarValue;
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
@@ -166,13 +166,6 @@ impl SegmentScanner {
                         }
                         return Some(ordered_plan);
                     }
-                } else {
-                    log::debug!(
-                        "⏭️  [SegmentScanner] Skipping ordered scan: hit_ratio={:.1}%, hit_count={}, limit={}",
-                        result_bitmap.len() as f64 / self.valid_docs.len() as f64 * 100.0,
-                        result_bitmap.len(),
-                        limit_val
-                    );
                 }
             }
         }
@@ -1623,9 +1616,7 @@ impl ExecutionPlan for SegmentExec {
             None
         };
 
-        // 配置: 每次最多处理多少个 storage batch
-        // 这控制了内存使用上限: CHUNK_SIZE × 1000行/batch × 列数 × 数据大小
-        const CHUNK_SIZE: usize = 100; // 每次处理100个batch (约10万行)
+        const CHUNK_SIZE: usize = 1000;
 
         log::debug!(
             "🔍 [SegmentExec::execute] Starting streaming execution, total matched_docs={}, pushdown_limit={:?}",
@@ -1637,7 +1628,7 @@ impl ExecutionPlan for SegmentExec {
             projected_schema,
             raw_data,
             matched_docs,
-            projection,
+            projection.unwrap_or_default(),
             CHUNK_SIZE,
             pushdown_limit,
         )))
@@ -1649,341 +1640,138 @@ impl ExecutionPlan for SegmentExec {
 /// 按需分批读取数据,避免一次性加载全部到内存
 struct SegmentStream {
     schema: SchemaRef,
-    raw_data: RowDataStore,
-    doc_ids_iter: roaring::bitmap::IntoIter,
-    projection: Option<Vec<usize>>,
+    reader: RowDataStoreReader,
+    doc_count: usize,
+    doc_ids_iter: std::iter::Peekable<roaring::bitmap::IntoIter>,
     chunk_size: usize,
-    limit: Option<usize>, // LIMIT 下推：如果设置，只返回这么多行
-    rows_returned: usize, // 已经返回的行数（用于 LIMIT）
+    limit: Option<usize>,
+    rows_returned: i32,
     pending_batches: std::vec::IntoIter<RecordBatch>,
-    count_only_mode: bool, // 🚀 COUNT 优化：只返回行数，不读取实际数据
 }
 
 impl SegmentStream {
     fn new(
         schema: SchemaRef,
-        raw_data: RowDataStore,
+        store: RowDataStore,
         matched_docs: RoaringBitmap,
-        projection: Option<Vec<usize>>,
+        projection: Vec<usize>,
         chunk_size: usize,
         limit: Option<usize>,
     ) -> Self {
-        // 🚀 COUNT(*) 优化检测：
-        // 如果 projection 为空数组 Some([])，说明是 COUNT(*) 或纯聚合查询
-        // 这时我们可以完全不读取数据，只返回正确行数的空 batch
-        let count_only_mode = projection.as_ref().is_some_and(|p| p.is_empty());
-
-        if count_only_mode {
-            log::debug!("🚀 [SegmentStream] COUNT ONLY MODE ACTIVATED - will not read any data!");
-        }
-
-        log::debug!(
-            "🔍 [SegmentStream::new] Total doc_ids={}, will process in chunks of {} storage batches, limit={:?}, count_only={}",
-            matched_docs.len(),
-            chunk_size,
-            limit,
-            count_only_mode
-        );
+        let reader = RowDataStoreReader::new(store, projection);
 
         Self {
             schema,
-            raw_data,
-            doc_ids_iter: matched_docs.into_iter(),
-            projection,
+            reader,
+            doc_count: matched_docs.len() as usize,
+            doc_ids_iter: matched_docs.into_iter().peekable(),
             chunk_size,
             limit,
             rows_returned: 0,
             pending_batches: Vec::new().into_iter(),
-            count_only_mode,
         }
     }
 
-    /// 🚀 性能优化：批量读取 + 按 RowGroup 返回
+    /// 批量读取数据并返回 RecordBatch
     ///
-    /// **折中方案**：兼顾批量 I/O 性能和按 RowGroup 返回的需求
-    ///
-    /// 策略：
-    /// 1. 一次收集多个 RowGroup 的 doc_ids (chunk_size 个)
-    /// 2. 批量读取所有 RowGroup (一次文件 I/O)
-    /// 3. 每次返回一个 RowGroup 作为独立的 RecordBatch
-    ///
-    /// 优势：
-    /// - ✅ 保持批量文件 I/O 的高性能
-    /// - ✅ 按 RowGroup 自然边界返回数据
-    /// - ✅ 降低函数调用开销
-    /// - ✅ 利用文件系统缓存
-    fn generate_next_chunk(&mut self) -> DFResult<Vec<RecordBatch>> {
-        use datafusion::arrow::array::UInt32Array;
-        use datafusion::arrow::compute::take;
+    /// 策略：收集一批 doc_ids → 批量查找分组 → 批量读取 → 返回合并后的单个 batch
+    fn generate_next_chunk(&mut self) -> DFResult<Option<RecordBatch>> {
+        use datafusion::arrow::compute::concat_batches;
 
-        // LIMIT 下推：如果已经返回足够的行，停止生成
-        if let Some(limit) = self.limit {
-            if self.rows_returned >= limit {
-                return Ok(Vec::new());
-            }
+        // LIMIT 下推检查
+        if self.limit.is_some_and(|l| self.rows_returned >= l as i32)
+            || self.doc_count <= self.rows_returned as usize
+            || self.doc_count == 0
+        {
+            return Ok(None);
         }
 
-        // 🎯 折中策略：批量收集 doc_ids，但按 RowGroup 分组返回
-        // 1. 收集 chunk_size 个 batch 的 doc_ids
-        let mut doc_ids_to_process: Vec<u32> = Vec::new();
-        let mut batch_count = 0;
+        //先判断是否是空投影（COUNT 优化）
+        if self.reader.is_empty_projection() {
+            // 空投影，直接返回行数
+            let batch = RecordBatch::try_new_with_options(
+                self.schema.clone(),
+                vec![],
+                &datafusion::arrow::record_batch::RecordBatchOptions::new()
+                    .with_row_count(Some(self.doc_count)),
+            )?;
+            self.rows_returned += self.doc_count as i32;
+            return Ok(Some(batch));
+        }
 
-        for doc_id in &mut self.doc_ids_iter {
-            // 简单的 batch 计数（基于 doc_id 跳跃）
-            if doc_ids_to_process.is_empty() {
-                batch_count = 1;
-            } else {
-                // 估算：如果 doc_id 跨越较大范围，可能是新 batch
-                let last_doc_id = doc_ids_to_process[doc_ids_to_process.len() - 1];
-                if doc_id > last_doc_id + 1000 {
-                    batch_count += 1;
-                    if batch_count > self.chunk_size {
-                        break; // 收集够了 chunk_size 个 batch
-                    }
+        // 计算本次最多取多少行
+        let max_rows = match self.limit {
+            Some(limit) => {
+                let remaining = (limit as i32 - self.rows_returned) as usize;
+                if remaining == 0 {
+                    return Ok(None);
                 }
+                // 如果有 limit，严格控制不超过 remaining
+                remaining
             }
+            None => {
+                // 如果没有 limit，用 chunk_size 控制（约 chunk_size * 1000 行）
+                self.chunk_size * 1000
+            }
+        };
 
-            doc_ids_to_process.push(doc_id);
-        }
+        let mut batches = Vec::new();
+        let mut total_rows = 0;
 
-        if doc_ids_to_process.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        log::debug!(
-            "  [SegmentStream] Collected {} doc_ids (~{} RowGroups) for batch processing",
-            doc_ids_to_process.len(),
-            batch_count
-        );
-
-        // 2. 批量查找 batch_key 并分组
-        let batch_groups = self.raw_data.batch_lookup_doc_ids(&doc_ids_to_process);
-
-        if batch_groups.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let _doc_count = batch_groups.values().map(|v| v.len()).sum::<usize>();
-
-        log::debug!(
-            "  [SegmentStream] batch_groups: {} groups, {} total doc_ids",
-            batch_groups.len(),
-            _doc_count
-        );
-        for (batch_start_id, doc_ids) in batch_groups.iter().take(3) {
-            log::debug!(
-                "    batch_start_id={}: {} doc_ids (first few: {:?})",
-                batch_start_id,
-                doc_ids.len(),
-                &doc_ids[..doc_ids.len().min(5)]
-            );
-        }
-
-        // 3. 处理空投影（COUNT）- 不读取任何数据
-        let is_empty_projection = self.projection.as_ref().is_some_and(|p| p.is_empty());
-
-        log::debug!(
-            "🔧 [SegmentStream] projection={:?}, is_empty_projection={}",
-            self.projection,
-            is_empty_projection
-        );
-
-        if is_empty_projection {
-            // ⚡ COUNT 优化：空投影时直接使用 bitmap 计数，不读取任何数据
-            log::debug!(
-                "⚡ [SegmentStream] Empty projection (COUNT), using bitmap only - NO data read"
-            );
-
-            let mut result_batches = Vec::new();
-
-            // 直接根据 doc_ids 数量创建空 batch
-            for (_batch_start_id, doc_ids_in_batch) in batch_groups {
-                let row_count = doc_ids_in_batch.len();
-
-                if row_count > 0 {
-                    if let Ok(batch) = RecordBatch::try_new_with_options(
-                        self.schema.clone(),
-                        vec![],
-                        &datafusion::arrow::record_batch::RecordBatchOptions::new()
-                            .with_row_count(Some(row_count)),
-                    ) {
-                        result_batches.push(batch);
-                    } else {
-                        log::warn!("  [SegmentStream] Failed to create empty projection batch with {} rows", row_count);
-                    }
-                }
+        // 循环读取 rowgroup，直到达到 max_rows 或 iter 空了
+        while total_rows < max_rows {
+            if max_rows <= total_rows {
+                break;
             }
 
-            // 🚀 关键修复：空投影也需要合并小 batch（Memory 模式下会产生大量单行 batch）
-            if result_batches.len() > 5 {
-                log::debug!(
-                    "🔧 [SegmentStream] COUNT: Merging {} empty batches into one",
-                    result_batches.len()
-                );
-                match datafusion::arrow::compute::concat_batches(&self.schema, &result_batches) {
-                    Ok(merged_batch) => {
-                        log::debug!(
-                            "✅ [SegmentStream] COUNT: Merged into 1 batch with {} rows",
-                            merged_batch.num_rows()
-                        );
-                        self.rows_returned += merged_batch.num_rows();
-                        return Ok(vec![merged_batch]);
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "⚠️  [SegmentStream] COUNT: Failed to merge batches: {}, returning {} batches",
-                            e,
-                            result_batches.len()
-                        );
-                        // 合并失败，继续使用原始 batches
-                    }
-                }
-            }
+            let remaining = max_rows - total_rows;
 
-            // 更新已返回的行数（用于 LIMIT 下推）
-            let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
-            self.rows_returned += total_rows;
+            // 调用 next_group 读取一个完整的 rowgroup（或其中的 remaining 行）
+            match self
+                .reader
+                .next_group(&mut self.doc_ids_iter, remaining)
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?
+            {
+                Some(batch) => {
+                    let batch_rows = batch.num_rows();
+                    total_rows += batch_rows;
+                    batches.push(batch);
 
-            return Ok(result_batches);
-        }
-
-        // 4. 正常投影：批量读取所有 RowGroup（一次 I/O）
-        let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
-
-        log::debug!(
-            "🔧 [SegmentStream] Batch reading {} RowGroups with projection (single I/O)",
-            batch_keys.len()
-        );
-
-        let proj_to_use = self.projection.as_deref();
-        let source_batches = self
-            .raw_data
-            .get_batch_with_projection(&batch_keys, proj_to_use);
-
-        // 5. 按 RowGroup 生成独立的 RecordBatch（每个 RowGroup 一个 batch）
-        // ⚡ 关键优化：虽然批量读取了数据，但每个 RowGroup 作为独立的 batch 返回
-        let mut result_batches = Vec::new();
-
-        for (batch_start_id, doc_ids_in_batch) in batch_groups {
-            // 正常投影处理
-            if let Some(source_batch) = source_batches.get(&batch_start_id) {
-                log::debug!("  [SegmentStream] Processing batch_start_id={}, source_batch has {} rows, {} doc_ids to process",
-                    batch_start_id, source_batch.num_rows(), doc_ids_in_batch.len());
-
-                let mut row_indices: Vec<usize> = doc_ids_in_batch
-                    .iter()
-                    .filter_map(|&doc_id| {
-                        let row_idx = (doc_id - batch_start_id) as usize;
-                        if row_idx < source_batch.num_rows() {
-                            Some(row_idx)
-                        } else {
-                            log::debug!("  [SegmentStream] WARNING: doc_id={}, batch_start_id={}, row_idx={} >= num_rows={}",
-                                doc_id, batch_start_id, row_idx, source_batch.num_rows());
-                            None
-                        }
-                    })
-                    .collect();
-
-                log::debug!(
-                    "  [SegmentStream] Extracted {} row indices",
-                    row_indices.len()
-                );
-
-                if row_indices.is_empty() {
-                    log::debug!("  [SegmentStream] No valid row indices, skipping batch");
-                    continue;
-                }
-
-                row_indices.sort_unstable();
-
-                let indices_array =
-                    UInt32Array::from(row_indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
-
-                let final_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = source_batch
-                    .columns()
-                    .iter()
-                    .filter_map(|col| take(col.as_ref(), &indices_array, None).ok())
-                    .collect();
-
-                log::debug!(
-                    "  [SegmentStream] Created {} columns from take operation",
-                    final_columns.len()
-                );
-                log::debug!(
-                    "  [SegmentStream] Expected schema fields: {}",
-                    self.schema.fields().len()
-                );
-                log::debug!(
-                    "  [SegmentStream] Source batch columns: {}",
-                    source_batch.num_columns()
-                );
-
-                match RecordBatch::try_new(self.schema.clone(), final_columns.clone()) {
-                    Ok(batch) => {
-                        log::debug!(
-                            "  [SegmentStream] Created result batch with {} rows",
-                            batch.num_rows()
-                        );
-                        result_batches.push(batch);
-                    }
-                    Err(e) => {
-                        log::debug!("  [SegmentStream] Failed to create RecordBatch: {}", e);
-                        log::debug!(
-                            "  [SegmentStream] Schema: {:?}",
-                            self.schema
-                                .fields()
-                                .iter()
-                                .map(|f| (f.name(), f.data_type()))
-                                .collect::<Vec<_>>()
-                        );
-                        log::debug!(
-                            "  [SegmentStream] Column types: {:?}",
-                            final_columns
-                                .iter()
-                                .map(|c| c.data_type())
-                                .collect::<Vec<_>>()
-                        );
-                    }
-                }
-            } else {
-                log::debug!(
-                    "  [SegmentStream] No source_batch found for batch_start_id={}",
-                    batch_start_id
-                );
-            }
-        }
-
-        // 更新已返回的行数（用于 LIMIT 下推）
-        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
-        self.rows_returned += total_rows;
-
-        // 🚀 内存优化：合并小 batch 成大 batch（特别是 Memory 模式下的单行 batch）
-        // 如果有多个小 batch，合并它们以减少 channel 传输和 DataFusion 处理开销
-        if result_batches.len() > 10 {
-            log::debug!(
-                "🔧 [SegmentStream] Merging {} small batches into one large batch",
-                result_batches.len()
-            );
-            match datafusion::arrow::compute::concat_batches(&self.schema, &result_batches) {
-                Ok(merged_batch) => {
                     log::debug!(
-                        "✅ [SegmentStream] Merged into 1 batch with {} rows",
-                        merged_batch.num_rows()
+                        "🔍 [generate_next_chunk] Read rowgroup batch: {} rows, total so far: {}",
+                        batch_rows,
+                        total_rows
                     );
-                    return Ok(vec![merged_batch]);
                 }
-                Err(e) => {
-                    log::warn!(
-                        "⚠️  [SegmentStream] Failed to merge batches: {}, returning {} batches",
-                        e,
-                        result_batches.len()
-                    );
-                    return Ok(result_batches);
+                None => {
+                    log::debug!("🔍 [generate_next_chunk] No more data from next_group");
+                    break;
                 }
             }
         }
 
-        Ok(result_batches)
+        if batches.is_empty() {
+            return Ok(None);
+        }
+
+        self.rows_returned += total_rows as i32;
+
+        log::debug!(
+            "🔍 [generate_next_chunk] Returning {} batches with {} total rows, rows_returned so far: {}",
+            batches.len(),
+            total_rows,
+            self.rows_returned
+        );
+
+        // 合并 batches
+        if batches.len() == 1 {
+            return Ok(Some(batches.into_iter().next().unwrap()));
+        }
+
+        let merged = concat_batches(&self.schema, &batches)
+            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+
+        Ok(Some(merged))
     }
 }
 
@@ -2004,23 +1792,8 @@ impl futures::Stream for SegmentStream {
 
         // 2. 生成下一批数据
         match self.generate_next_chunk() {
-            Ok(batches) => {
-                if batches.is_empty() {
-                    // 没有更多数据
-                    Poll::Ready(None)
-                } else {
-                    // 设置待处理队列
-                    self.pending_batches = batches.into_iter();
-
-                    // 立即返回第一个 batch
-                    if let Some(batch) = self.pending_batches.next() {
-                        Poll::Ready(Some(Ok(batch)))
-                    } else {
-                        // 理论上不会到这里
-                        Poll::Ready(None)
-                    }
-                }
-            }
+            Ok(Some(batch)) => Poll::Ready(Some(Ok(batch))),
+            Ok(None) => Poll::Ready(None), // 没有更多数据
             Err(e) => Poll::Ready(Some(Err(e))),
         }
     }

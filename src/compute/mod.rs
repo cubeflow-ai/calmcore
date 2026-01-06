@@ -1,6 +1,5 @@
 // Executor 层
 mod information_schema_executor;
-pub mod natural_order_executor; // 公开给 MySQL protocol 层使用
 
 // Table Provider 层
 pub mod table_provider;

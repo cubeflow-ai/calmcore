@@ -363,13 +363,189 @@ impl ParquetRowDataReader {
     pub fn batch_lookup_doc_ids(&self, doc_ids: &[u32]) -> HashMap<u32, Vec<u32>> {
         let mut result: HashMap<u32, Vec<u32>> = HashMap::new();
 
-        for &doc_id in doc_ids {
-            if let Some(batch_key) = self.get_batch_key_for_doc(doc_id) {
-                result.entry(batch_key).or_default().push(doc_id);
+        if doc_ids.is_empty() {
+            return result;
+        }
+
+        let mut i = 0;
+        while i < doc_ids.len() {
+            let doc_id = doc_ids[i];
+
+            // 对第一个 doc_id 做二分查找找到它所在的 range
+            let range_idx = match self.ranges.binary_search_by(|(start, end, _)| {
+                if doc_id < *start {
+                    std::cmp::Ordering::Greater
+                } else if doc_id >= *end {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            }) {
+                Ok(idx) => idx,
+                Err(_) => {
+                    i += 1;
+                    continue;
+                }
+            };
+
+            let (batch_key, end_id, _) = self.ranges[range_idx];
+
+            // 批量收集所有在这个 range 内的 doc_ids
+            let mut batch_docs = Vec::new();
+            while i < doc_ids.len() && doc_ids[i] < end_id {
+                if doc_ids[i] >= batch_key {
+                    batch_docs.push(doc_ids[i]);
+                }
+                i += 1;
+            }
+
+            if !batch_docs.is_empty() {
+                result.insert(batch_key, batch_docs);
             }
         }
 
         result
+    }
+
+    pub fn next_group(
+        &self,
+        ids_iter: &mut std::iter::Peekable<roaring::bitmap::IntoIter>,
+        size: usize,
+        projection: &[usize],
+    ) -> CoreResult<Option<RecordBatch>> {
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use datafusion::parquet::arrow::ProjectionMask;
+
+        // 1. Peek 第一个 doc_id
+        let first_id = match ids_iter.peek() {
+            Some(id) => *id,
+            None => return Ok(None),
+        };
+
+        // 2. 二分查找找到所在的区间
+        let range_idx = match self.ranges.binary_search_by(|(start, end, _)| {
+            if first_id < *start {
+                std::cmp::Ordering::Greater
+            } else if first_id >= *end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        }) {
+            Ok(idx) => idx,
+            Err(_) => {
+                // 找不到区间，跳过这个 doc_id
+                log::warn!("[next_group] No range found for doc_id {}", first_id);
+                ids_iter.next();
+                return Ok(None);
+            }
+        };
+
+        let (batch_key, end_id, rg_idx) = self.ranges[range_idx];
+
+        // 3. 收集同一个区间内的所有 doc_ids（最多 size 个）
+        let mut doc_ids_in_batch = Vec::new();
+        loop {
+            let id = match ids_iter.peek() {
+                Some(id) => *id,
+                None => break,
+            };
+
+            // 超出当前区间，停止收集
+            if id >= end_id {
+                break;
+            }
+
+            // 收集这个 doc_id
+            doc_ids_in_batch.push(ids_iter.next().unwrap());
+
+            // 达到 size 限制，停止收集
+            if doc_ids_in_batch.len() >= size {
+                break;
+            }
+        }
+
+        if doc_ids_in_batch.is_empty() {
+            return Ok(None);
+        }
+
+        // 4. 打开 Parquet 文件并读取对应的 RowGroup
+        let file = File::open(&self.file_path)
+            .map_err(|e| crate::utils::error::CoreError::IOError(e.to_string()))?;
+
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?;
+
+        // 5. 应用列投影
+        if !projection.is_empty() {
+            let schema_descr = builder.metadata().file_metadata().schema_descr();
+            let num_fields = schema_descr.num_columns();
+            let mut column_mask = vec![false; num_fields];
+            for &col_idx in projection {
+                if col_idx < num_fields {
+                    column_mask[col_idx] = true;
+                }
+            }
+            let mask = ProjectionMask::leaves(
+                schema_descr,
+                column_mask
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(i, enabled)| if enabled { Some(i) } else { None }),
+            );
+            builder = builder.with_projection(mask);
+        }
+
+        // 6. 读取指定的 RowGroup
+        let mut reader = builder
+            .with_row_groups(vec![rg_idx])
+            .build()
+            .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?;
+
+        // 7. 读取所有 batches 并合并
+        let mut batches = Vec::new();
+        for batch_result in reader {
+            batches.push(
+                batch_result
+                    .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?,
+            );
+        }
+
+        if batches.is_empty() {
+            return Ok(None);
+        }
+
+        let combined_batch = if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            datafusion::arrow::compute::concat_batches(&batches[0].schema(), &batches)
+                .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?
+        };
+
+        // 8. 计算行索引并使用 take 提取对应的行
+        let indices: Vec<u32> = doc_ids_in_batch
+            .iter()
+            .filter_map(|&doc_id| {
+                if doc_id >= batch_key {
+                    let idx = (doc_id - batch_key) as usize;
+                    if idx < combined_batch.num_rows() {
+                        return Some((doc_id - batch_key) as u32);
+                    }
+                }
+                None
+            })
+            .collect();
+
+        if indices.is_empty() {
+            return Ok(None);
+        }
+
+        let indices_array = datafusion::arrow::array::UInt32Array::from(indices);
+        let result_batch =
+            datafusion::arrow::compute::take_record_batch(&combined_batch, &indices_array)
+                .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?;
+
+        Ok(Some(result_batch))
     }
 
     /// Batch read multiple RowGroups at once with column projection
@@ -484,6 +660,190 @@ impl ParquetRowDataReader {
 
     pub fn len(&self) -> usize {
         self.num_row_groups
+    }
+
+    /// Create a group reader for efficient repeated next_group calls
+    ///
+    /// This uses lazy loading - the file is only opened when next_group is called,
+    /// but projection settings are pre-configured for efficiency.
+    ///
+    /// # Performance
+    /// - Avoids upfront file opening overhead
+    /// - Reuses projection configuration across calls
+    pub fn create_group_reader(&self, projection: &[usize]) -> ParquetRowDataGroupReader {
+        ParquetRowDataGroupReader {
+            file_path: self.file_path.clone(),
+            ranges: Arc::clone(&self.ranges),
+            projection: projection.to_vec(),
+            cached_metadata: None,
+        }
+    }
+}
+
+/// Efficient group reader for Parquet files
+///
+/// Uses lazy loading - file metadata is only loaded on first next_group call.
+/// Caches metadata to avoid repeated file parsing.
+pub struct ParquetRowDataGroupReader {
+    file_path: String,
+    ranges: Arc<Vec<(u32, u32, usize)>>,
+    projection: Vec<usize>,
+    /// Cached file metadata, initialized on first use
+    cached_metadata: Option<datafusion::parquet::file::metadata::ParquetMetaData>,
+}
+
+impl ParquetRowDataGroupReader {
+    /// Read the next group of doc_ids from the iterator
+    ///
+    /// This is much more efficient than ParquetRowDataReader::next_group
+    /// because it caches metadata after the first call.
+    pub fn next_group(
+        &mut self,
+        ids_iter: &mut std::iter::Peekable<roaring::bitmap::IntoIter>,
+        size: usize,
+    ) -> CoreResult<Option<RecordBatch>> {
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        // 1. Peek first doc_id
+        let first_id = match ids_iter.peek() {
+            Some(id) => *id,
+            None => return Ok(None),
+        };
+
+        // 2. Binary search to find the range
+        let range_idx = match self.ranges.binary_search_by(|(start, end, _)| {
+            if first_id < *start {
+                std::cmp::Ordering::Greater
+            } else if first_id >= *end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        }) {
+            Ok(idx) => idx,
+            Err(_) => {
+                log::warn!("[next_group] No range found for doc_id {}", first_id);
+                ids_iter.next();
+                return Ok(None);
+            }
+        };
+
+        let (batch_key, end_id, rg_idx) = self.ranges[range_idx];
+
+        // 3. Collect doc_ids in this range (up to size limit)
+        let mut doc_ids_in_batch = Vec::new();
+        loop {
+            let id = match ids_iter.peek() {
+                Some(id) => *id,
+                None => break,
+            };
+
+            if id >= end_id {
+                break;
+            }
+
+            doc_ids_in_batch.push(ids_iter.next().unwrap());
+
+            if doc_ids_in_batch.len() >= size {
+                break;
+            }
+        }
+
+        if doc_ids_in_batch.is_empty() {
+            return Ok(None);
+        }
+
+        // 4. Lazy initialize metadata on first call
+        if self.cached_metadata.is_none() {
+            let file = File::open(&self.file_path)
+                .map_err(|e| crate::utils::error::CoreError::IOError(e.to_string()))?;
+            let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+                .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?;
+            // builder.metadata() returns Arc<ParquetMetaData>, need to deref and clone
+            let metadata_arc = builder.metadata();
+            self.cached_metadata = Some(metadata_arc.as_ref().clone());
+        }
+
+        let metadata = self.cached_metadata.as_ref().unwrap();
+
+        // 5. Open file for reading
+        let file = File::open(&self.file_path)
+            .map_err(|e| crate::utils::error::CoreError::IOError(e.to_string()))?;
+
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?;
+
+        // Apply projection if configured
+        if !self.projection.is_empty() {
+            use datafusion::parquet::arrow::ProjectionMask;
+            let schema_descr = metadata.file_metadata().schema_descr();
+            let num_fields = schema_descr.num_columns();
+            let mut column_mask = vec![false; num_fields];
+            for &col_idx in &self.projection {
+                if col_idx < num_fields {
+                    column_mask[col_idx] = true;
+                }
+            }
+            let mask = ProjectionMask::leaves(
+                schema_descr,
+                column_mask
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(i, enabled)| if enabled { Some(i) } else { None }),
+            );
+            builder = builder.with_projection(mask);
+        }
+
+        // 5. Read the specific RowGroup
+        let reader = builder
+            .with_row_groups(vec![rg_idx])
+            .build()
+            .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?;
+
+        // 6. Read and merge all batches
+        let mut batches = Vec::new();
+        for batch_result in reader {
+            batches.push(
+                batch_result
+                    .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?,
+            );
+        }
+
+        if batches.is_empty() {
+            return Ok(None);
+        }
+
+        let combined_batch = if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            datafusion::arrow::compute::concat_batches(&batches[0].schema(), &batches)
+                .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?
+        };
+
+        // 7. Extract specific rows using take
+        let indices: Vec<u32> = doc_ids_in_batch
+            .iter()
+            .filter_map(|&doc_id| {
+                if doc_id >= batch_key {
+                    let idx = (doc_id - batch_key) as usize;
+                    if idx < combined_batch.num_rows() {
+                        return Some((doc_id - batch_key) as u32);
+                    }
+                }
+                None
+            })
+            .collect();
+
+        if indices.is_empty() {
+            return Ok(None);
+        }
+
+        let indices_array = datafusion::arrow::array::UInt32Array::from(indices);
+        let result_batch =
+            datafusion::arrow::compute::take_record_batch(&combined_batch, &indices_array)
+                .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?;
+
+        Ok(Some(result_batch))
     }
 }
 
@@ -613,21 +973,105 @@ impl RowDataStore {
             RowDataStore::Parquet(reader) => reader.batch_lookup_doc_ids(doc_ids),
             RowDataStore::Memory(tree) => {
                 let mut result: HashMap<u32, Vec<u32>> = HashMap::new();
-                for &doc_id in doc_ids {
+
+                if doc_ids.is_empty() {
+                    return result;
+                }
+                let mut i = 0;
+                while i < doc_ids.len() {
+                    let doc_id = doc_ids[i];
+
+                    // 找到这个 doc_id 所在的 batch
                     if let Some(item) = tree.floor(&doc_id) {
-                        let (k, _v, _ttl) = &*item;
-                        result.entry(*k).or_default().push(doc_id);
+                        let (batch_key, batch, _ttl) = &*item;
+                        let end_id = batch_key + batch.num_rows() as u32;
+
+                        // 收集所有在这个 batch 范围内的 doc_ids
+                        let mut batch_docs = Vec::new();
+                        while i < doc_ids.len() && doc_ids[i] < end_id {
+                            if doc_ids[i] >= *batch_key {
+                                batch_docs.push(doc_ids[i]);
+                            }
+                            i += 1;
+                        }
+                        if !batch_docs.is_empty() {
+                            result.insert(*batch_key, batch_docs);
+                        }
                     } else {
-                        log::warn!("⚠️  [Memory] doc_id={} has no floor key in BTree", doc_id);
+                        log::warn!(
+                            "  [batch_lookup_doc_ids] No batch found for doc_id {}",
+                            doc_id
+                        );
+                        i += 1;
                     }
                 }
-                log::debug!(
-                    "🔍 [Memory batch_lookup] {} doc_ids -> {} batches: {:?}",
-                    doc_ids.len(),
-                    result.len(),
-                    result.keys().collect::<Vec<_>>()
-                );
                 result
+            }
+        }
+    }
+
+    // if have limit, it not none then limit the number of doc_ids processed ，others return rowdata result
+    pub fn next_group(
+        &self,
+        ids_iter: &mut std::iter::Peekable<roaring::bitmap::IntoIter>,
+        size: Option<usize>,
+        projection: &[usize],
+    ) -> CoreResult<Option<RecordBatch>> {
+        let size = size.unwrap_or(usize::MAX);
+        match self {
+            RowDataStore::Parquet(reader) => reader.next_group(ids_iter, size, projection),
+            RowDataStore::Memory(tree) => {
+                let mut indices = Vec::new();
+
+                let mut id = match ids_iter.peek() {
+                    Some(id) => *id,
+                    None => return Ok(None),
+                };
+
+                let item = tree.floor(&id).ok_or_else(|| {
+                    crate::utils::error::CoreError::Internal(format!(
+                        "No batch found for doc_id {}",
+                        id
+                    ))
+                })?;
+                let (batch_key, batch) = (item.0, &item.1);
+                let end_id = batch_key + batch.num_rows() as u32;
+
+                if id >= end_id {
+                    log::error!(
+                        "  [next_id_group] No batch found for doc_id {} may be it have bug!!!",
+                        id
+                    );
+                    ids_iter.next();
+                    return Ok(None);
+                }
+
+                loop {
+                    indices.push(ids_iter.next().unwrap() - batch_key);
+                    // if have limit and reach the limit then break
+                    if indices.len() >= size {
+                        break;
+                    }
+                    id = match ids_iter.peek() {
+                        Some(id) => *id,
+                        None => break,
+                    };
+                    if id >= end_id {
+                        break;
+                    }
+                }
+
+                if indices.is_empty() {
+                    return Ok(None);
+                }
+
+                // 取出对应的行，和对应的投影projection
+                let source_batch = batch.project(projection)?;
+                let batch = datafusion::arrow::compute::take_record_batch(
+                    &source_batch,
+                    &datafusion::arrow::array::UInt32Array::from(indices),
+                )?;
+                Ok(Some(batch))
             }
         }
     }
@@ -681,6 +1125,130 @@ impl RowDataStore {
         }
     }
 
+    /// 从 id_iter 中读取数据，支持 limit 和 batch_size 控制
+    ///
+    /// 返回一个 RecordBatch，包含从 id_iter 中读取的行，直到：
+    /// - 达到 limit 行数
+    /// - 达到 batch_size 行数
+    /// - id_iter 耗尽
+    pub fn get_batch_with_projection_limit(
+        &self,
+        id_iter: &mut roaring::bitmap::IntoIter,
+        limit: Option<usize>,
+        batch_size: usize,
+        projection: &[usize],
+    ) -> Option<RecordBatch> {
+        use datafusion::arrow::array::UInt32Array;
+        use datafusion::arrow::compute::take;
+
+        let max_rows = limit.unwrap_or(batch_size).min(batch_size);
+        let doc_ids: Vec<u32> = id_iter.take(max_rows).collect();
+        if doc_ids.is_empty() {
+            return None;
+        }
+
+        // 按 batch 分组
+        let batch_groups = self.batch_lookup_doc_ids(&doc_ids);
+        if batch_groups.is_empty() {
+            return None;
+        }
+
+        match self {
+            RowDataStore::Parquet(reader) => {
+                // For Parquet, we need to use batch_lookup_doc_ids + get_batch_with_projection
+                let batch_groups = reader.batch_lookup_doc_ids(&doc_ids);
+                if batch_groups.is_empty() {
+                    return None;
+                }
+                let batch_keys: Vec<u32> = batch_groups.keys().copied().collect();
+                let batches = reader.get_batch_with_projection(&batch_keys, Some(projection));
+                if batches.is_empty() {
+                    return None;
+                }
+                // Return the first batch (simplified for now)
+                batches.into_values().next()
+            }
+            RowDataStore::Memory(tree) => {
+                // 读取并合并数据
+                let mut all_columns: Vec<Vec<Arc<dyn datafusion::arrow::array::Array>>> =
+                    Vec::new();
+                let mut schema = None;
+
+                for (batch_key, doc_ids_in_batch) in batch_groups {
+                    let Some(item) = tree.get(&batch_key) else {
+                        log::error!(
+                            "  [get_batch_with_projection_limit] No batch found for key {}",
+                            batch_key
+                        );
+                        continue;
+                    };
+
+                    // 应用投影
+                    let source_batch = match item.project(projection) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!(
+                                "  [get_batch_with_projection_limit] Projection error: {}",
+                                e
+                            );
+                            continue;
+                        }
+                    };
+
+                    if schema.is_none() {
+                        schema = Some(source_batch.schema());
+                        all_columns = vec![Vec::new(); source_batch.num_columns()];
+                    }
+
+                    // 计算行索引
+                    let indices: Vec<u32> = doc_ids_in_batch
+                        .iter()
+                        .filter_map(|&doc_id| {
+                            let idx = (doc_id - batch_key) as usize;
+                            (idx < source_batch.num_rows()).then_some(idx as u32)
+                        })
+                        .collect();
+
+                    if indices.is_empty() {
+                        continue;
+                    }
+
+                    let indices_array = UInt32Array::from(indices);
+
+                    // 对每列执行 take
+                    for (col_idx, col) in source_batch.columns().iter().enumerate() {
+                        if let Ok(taken) = take(col.as_ref(), &indices_array, None) {
+                            if col_idx < all_columns.len() {
+                                all_columns[col_idx].push(taken);
+                            }
+                        }
+                    }
+                }
+
+                let schema = schema?;
+
+                // 合并所有列
+                let final_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = all_columns
+                    .into_iter()
+                    .filter_map(|chunks| {
+                        if chunks.is_empty() {
+                            return None;
+                        }
+                        let refs: Vec<&dyn datafusion::arrow::array::Array> =
+                            chunks.iter().map(|a| a.as_ref()).collect();
+                        datafusion::arrow::compute::concat(&refs).ok()
+                    })
+                    .collect();
+
+                if final_columns.len() != schema.fields().len() {
+                    return None;
+                }
+
+                RecordBatch::try_new(schema, final_columns).ok()
+            }
+        }
+    }
+
     /// 获取所有数据的迭代器(仅用于持久化)
     pub fn iter(&self) -> Option<impl Iterator<Item = (u32, RecordBatch)> + '_> {
         match self {
@@ -696,6 +1264,104 @@ impl RowDataStore {
         match self {
             RowDataStore::Parquet(reader) => reader.len(),
             RowDataStore::Memory(tree) => tree.len(),
+        }
+    }
+}
+
+enum RowDataGroupReader {
+    Memory(mem_btree::BTree<u32, RecordBatch>),
+    Parquet(ParquetRowDataGroupReader),
+}
+
+pub struct RowDataStoreReader {
+    reader: Option<RowDataGroupReader>,
+    projection: Vec<usize>,
+}
+
+impl RowDataStoreReader {
+    pub fn new(store: RowDataStore, projection: Vec<usize>) -> Self {
+        if projection.is_empty() {
+            Self {
+                reader: None,
+                projection,
+            }
+        } else {
+            let reader = match store {
+                RowDataStore::Memory(b) => RowDataGroupReader::Memory(b),
+                RowDataStore::Parquet(reader) => {
+                    RowDataGroupReader::Parquet(reader.create_group_reader(&projection))
+                }
+            };
+            Self {
+                reader: Some(reader),
+                projection,
+            }
+        }
+    }
+
+    pub fn is_empty_projection(&self) -> bool {
+        self.projection.is_empty()
+    }
+
+    pub fn next_group(
+        &mut self,
+        ids_iter: &mut std::iter::Peekable<roaring::bitmap::IntoIter>,
+        size: usize,
+    ) -> CoreResult<Option<RecordBatch>> {
+        match &mut self.reader {
+            Some(RowDataGroupReader::Parquet(reader)) => reader.next_group(ids_iter, size),
+            Some(RowDataGroupReader::Memory(tree)) => {
+                let mut indices = Vec::new();
+
+                let mut id = match ids_iter.peek() {
+                    Some(id) => *id,
+                    None => return Ok(None),
+                };
+
+                let item = tree.floor(&id).ok_or_else(|| {
+                    crate::utils::error::CoreError::Internal(format!(
+                        "No batch found for doc_id {}",
+                        id
+                    ))
+                })?;
+                let (batch_key, batch) = (item.0, &item.1);
+                let end_id = batch_key + batch.num_rows() as u32;
+
+                if id >= end_id {
+                    log::error!(
+                        "  [next_id_group] No batch found for doc_id {} may be it have bug!!!",
+                        id
+                    );
+                    ids_iter.next();
+                    return Ok(None);
+                }
+
+                loop {
+                    indices.push(ids_iter.next().unwrap() - batch_key);
+                    if indices.len() >= size {
+                        break;
+                    }
+                    id = match ids_iter.peek() {
+                        Some(id) => *id,
+                        None => break,
+                    };
+                    if id >= end_id {
+                        break;
+                    }
+                }
+
+                if indices.is_empty() {
+                    return Ok(None);
+                }
+
+                let source_batch = batch.project(&self.projection)?;
+                let batch = datafusion::arrow::compute::take_record_batch(
+                    &source_batch,
+                    &datafusion::arrow::array::UInt32Array::from(indices),
+                )?;
+                Ok(Some(batch))
+            }
+            None => Ok(None),
         }
     }
 }

@@ -68,7 +68,6 @@ impl MysqlServer {
                                     calm_service,
                                     username: username.clone(),
                                     password: password.clone(),
-                                    prepared_stmts: std::collections::HashMap::new(),
                                 };
 
                                 // 处理连接
@@ -105,8 +104,6 @@ struct CalmBackend {
     calm_service: Arc<CalmService>,
     username: String,
     password: String,
-    // 存储 prepared statement 的 SQL（用于流式游标支持）
-    prepared_stmts: std::collections::HashMap<u32, String>,
 }
 
 /// MySQL 密码验证 - mysql_native_password 插件
@@ -201,160 +198,6 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
         }
 
         Ok(())
-    }
-
-    fn on_prepare(&mut self, query: &str, info: StatementMetaWriter<W>) -> io::Result<()> {
-        // 生成一个简单的 statement ID
-        let stmt_id = self.prepared_stmts.len() as u32;
-
-        // 保存 SQL 用于后续流式执行
-        self.prepared_stmts.insert(stmt_id, query.to_string());
-
-        log::debug!("📝 [MySQL] Prepared statement {}: {}", stmt_id, query);
-
-        // 返回 statement metadata（暂时不指定参数和列）
-        info.reply(stmt_id, &[], &[])
-    }
-
-    fn on_execute(
-        &mut self,
-        id: u32,
-        flags: u8,
-        _params: ParamParser,
-        results: QueryResultWriter<W>,
-    ) -> io::Result<()> {
-        const CURSOR_TYPE_READ_ONLY: u8 = 1;
-
-        // 如果客户端请求流式游标，直接走 natural_order_executor（不通过 on_query）
-        if flags == CURSOR_TYPE_READ_ONLY {
-            log::info!(
-                "🌊 [MySQL] Client requested streaming cursor (flags={})",
-                flags
-            );
-
-            // 获取之前准备的 SQL
-            let sql = match self.prepared_stmts.get(&id) {
-                Some(sql) => sql.clone(),
-                None => {
-                    return results.error(
-                        ErrorKind::ER_UNKNOWN_STMT_HANDLER,
-                        format!("Unknown statement ID: {}", id).as_bytes(),
-                    );
-                }
-            };
-
-            log::info!("🌿 [MySQL] Streaming execution (direct path): {}", sql);
-
-            // 直接调用 natural_order_executor 的流式版本
-            // 使用 channel 传输数据，避免全部加载到内存
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    use crate::compute::natural_order_executor::NaturalOrderExecutor;
-
-                    //TODO!();
-
-                    let executor = NaturalOrderExecutor::new(self.calm_service.engine().clone());
-
-                    match executor.execute_natural_cursor(&sql).await {
-                        Ok(mut stream_result) => {
-                            let schema = stream_result.schema.clone();
-
-                            // 准备列定义
-                            let columns: Vec<msql_srv::Column> = schema
-                                .fields()
-                                .iter()
-                                .map(|field| {
-                                    let col_type = get_arrow_type(field.data_type());
-                                    msql_srv::Column {
-                                        table: "".to_string(),
-                                        column: field.name().clone(),
-                                        coltype: col_type,
-                                        colflags: ColumnFlags::empty(),
-                                    }
-                                })
-                                .collect();
-
-                            let mut row_writer = match results.start(&columns) {
-                                Ok(w) => w,
-                                Err(e) => {
-                                    log::error!("Failed to start row writer: {}", e);
-                                    return Err(e);
-                                }
-                            };
-
-                            let mut total_rows = 0;
-                            const FLUSH_INTERVAL: usize = 10000;
-
-                            // 从 channel 逐批次接收数据
-                            while let Some(batch_result) = stream_result.receiver.recv().await {
-                                let batch = match batch_result {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        log::error!("❌ [MySQL] Stream error: {}", e);
-                                        return row_writer.finish();
-                                    }
-                                };
-
-                                log::debug!(
-                                    "📦 [MySQL] Received batch with {} rows",
-                                    batch.num_rows()
-                                );
-
-                                // 写入这个 batch 的所有行
-                                for row_idx in 0..batch.num_rows() {
-                                    for col_idx in 0..batch.num_columns() {
-                                        let array = batch.column(col_idx);
-                                        let value = format_arrow_value(array, row_idx);
-
-                                        if let Err(e) = row_writer.write_col(value) {
-                                            log::debug!("Client disconnected: {}", e);
-                                            return Err(e);
-                                        }
-                                    }
-
-                                    if let Err(e) = row_writer.end_row() {
-                                        log::debug!(
-                                            "Client disconnected at row {}: {}",
-                                            total_rows,
-                                            e
-                                        );
-                                        return Err(e);
-                                    }
-
-                                    total_rows += 1;
-
-                                    // 每 10000 行记录进度
-                                    if total_rows % FLUSH_INTERVAL == 0 {
-                                        log::debug!("🌊 [MySQL] Streamed {} rows", total_rows);
-                                    }
-                                }
-                            }
-
-                            log::info!("✅ [MySQL] Stream completed: {} rows sent", total_rows);
-                            row_writer.finish()
-                        }
-                        Err(e) => {
-                            let msg = format!("Streaming query failed: {}", e);
-                            log::error!("{}", msg);
-                            results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes())
-                        }
-                    }
-                })
-            })
-        } else {
-            log::debug!("📦 [MySQL] Standard execute (flags={})", flags);
-            results.error(
-                ErrorKind::ER_NOT_SUPPORTED_YET,
-                b"Non-streaming prepared statements not supported. Use text queries with LIMIT/OFFSET.",
-            )
-        }
-    }
-
-    fn on_close(&mut self, stmt: u32) {
-        // 清理 prepared statement
-        if self.prepared_stmts.remove(&stmt).is_some() {
-            log::debug!("🗑️  [MySQL] Closed prepared statement {}", stmt);
-        }
     }
 
     fn on_query(&mut self, query: &str, results: QueryResultWriter<W>) -> io::Result<()> {
@@ -851,6 +694,28 @@ impl<W: io::Read + io::Write> MysqlShim<W> for CalmBackend {
             ErrorKind::ER_NOT_SUPPORTED_YET,
             b"Only SELECT/INSERT/DELETE/CREATE TABLE/DROP TABLE/SHOW TABLES/SHOW DATABASES/SHOW PARTITIONS/DESCRIBE supported. Use LIMIT/OFFSET for pagination.",
         )
+    }
+
+    fn on_prepare(
+        &mut self,
+        _query: &str,
+        _info: StatementMetaWriter<'_, W>,
+    ) -> Result<(), Self::Error> {
+        unimplemented!()
+    }
+
+    fn on_execute(
+        &mut self,
+        _id: u32,
+        _flags: u8,
+        _params: ParamParser<'_>,
+        _results: QueryResultWriter<'_, W>,
+    ) -> Result<(), Self::Error> {
+        unimplemented!()
+    }
+
+    fn on_close(&mut self, _stmt: u32) {
+        unimplemented!()
     }
 }
 

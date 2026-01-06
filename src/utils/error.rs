@@ -97,3 +97,9 @@ impl From<std::io::Error> for CoreError {
         CoreError::IOError(format!("IO error: {}", err))
     }
 }
+
+impl From<datafusion::arrow::error::ArrowError> for CoreError {
+    fn from(err: datafusion::arrow::error::ArrowError) -> Self {
+        CoreError::Internal(format!("Arrow error: {}", err))
+    }
+}
