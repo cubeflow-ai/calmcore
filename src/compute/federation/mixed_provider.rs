@@ -60,6 +60,8 @@ pub struct MixedTableProvider {
     emit_internal_id: bool,
     /// 是否为 COUNT(*) 优化查询
     count_only: bool,
+    /// 查询的 LIMIT（从 SQL 提取）
+    query_limit: Option<usize>,
 }
 
 impl MixedTableProvider {
@@ -72,6 +74,7 @@ impl MixedTableProvider {
         engine: Arc<Engine>,
         emit_internal_id: bool,
         count_only: bool,
+        query_limit: Option<usize>,
     ) -> Self {
         Self {
             table_name,
@@ -82,6 +85,7 @@ impl MixedTableProvider {
             engine,
             emit_internal_id,
             count_only,
+            query_limit,
         }
     }
 }
@@ -133,12 +137,20 @@ impl TableProvider for MixedTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        log::debug!(
-            "📊 [MixedTableProvider::scan] table={}, local_partitions={}, remote_nodes={}, projection={:?}",
+        // 🔧 LIMIT 优化: 如果 DataFusion 不传递 limit（多分区场景），使用查询的 limit
+        // 这样可以减少远程节点的数据读取和网络传输
+        let effective_limit = limit.or(self.query_limit);
+
+        log::info!(
+            "📊 [MixedTableProvider::scan] table={}, local_partitions={}, remote_nodes={}, projection={:?}, filters={}, datafusion_limit={:?}, query_limit={:?}, effective_limit={:?}",
             self.table_name,
             self.local_partitions.len(),
             self.remote_nodes.len(),
-            projection
+            projection,
+            filters.len(),
+            limit,
+            self.query_limit,
+            effective_limit
         );
 
         let mut all_plans: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
@@ -151,7 +163,7 @@ impl TableProvider for MixedTableProvider {
                 self.count_only,
             );
             let plan = partition_provider
-                .scan(state, projection, filters, limit)
+                .scan(state, projection, filters, effective_limit)
                 .await?;
             all_plans.push(plan);
         }
@@ -181,14 +193,14 @@ impl TableProvider for MixedTableProvider {
                 grpc_addr.clone(),
             ));
 
-            // 创建 RemoteScanExec，直接传递 projection/filters/limit/count_only
+            // 创建 RemoteScanExec，直接传递 projection/filters/effective_limit/count_only
             let remote_exec = RemoteScanExec::new(
                 self.table_name.clone(),
                 node_info.partition_names.clone(),
                 self.schema.clone(),
                 projection.cloned(),
                 filters.to_vec(),
-                limit,
+                effective_limit,
                 self.count_only,
                 executor,
             );
@@ -220,7 +232,7 @@ impl TableProvider for MixedTableProvider {
 
         // 6. 如果有 limit，在 UnionExec 之上包装 GlobalLimitExec
         // 这样可以确保 LIMIT 语义正确（跨多个分区/节点只返回总共 N 行）
-        if let Some(limit_val) = limit {
+        if let Some(limit_val) = effective_limit {
             log::debug!(
                 "🔢 [MixedTableProvider::scan] Applying GlobalLimitExec with limit={}",
                 limit_val

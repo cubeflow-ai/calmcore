@@ -34,6 +34,10 @@ pub struct NormalizedSql {
     /// 是否是纯 COUNT(*) 查询（用于优化）
     /// 条件：SELECT COUNT(*) / COUNT(1)，无 GROUP BY，可以有 WHERE
     pub is_count_only: bool,
+
+    /// 查询的 LIMIT（用于分布式查询优化）
+    /// 从 SQL 的 LIMIT 子句中提取
+    pub limit: Option<usize>,
 }
 
 /// 分区过滤条件
@@ -234,6 +238,9 @@ impl SqlNormalizer {
         // 🎯 判断是否是 COUNT(*) 优化场景
         let is_count_only = Self::is_count_only_query(&rewritten_statement);
 
+        // 🔧 提取 LIMIT
+        let limit = Self::extract_limit(&rewritten_statement);
+
         Ok(NormalizedSql {
             statement,
             rewritten_sql,
@@ -241,7 +248,35 @@ impl SqlNormalizer {
             score,
             needs_score_column,
             is_count_only,
+            limit,
         })
+    }
+
+    /// 从 Statement 中提取 LIMIT
+    fn extract_limit(statement: &Statement) -> Option<usize> {
+        // DataFusion Statement 包装了 sqlparser Statement
+        match statement {
+            Statement::Statement(boxed_stmt) => {
+                if let sqlparser::ast::Statement::Query(query) = boxed_stmt.as_ref() {
+                    // DataFusion 使用 limit_clause 字段
+                    if let Some(limit_clause) = &query.limit_clause {
+                        match limit_clause {
+                            LimitClause::LimitOffset { limit, .. } => {
+                                if let Some(expr) = limit {
+                                    return Self::parse_limit_value(expr).ok().flatten();
+                                }
+                            }
+                            LimitClause::OffsetCommaLimit { limit, .. } => {
+                                return Self::parse_limit_value(limit).ok().flatten();
+                            }
+                        }
+                    }
+                }
+            }
+            // 其他 Statement 类型（CreateExternalTable, CopyTo, Explain 等）没有 limit
+            _ => {}
+        }
+        None
     }
 
     /// 判断是否是纯 COUNT(*) 查询（可以优化为只返回行数）

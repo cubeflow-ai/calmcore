@@ -46,6 +46,14 @@ impl RemoteScanExec {
         count_only: bool,
         executor: Arc<FlightExecutor>,
     ) -> Self {
+        log::info!(
+            "🚀 [RemoteScanExec::new] table={}, partitions={:?}, limit={:?}, count_only={}",
+            table_name,
+            partition_ids,
+            limit,
+            count_only
+        );
+
         // 计算输出 schema（应用 projection）
         // 🎯 COUNT(*) 优化: 当 count_only=true 时，返回空 schema
         let output_schema = if count_only {

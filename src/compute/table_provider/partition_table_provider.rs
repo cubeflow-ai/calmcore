@@ -434,17 +434,30 @@ async fn process_segment(
     tx: &mpsc::Sender<Result<RecordBatch>>,
 ) -> Result<usize> {
     let mut segment_rows = 0;
+
+    // 🔧 计算此 Segment 的剩余 limit
+    // 如果已经发送了一些行，需要减去已发送的数量
+    let segment_limit = limit.map(|lim| lim.saturating_sub(*rows_sent));
+
     log::error!(
-        "        🔍 [process_segment] Called with projection={:?}, limit={:?}",
+        "        🔍 [process_segment] Called with projection={:?}, global_limit={:?}, rows_sent={}, segment_limit={:?}",
         projection,
-        limit
+        limit,
+        rows_sent,
+        segment_limit
     );
+
+    // 如果剩余 limit 为 0，直接返回
+    if segment_limit == Some(0) {
+        return Ok(0);
+    }
+
     let start = std::time::Instant::now();
 
-    // 🔧 修复: 传递实际的 limit 参数到 SegmentScanner，而不是硬编码 None
+    // 🔧 修复: 传递剩余的 limit 参数到 SegmentScanner
     // 注意: sort=None 是正确的，因为 Segment 级别不需要排序信息
     // (排序由上层的 SortExec 处理)
-    let plan = match scanner.create_plan(filters, projection.as_ref(), limit, None) {
+    let plan = match scanner.create_plan(filters, projection.as_ref(), segment_limit, None) {
         Some(p) => p,
         None => return Ok(0),
     };

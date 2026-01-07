@@ -177,6 +177,7 @@ impl FederatedQueryExecutor {
                         nodes,
                         normalized.needs_score_column,
                         normalized.is_count_only,
+                        normalized.limit,
                     )
                     .await?;
                 }
@@ -211,6 +212,7 @@ impl FederatedQueryExecutor {
                         nodes,
                         normalized.needs_score_column,
                         normalized.is_count_only,
+                        normalized.limit,
                     )
                     .await?;
                 }
@@ -226,6 +228,7 @@ impl FederatedQueryExecutor {
                     nodes,
                     normalized.needs_score_column,
                     normalized.is_count_only,
+                    normalized.limit,
                 )
                 .await?;
             } else {
@@ -237,6 +240,7 @@ impl FederatedQueryExecutor {
                     nodes,
                     normalized.needs_score_column,
                     normalized.is_count_only,
+                    normalized.limit,
                 )
                 .await?;
             }
@@ -274,6 +278,7 @@ impl FederatedQueryExecutor {
         nodes: &HashMap<String, Vec<String>>,
         needs_internal_id: bool,
         is_count_only: bool,
+        query_limit: Option<usize>,
     ) -> CoreResult<()> {
         let my_node_id = self.cluster_manager.node_id().to_string();
         let table_schema = self
@@ -347,6 +352,7 @@ impl FederatedQueryExecutor {
             self.engine.clone(),
             needs_internal_id,
             is_count_only,
+            query_limit,
         );
 
         ctx.register_table(table_name, Arc::new(mixed_provider))
