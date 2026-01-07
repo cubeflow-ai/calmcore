@@ -170,11 +170,13 @@ impl FederatedQueryExecutor {
                 if local_partitions.is_empty() {
                     self.register_empty_table(&ctx, table_name, schema.clone())?;
                 } else {
-                    self.register_local_table(
+                    // 统一使用 MixedTableProvider（remote_nodes 为空）
+                    self.register_unified_table(
                         &ctx,
                         table_name,
-                        local_partitions,
+                        nodes,
                         normalized.needs_score_column,
+                        normalized.is_count_only,
                     )
                     .await?;
                 }
@@ -201,31 +203,42 @@ impl FederatedQueryExecutor {
                     log::debug!("🏠 [FederatedQueryExecutor] Table '{}': All local but no partitions, using empty table", table_name);
                     self.register_empty_table(&ctx, table_name, schema.clone())?;
                 } else {
-                    log::debug!("🏠 [FederatedQueryExecutor] Table '{}': All {} partition(s) on local node, using local table", table_name, local_partitions.len());
-                    self.register_local_table(
+                    log::debug!("🏠 [FederatedQueryExecutor] Table '{}': All {} partition(s) on local node, using unified table", table_name, local_partitions.len());
+                    // 统一使用 MixedTableProvider（remote_nodes 为空）
+                    self.register_unified_table(
                         &ctx,
                         table_name,
-                        local_partitions,
+                        nodes,
                         normalized.needs_score_column,
+                        normalized.is_count_only,
                     )
                     .await?;
                 }
             } else if !nodes.contains_key(&my_node_id) {
                 log::debug!(
-                    "[FederatedQueryExecutor] Table '{}': Using federated table",
+                    "🌐 [FederatedQueryExecutor] Table '{}': All partitions on remote nodes, using unified table",
                     table_name
                 );
-                let (target_node, partitions) = nodes
-                    .iter()
-                    .next()
-                    .map(|(node, partitions)| (node.clone(), partitions.clone()))
-                    .ok_or_else(|| CoreError::Internal("No remote nodes found".to_string()))?;
-                self.register_federated_table(&ctx, table_name, &target_node, partitions)
-                    .await?;
+                // 统一使用 MixedTableProvider（local_partitions 为空）
+                self.register_unified_table(
+                    &ctx,
+                    table_name,
+                    nodes,
+                    normalized.needs_score_column,
+                    normalized.is_count_only,
+                )
+                .await?;
             } else {
-                log::debug!("🔀 [FederatedQueryExecutor] Table '{}': Partitions distributed across {} nodes, using merged table", table_name, nodes.len());
-                self.register_merged_table(&ctx, table_name, nodes, normalized.needs_score_column)
-                    .await?;
+                log::debug!("🔀 [FederatedQueryExecutor] Table '{}': Partitions distributed across {} nodes, using unified table", table_name, nodes.len());
+                // 统一使用 MixedTableProvider
+                self.register_unified_table(
+                    &ctx,
+                    table_name,
+                    nodes,
+                    normalized.needs_score_column,
+                    normalized.is_count_only,
+                )
+                .await?;
             }
         }
 
@@ -250,123 +263,17 @@ impl FederatedQueryExecutor {
     }
 
     /// 注册本地表
-    async fn register_local_table(
-        &self,
-        ctx: &SessionContext,
-        table_name: &str,
-        partition_names: Vec<String>,
-        needs_internal_id: bool,
-    ) -> CoreResult<()> {
-        if partition_names.is_empty() {
-            log::debug!(
-                "[FederatedQueryExecutor] Skipping local table '{}' due to empty partition list",
-                table_name
-            );
-            return Ok(());
-        }
-
-        let schema = self
-            .catalog
-            .get_or_load_table(table_name)
-            .await?
-            .table
-            .schema
-            .to_arrow_schema();
-
-        if let Some(provider) = self
-            .create_local_provider(
-                table_name,
-                &partition_names,
-                schema.clone(),
-                needs_internal_id,
-            )
-            .await?
-        {
-            ctx.register_table(table_name, provider).map_err(|e| {
-                CoreError::Internal(format!("Failed to register local table: {}", e))
-            })?;
-
-            log::debug!(
-                "[FederatedQueryExecutor] Registered local table '{}' with {} partition(s)",
-                table_name,
-                partition_names.len()
-            );
-        } else {
-            self.register_empty_table(ctx, table_name, schema)?;
-        }
-        Ok(())
-    }
-
-    /// 注册联邦表（所有分区都在单个远程节点）
-    async fn register_federated_table(
-        &self,
-        ctx: &SessionContext,
-        table_name: &str,
-        remote_node_id: &str,
-        partition_names: Vec<String>,
-    ) -> CoreResult<()> {
-        if partition_names.is_empty() {
-            self.register_empty_table(
-                ctx,
-                table_name,
-                self.catalog
-                    .get_or_load_table(table_name)
-                    .await?
-                    .table
-                    .schema
-                    .to_arrow_schema(),
-            )?;
-            return Ok(());
-        }
-
-        log::debug!(
-            "[FederatedQueryExecutor] Registering federated table '{}' from node '{}' ({} partitions)",
-            table_name,
-            remote_node_id,
-            partition_names.len()
-        );
-
-        let grpc_addr = self
-            .cluster_manager
-            .get_node_grpc_addr(remote_node_id)
-            .ok_or_else(|| {
-                CoreError::Internal(format!("Node {} gRPC address not found", remote_node_id))
-            })?;
-
-        // 🚀 使用我们自己的 RemoteTableProvider 而不是 datafusion-federation
-        // 这样可以完全控制投影逻辑，避免 wrap_projection() 自动展开所有列
-        let table_info = self.catalog.get_or_load_table(table_name).await?;
-        let schema = table_info.table.schema.to_arrow_schema();
-
-        let flight_executor = Arc::new(FlightExecutor::new(remote_node_id.to_string(), grpc_addr));
-
-        let remote_provider = crate::compute::federation::remote_provider::RemoteTableProvider::new(
-            table_name.to_string(),
-            partition_names,
-            schema,
-            flight_executor,
-        );
-
-        ctx.register_table(table_name, Arc::new(remote_provider))
-            .map_err(|e| {
-                CoreError::Internal(format!("Failed to register federated table: {}", e))
-            })?;
-
-        log::debug!(
-            "[FederatedQueryExecutor] Registered federated table '{}' via node '{}'",
-            table_name,
-            remote_node_id
-        );
-        Ok(())
-    }
-
-    /// 注册合并表（分区跨多个节点）
-    async fn register_merged_table(
+    /// 注册统一表（使用 MixedTableProvider 统一处理本地、远程和混合三种情况）
+    /// - 纯本地：local_partitions 有数据，remote_nodes 为空
+    /// - 纯远程：local_partitions 为空，remote_nodes 有数据
+    /// - 混合：两者都有数据
+    async fn register_unified_table(
         &self,
         ctx: &SessionContext,
         table_name: &str,
         nodes: &HashMap<String, Vec<String>>,
         needs_internal_id: bool,
+        is_count_only: bool,
     ) -> CoreResult<()> {
         let my_node_id = self.cluster_manager.node_id().to_string();
         let table_schema = self
@@ -378,7 +285,7 @@ impl FederatedQueryExecutor {
             .to_arrow_schema();
 
         log::debug!(
-            "[FederatedQueryExecutor] Registering merged table '{}' from nodes {:?}",
+            "📊 [FederatedQueryExecutor] Registering unified table '{}' from nodes {:?}",
             table_name,
             nodes.keys().collect::<Vec<_>>()
         );
@@ -426,6 +333,10 @@ impl FederatedQueryExecutor {
             });
         }
 
+        // 记录统计信息（在移动值之前）
+        let local_count = local_partitions.len();
+        let remote_count = remote_nodes.len();
+
         // 创建 MixedTableProvider
         let mixed_provider = super::mixed_provider::MixedTableProvider::new(
             table_name.to_string(),
@@ -435,55 +346,20 @@ impl FederatedQueryExecutor {
             remote_nodes,
             self.engine.clone(),
             needs_internal_id,
+            is_count_only,
         );
 
         ctx.register_table(table_name, Arc::new(mixed_provider))
             .map_err(|e| CoreError::Internal(format!("Failed to register mixed table: {}", e)))?;
 
         log::debug!(
-            "[register_merged_table] Registered mixed table '{}'",
-            table_name
+            "✅ [register_unified_table] Registered unified table '{}' (local_partitions={}, remote_nodes={})",
+            table_name,
+            local_count,
+            remote_count
         );
 
         Ok(())
-    }
-
-    async fn create_local_provider(
-        &self,
-        table_name: &str,
-        partition_names: &[String],
-        schema: datafusion::arrow::datatypes::SchemaRef,
-        needs_internal_id: bool,
-    ) -> CoreResult<Option<Arc<crate::compute::UnionTableProvider>>> {
-        if partition_names.is_empty() {
-            return Ok(None);
-        }
-
-        let mut local_partitions = Vec::new();
-        for partition_name in partition_names {
-            match self.engine.get_partition(table_name, partition_name).await {
-                Some(partition) => local_partitions.push(partition),
-                None => log::warn!(
-                    "[FederatedQueryExecutor] Partition '{}' not found on node for table '{}'",
-                    partition_name,
-                    table_name
-                ),
-            }
-        }
-
-        if local_partitions.is_empty() {
-            return Ok(None);
-        }
-
-        let provider = crate::compute::UnionTableProvider::new(
-            local_partitions,
-            table_name.to_string(),
-            self.engine.clone(),
-            schema,
-            needs_internal_id,
-        )?;
-
-        Ok(Some(Arc::new(provider)))
     }
 
     fn register_empty_table(

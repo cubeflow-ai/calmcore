@@ -30,6 +30,7 @@ pub struct PartitionTableProvider {
     partition: Arc<Partition>,
     schema: SchemaRef,
     emit_internal_id: bool,
+    count_only: bool,
 }
 
 impl std::fmt::Debug for PartitionTableProvider {
@@ -42,7 +43,7 @@ impl std::fmt::Debug for PartitionTableProvider {
 }
 
 impl PartitionTableProvider {
-    pub fn new(partition: Arc<Partition>, emit_internal_id: bool) -> Self {
+    pub fn new(partition: Arc<Partition>, emit_internal_id: bool, count_only: bool) -> Self {
         let base_schema = partition.arrow_schema.clone();
         let schema = if emit_internal_id {
             augment_schema_with_internal_id(base_schema)
@@ -53,6 +54,7 @@ impl PartitionTableProvider {
             partition,
             schema,
             emit_internal_id,
+            count_only,
         }
     }
 
@@ -78,37 +80,7 @@ impl PartitionTableProvider {
             projection.cloned(),
             limit,
             self.emit_internal_id,
-        ))
-    }
-
-    /// Create SegmentScanner for a segment
-    /// Simply extracts the needed data from Segment and constructs SegmentScanner
-    #[allow(dead_code)]
-    fn create_segment_scanner(&self, segment: &crate::segment::Segment) -> Result<SegmentScanner> {
-        // Get cloned index readers from segment (fast - Arc internally)
-        let index_readers = segment.get_index_readers();
-
-        // Commented for cleaner logs
-        // log::error!("[DEBUG] create_segment_scanner: index_readers keys = {:?}", index_readers.keys().collect::<Vec<_>>());
-
-        // Get doc_count
-        let doc_count = segment.doc_count();
-
-        // Get cloned deleted bitmap (fast - compressed bitmap)
-        let deleted = segment.get_deleted();
-
-        // Get cloned row_data (fast - either Arc or BTree with Arc values)
-        let row_data = segment.get_row_data();
-
-        // Create SegmentScanner with extracted data
-        Ok(SegmentScanner::new(
-            self.schema.clone(),
-            row_data,
-            index_readers,
-            doc_count,
-            deleted,
-            self.emit_internal_id,
-            segment.start,
+            self.count_only,
         ))
     }
 }
@@ -146,6 +118,12 @@ impl TableProvider for PartitionTableProvider {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
+        // 🎯 COUNT(*) 优化: 如果是 count_only 查询，所有 filters 都已在索引层处理
+        // 返回 Exact 告诉 DataFusion 不要再添加 FilterExec
+        if self.count_only {
+            return Ok(vec![TableProviderFilterPushDown::Exact; filters.len()]);
+        }
+
         // 策略：全部返回 Inexact,更保险
         // 这样 DataFusion 不会过度优化(比如 COUNT 的空 projection)
         // 同时我们在 scan() 中仍然可以充分利用索引
@@ -178,6 +156,7 @@ pub struct PartitionExec {
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
     emit_internal_id: bool,
+    count_only: bool,
     properties: PlanProperties,
 }
 
@@ -189,6 +168,7 @@ impl PartitionExec {
         projection: Option<Vec<usize>>,
         limit: Option<usize>,
         emit_internal_id: bool,
+        count_only: bool,
     ) -> Self {
         // Debug logging for schema and projection
         if let Some(ref proj) = projection {
@@ -215,7 +195,10 @@ impl PartitionExec {
         let full_schema = schema.clone();
 
         // 计算投影后的 schema
-        let output_schema = if let Some(ref proj) = projection {
+        // 🎯 COUNT(*) 优化: 当 count_only=true 时，返回空 schema
+        let output_schema = if count_only {
+            Arc::new(datafusion::arrow::datatypes::Schema::empty())
+        } else if let Some(ref proj) = projection {
             if proj.is_empty() {
                 Arc::new(datafusion::arrow::datatypes::Schema::empty())
             } else {
@@ -241,6 +224,7 @@ impl PartitionExec {
             projection,
             limit,
             emit_internal_id,
+            count_only,
             properties,
         }
     }
@@ -307,6 +291,7 @@ impl ExecutionPlan for PartitionExec {
         let projection = self.projection.clone();
         let limit = self.limit;
         let emit_internal_id = self.emit_internal_id;
+        let count_only = self.count_only;
 
         // 创建 bounded channel: 容量 10
         let (tx, rx) = mpsc::channel::<Result<RecordBatch>>(10);
@@ -320,6 +305,7 @@ impl ExecutionPlan for PartitionExec {
                 projection,
                 limit,
                 emit_internal_id,
+                count_only,
                 tx,
             )
             .await
@@ -341,10 +327,10 @@ async fn process_partition_segments(
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
     emit_internal_id: bool,
+    count_only: bool,
     tx: mpsc::Sender<Result<RecordBatch>>,
 ) -> Result<()> {
     let mut rows_sent = 0usize;
-    // 1. 处理 current_segment (快照模式)
     {
         let scanner_opt = {
             let current_segment_arc = partition.get_current_segment();
@@ -353,39 +339,23 @@ async fn process_partition_segments(
             if doc_count == 0 {
                 None
             } else {
-                log::debug!(
-                    "  [PartitionExec] Processing current_segment: {} docs",
-                    doc_count
-                );
-                let start = std::time::Instant::now();
-                let v = Some(SegmentScanner::new(
+                Some(SegmentScanner::new(
                     schema.clone(),
                     current_segment.get_row_data(),
                     current_segment.get_index_readers(),
                     doc_count,
                     current_segment.get_deleted(),
                     emit_internal_id,
+                    count_only,
                     current_segment.start,
-                ));
-                log::error!(
-                    "    ⏱️ ================================== Created SegmentScanner for current_segment in {:?}",
-                    start.elapsed()
-                );
-
-                v
+                ))
             }
         };
 
         if let Some(scanner) = scanner_opt {
-            let start = std::time::Instant::now();
-            let sent = process_segment(&scanner, &filters, &projection, limit, &mut rows_sent, &tx)
-                .await?;
-            log::error!(
-                "    ⏱️ ================================== Processed current_segment in {:?}, sent {} rows (total={})",
-                start.elapsed(),
-                sent,
-                rows_sent
-            );
+            let _sent =
+                process_segment(&scanner, &filters, &projection, limit, &mut rows_sent, &tx)
+                    .await?;
             // 达到 limit 后提前返回
             if let Some(lim) = limit {
                 if rows_sent >= lim {
@@ -420,15 +390,11 @@ async fn process_partition_segments(
                 doc_count,
                 segment.get_deleted(),
                 emit_internal_id,
+                count_only,
                 segment.start,
             );
             scanners.push((*seg_id, segment.start, scanner));
         }
-        log::error!(
-            "    ⏱️ ================================== Created SegmentScanners for {} frozen segments in {:?}",
-            scanners.len(),
-            start.elapsed()
-        );
         scanners
     };
 
@@ -566,191 +532,5 @@ impl futures::Stream for RecvStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
-    }
-}
-
-/// MultiSegmentExec: 并行扫描多个segment的ExecutionPlan
-///
-/// **关键设计**:
-/// - 每个segment作为一个DataFusion partition
-/// - DataFusion会自动并行调度这些partition
-/// - 每个partition内部使用SegmentScanner的优化能力(索引过滤、projection下推等)
-/// - 流式返回数据,无需collect
-pub struct MultiSegmentExec {
-    schema: SchemaRef,
-    segment_scanners: Vec<SegmentScanner>,
-    filters: Vec<Expr>,
-    projection: Option<Vec<usize>>,
-    limit: Option<usize>,
-    properties: PlanProperties,
-}
-
-/// 创建 MultiSegmentExec 的公开函数
-/// 供 UnionTableProvider 使用,实现全局并行
-pub fn create_multi_segment_exec(
-    schema: SchemaRef,
-    segment_scanners: Vec<SegmentScanner>,
-    filters: Vec<Expr>,
-    projection: Option<Vec<usize>>,
-    limit: Option<usize>,
-) -> MultiSegmentExec {
-    MultiSegmentExec::new(schema, segment_scanners, filters, projection, limit)
-}
-
-impl MultiSegmentExec {
-    pub fn new(
-        schema: SchemaRef,
-        segment_scanners: Vec<SegmentScanner>,
-        filters: Vec<Expr>,
-        projection: Option<Vec<usize>>,
-        limit: Option<usize>,
-    ) -> Self {
-        let num_partitions = segment_scanners.len();
-
-        // 应用projection到schema
-        let output_schema = if let Some(ref proj) = projection {
-            let fields: Vec<_> = proj.iter().map(|i| schema.field(*i).clone()).collect();
-            Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
-        } else {
-            schema.clone()
-        };
-
-        // 创建 PlanProperties
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(num_partitions),
-            EmissionType::Final,
-            Boundedness::Bounded,
-        );
-
-        Self {
-            schema: output_schema,
-            segment_scanners,
-            filters,
-            projection,
-            limit,
-            properties,
-        }
-    }
-
-    /// Get number of segments
-    pub fn num_segments(&self) -> usize {
-        self.segment_scanners.len()
-    }
-
-    /// Get projection
-    pub fn projection(&self) -> Vec<usize> {
-        self.projection
-            .clone()
-            .unwrap_or_else(|| (0..self.schema.fields().len()).collect())
-    }
-
-    /// Get limit
-    pub fn limit(&self) -> Option<usize> {
-        self.limit
-    }
-}
-
-impl std::fmt::Debug for MultiSegmentExec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MultiSegmentExec")
-            .field("num_segments", &self.segment_scanners.len())
-            .field("filters", &self.filters.len())
-            .field("projection", &self.projection)
-            .field("limit", &self.limit)
-            .finish()
-    }
-}
-
-impl DisplayAs for MultiSegmentExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "MultiSegmentExec: segments={}, filters={}, projection={:?}, limit={:?}",
-            self.segment_scanners.len(),
-            self.filters.len(),
-            self.projection,
-            self.limit
-        )
-    }
-}
-
-impl ExecutionPlan for MultiSegmentExec {
-    fn name(&self) -> &str {
-        "MultiSegmentExec"
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(self)
-    }
-
-    fn execute(
-        &self,
-        partition: usize,
-        _context: Arc<TaskContext>,
-    ) -> Result<SendableRecordBatchStream> {
-        log::debug!(
-            "🎯 [MultiSegmentExec::execute] Executing partition {} (segment)",
-            partition
-        );
-
-        if partition >= self.segment_scanners.len() {
-            return Err(datafusion::error::DataFusionError::Internal(format!(
-                "Partition {} out of range (total: {})",
-                partition,
-                self.segment_scanners.len()
-            )));
-        }
-
-        let scanner = &self.segment_scanners[partition];
-
-        // 使用 SegmentScanner 的优化能力创建执行计划
-        // TODO: 支持 ORDER BY 下推 (需要从LogicalPlan中提取)
-        let plan = scanner.create_plan(
-            &self.filters,
-            self.projection.as_ref(),
-            self.limit,
-            None, // sort: 暂时不支持,可以后续从context中提取
-        );
-
-        match plan {
-            Some(segment_plan) => {
-                log::debug!(
-                    "✅ [MultiSegmentExec] Partition {} created execution plan",
-                    partition
-                );
-                // 直接执行segment的plan并返回stream
-                segment_plan.execute(0, _context)
-            }
-            None => {
-                log::info!(
-                    "📋 [MultiSegmentExec] Partition {} has no data (empty result)",
-                    partition
-                );
-                // 返回空stream
-                use datafusion::physical_plan::empty::EmptyExec;
-                let empty_plan = EmptyExec::new(self.schema.clone());
-                empty_plan.execute(0, _context)
-            }
-        }
     }
 }

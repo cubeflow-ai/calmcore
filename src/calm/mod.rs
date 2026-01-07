@@ -567,17 +567,19 @@ impl CalmService {
         projection: Option<Vec<usize>>,
         filters: Vec<datafusion::logical_expr::Expr>,
         limit: Option<usize>,
+        count_only: bool,
     ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
         use crate::compute::table_provider::PartitionTableProvider;
         use datafusion::prelude::*;
 
         log::debug!(
-            "[CalmService] Direct partition scan: table={}, partitions={:?}, projection={:?}, filters={}, limit={:?}",
+            "[CalmService] Direct partition scan: table={}, partitions={:?}, projection={:?}, filters={}, limit={:?}, count_only={}",
             table_name,
             partition_names,
             projection,
             filters.len(),
-            limit
+            limit,
+            count_only
         );
 
         // 获取表元数据
@@ -614,7 +616,7 @@ impl CalmService {
             Vec::new();
         for partition in partitions {
             // 使用 PartitionTableProvider 创建执行计划
-            let provider = PartitionTableProvider::new(partition, false); // emit_internal_id = false
+            let provider = PartitionTableProvider::new(partition, false, count_only); // emit_internal_id = false
             let plan = provider.scan_partition(projection.as_ref(), &filters, limit);
             partition_plans.push(plan);
         }
@@ -640,14 +642,16 @@ impl CalmService {
         partition_hint: Option<&[String]>,
         local_only: bool,
     ) -> CoreResult<datafusion::physical_plan::SendableRecordBatchStream> {
+        let normalized = SqlNormalizer::normalize(sql)?;
+
         log::info!(
-            "[CalmService] Executing{} query (local_only={}): {}",
+            "[CalmService] Executing{} query (local_only={}): {}. normalized_sql={}",
             if local_only { " LOCAL" } else { "" },
             local_only,
-            sql
+            sql,
+            normalized.rewritten_sql
         );
 
-        let normalized = SqlNormalizer::normalize(sql)?;
         self.execute_normalized_query(&normalized, partition_hint, local_only)
             .await
     }
@@ -778,6 +782,7 @@ impl CalmService {
             self.engine.clone(),
             schema,
             needs_internal_id,
+            false, // count_only = false for DDL registration
         )?;
 
         ctx.register_table(table_name, Arc::new(provider))

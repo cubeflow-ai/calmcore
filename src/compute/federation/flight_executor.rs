@@ -99,6 +99,7 @@ impl FlightExecutor {
         projection: Option<Vec<usize>>,
         filters: Vec<Expr>,
         limit: Option<usize>,
+        count_only: bool,
     ) -> CoreResult<SendableRecordBatchStream> {
         log::debug!(
             "[FlightExecutor] Executing scan on '{}': table={}, partitions={:?}, projection={:?}, filters={}, limit={:?}",
@@ -135,7 +136,7 @@ impl FlightExecutor {
             None
         };
 
-        // 创建 scan ticket（包含序列化的 filters）
+        // 创建 scan ticket（包含序列化的 filters 和 count_only）
         let ticket_payload = serde_json::json!({
             "type": "scan",
             "table_name": table_name,
@@ -143,6 +144,7 @@ impl FlightExecutor {
             "projection": projection,
             "filters": filters_encoded,
             "limit": limit,
+            "count_only": count_only,
             "internal": true,
         });
 

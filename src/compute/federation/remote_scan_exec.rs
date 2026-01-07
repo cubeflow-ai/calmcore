@@ -27,6 +27,7 @@ pub struct RemoteScanExec {
     pub projection: Option<Vec<usize>>,
     pub filters: Vec<Expr>,
     pub limit: Option<usize>,
+    pub count_only: bool,
     pub executor: Arc<FlightExecutor>,
     properties: PlanProperties,
 }
@@ -42,10 +43,14 @@ impl RemoteScanExec {
         projection: Option<Vec<usize>>,
         filters: Vec<Expr>,
         limit: Option<usize>,
+        count_only: bool,
         executor: Arc<FlightExecutor>,
     ) -> Self {
         // 计算输出 schema（应用 projection）
-        let output_schema = if let Some(ref proj) = projection {
+        // 🎯 COUNT(*) 优化: 当 count_only=true 时，返回空 schema
+        let output_schema = if count_only {
+            Arc::new(datafusion::arrow::datatypes::Schema::empty())
+        } else if let Some(ref proj) = projection {
             if proj.is_empty() {
                 Arc::new(datafusion::arrow::datatypes::Schema::empty())
             } else {
@@ -76,6 +81,7 @@ impl RemoteScanExec {
             projection,
             filters,
             limit,
+            count_only,
             executor,
             properties,
         }
@@ -104,6 +110,7 @@ impl Clone for RemoteScanExec {
             projection: self.projection.clone(),
             filters: self.filters.clone(),
             limit: self.limit,
+            count_only: self.count_only,
             executor: self.executor.clone(),
             properties: self.properties.clone(),
         }
@@ -160,11 +167,19 @@ impl ExecutionPlan for RemoteScanExec {
         let projection = self.projection.clone();
         let filters = self.filters.clone();
         let limit = self.limit;
+        let count_only = self.count_only;
 
         // 创建异步流
         let stream = futures::stream::once(async move {
             match executor
-                .execute_scan(&table_name, &partitions, projection, filters, limit)
+                .execute_scan(
+                    &table_name,
+                    &partitions,
+                    projection,
+                    filters,
+                    limit,
+                    count_only,
+                )
                 .await
             {
                 Ok(stream) => Ok(stream),

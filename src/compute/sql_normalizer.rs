@@ -30,6 +30,10 @@ pub struct NormalizedSql {
 
     /// 是否需要注入 `_score` 虚拟列
     pub needs_score_column: bool,
+
+    /// 是否是纯 COUNT(*) 查询（用于优化）
+    /// 条件：SELECT COUNT(*) / COUNT(1)，无 GROUP BY，可以有 WHERE
+    pub is_count_only: bool,
 }
 
 /// 分区过滤条件
@@ -227,13 +231,95 @@ impl SqlNormalizer {
 
         let needs_score_column = score.needs_score();
 
+        // 🎯 判断是否是 COUNT(*) 优化场景
+        let is_count_only = Self::is_count_only_query(&rewritten_statement);
+
         Ok(NormalizedSql {
             statement,
             rewritten_sql,
             partition_filters,
             score,
             needs_score_column,
+            is_count_only,
         })
+    }
+
+    /// 判断是否是纯 COUNT(*) 查询（可以优化为只返回行数）
+    ///
+    /// 条件：
+    /// 1. SELECT 中只有一个表达式
+    /// 2. 该表达式是 COUNT(*) 或 COUNT(1)
+    /// 3. 没有 GROUP BY
+    /// 4. 可以有 WHERE 条件（因为只需要统计行数）
+    fn is_count_only_query(statement: &Statement) -> bool {
+        match statement {
+            Statement::Statement(boxed) => {
+                if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_ref() {
+                    return Self::is_count_only_query_inner(query);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// 内部方法：检查 Query 是否是 COUNT(*)
+    fn is_count_only_query_inner(query: &Query) -> bool {
+        if let SetExpr::Select(select) = query.body.as_ref() {
+            // 不能有 GROUP BY
+            if !matches!(select.group_by, datafusion::sql::sqlparser::ast::GroupByExpr::Expressions(ref v, _) if v.is_empty())
+            {
+                return false;
+            }
+
+            // 检查 SELECT 列表
+            if select.projection.len() != 1 {
+                return false;
+            }
+
+            // 检查第一个表达式是否是 COUNT(*) 或 COUNT(1)
+            if let Some(SelectItem::UnnamedExpr(expr)) = select.projection.first() {
+                return Self::is_count_expr(expr);
+            } else if let Some(SelectItem::ExprWithAlias { expr, .. }) = select.projection.first() {
+                return Self::is_count_expr(expr);
+            }
+        }
+        false
+    }
+
+    /// 判断表达式是否是 COUNT(*) 或 COUNT(1)
+    fn is_count_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Function(func) => {
+                // 函数名必须是 COUNT
+                if func.name.to_string().to_uppercase() != "COUNT" {
+                    return false;
+                }
+
+                // 检查参数
+                match &func.args {
+                    FunctionArguments::List(list) => {
+                        if list.args.len() != 1 {
+                            return false;
+                        }
+
+                        // 检查第一个参数是 * 或 1
+                        match &list.args[0] {
+                            FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => true,
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => {
+                                matches!(
+                                    arg_expr,
+                                    Expr::Value(ValueWithSpan { value: Value::Number(num, _), .. }) if num == "1"
+                                )
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
     }
 
     fn process_score_clauses(statement: Statement) -> CoreResult<(Statement, ScoreConfig)> {
@@ -829,19 +915,6 @@ impl SqlNormalizer {
                 }
             }
             _ => expr,
-        }
-    }
-
-    /// 判断是否是 _partition 相关条件
-    fn is_partition_condition(expr: &Expr) -> bool {
-        match expr {
-            Expr::BinaryOp { left, op, .. } => {
-                matches!(op, BinaryOperator::Eq) && Self::is_partition_field(left)
-            }
-            Expr::InList { expr, .. } | Expr::Like { expr, .. } | Expr::ILike { expr, .. } => {
-                Self::is_partition_field(expr)
-            }
-            _ => false,
         }
     }
 

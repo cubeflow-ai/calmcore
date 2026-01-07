@@ -33,6 +33,7 @@ pub(crate) struct SegmentScanner {
     internal_id_index: Option<usize>,
     data_field_count: usize,
     segment_start: u64,
+    count_only: bool,
 }
 
 impl std::fmt::Debug for SegmentScanner {
@@ -51,6 +52,7 @@ impl SegmentScanner {
         doc_count: u32,
         del: RoaringBitmap,
         emit_internal_id: bool,
+        count_only: bool,
         segment_start: u64,
     ) -> Self {
         // Commented for cleaner logs
@@ -87,6 +89,7 @@ impl SegmentScanner {
             internal_id_index,
             data_field_count,
             segment_start,
+            count_only,
         }
     }
 
@@ -291,654 +294,654 @@ impl SegmentScanner {
     ///
     /// # 返回
     /// 返回过滤后的实际数据，行数可能少于 limit（因为删除或过滤）
-    pub(crate) fn scan_with_skip_and_limit(
-        &self,
-        filters: &[Expr],
-        skip: usize,
-        limit: usize,
-        projection: Option<&Vec<usize>>,
-    ) -> crate::utils::error::CoreResult<RecordBatch> {
-        let scan_start = std::time::Instant::now();
+    // pub(crate) fn scan_with_skip_and_limit(
+    //     &self,
+    //     filters: &[Expr],
+    //     skip: usize,
+    //     limit: usize,
+    //     projection: Option<&Vec<usize>>,
+    // ) -> crate::utils::error::CoreResult<RecordBatch> {
+    //     let scan_start = std::time::Instant::now();
 
-        // 计算要读取的物理 doc_ids 范围
-        let start_doc_id = skip as u32;
-        let end_doc_id = (skip + limit).min(self.doc_count as usize) as u32;
+    //     // 计算要读取的物理 doc_ids 范围
+    //     let start_doc_id = skip as u32;
+    //     let end_doc_id = (skip + limit).min(self.doc_count as usize) as u32;
 
-        if start_doc_id >= self.doc_count {
-            // 起始位置超出范围，返回空
-            return self.create_empty_batch();
-        }
+    //     if start_doc_id >= self.doc_count {
+    //         // 起始位置超出范围，返回空
+    //         return self.create_empty_batch();
+    //     }
 
-        // 生成物理 doc_ids
-        let gen_ids_start = std::time::Instant::now();
-        let physical_doc_ids: Vec<u32> = (start_doc_id..end_doc_id).collect();
-        log::debug!(
-            "    ⏱️  [scan] generate doc_ids: {:?}",
-            gen_ids_start.elapsed()
-        );
+    //     // 生成物理 doc_ids
+    //     let gen_ids_start = std::time::Instant::now();
+    //     let physical_doc_ids: Vec<u32> = (start_doc_id..end_doc_id).collect();
+    //     log::debug!(
+    //         "    ⏱️  [scan] generate doc_ids: {:?}",
+    //         gen_ids_start.elapsed()
+    //     );
 
-        log::debug!(
-            "🔍 [SegmentScanner::scan_with_skip_and_limit] doc_count={}, skip={}, limit={}, reading docs [{}, {}), projection={:?}",
-            self.doc_count,
-            skip,
-            limit,
-            start_doc_id,
-            end_doc_id,
-            projection
-        );
+    //     log::debug!(
+    //         "🔍 [SegmentScanner::scan_with_skip_and_limit] doc_count={}, skip={}, limit={}, reading docs [{}, {}), projection={:?}",
+    //         self.doc_count,
+    //         skip,
+    //         limit,
+    //         start_doc_id,
+    //         end_doc_id,
+    //         projection
+    //     );
 
-        // 读取物理数据（应用投影下推）
-        let read_start = std::time::Instant::now();
-        let batch = if let Some(proj) = projection {
-            self.read_docs_by_ids_with_projection(&physical_doc_ids, proj)?
-        } else {
-            self.read_docs_by_ids(&physical_doc_ids)?
-        };
-        log::info!(
-            "    ⏱️  [scan] read_docs_by_ids ({}): {:?}",
-            physical_doc_ids.len(),
-            read_start.elapsed()
-        );
+    //     // 读取物理数据（应用投影下推）
+    //     let read_start = std::time::Instant::now();
+    //     let batch = if let Some(proj) = projection {
+    //         self.read_docs_by_ids_with_projection(&physical_doc_ids, proj)?
+    //     } else {
+    //         self.read_docs_by_ids(&physical_doc_ids)?
+    //     };
+    //     log::info!(
+    //         "    ⏱️  [scan] read_docs_by_ids ({}): {:?}",
+    //         physical_doc_ids.len(),
+    //         read_start.elapsed()
+    //     );
 
-        // 如果没有过滤条件，直接返回
-        if filters.is_empty() {
-            // 应用删除标记过滤
-            let filter_start = std::time::Instant::now();
-            let valid_bitmap = self.get_valid_docs_in_range(start_doc_id, end_doc_id);
-            if valid_bitmap.is_empty() {
-                return self.create_empty_batch();
-            }
+    //     // 如果没有过滤条件，直接返回
+    //     if filters.is_empty() {
+    //         // 应用删除标记过滤
+    //         let filter_start = std::time::Instant::now();
+    //         let valid_bitmap = self.get_valid_docs_in_range(start_doc_id, end_doc_id);
+    //         if valid_bitmap.is_empty() {
+    //             return self.create_empty_batch();
+    //         }
 
-            // 过滤掉已删除的行
-            let result = self.filter_batch_by_bitmap(&batch, &valid_bitmap, start_doc_id);
-            log::debug!("    ⏱️  [scan] filter bitmap: {:?}", filter_start.elapsed());
-            log::info!(
-                "    ⏱️  [scan] TOTAL scan_with_skip_and_limit: {:?}",
-                scan_start.elapsed()
-            );
-            return result;
-        }
+    //         // 过滤掉已删除的行
+    //         let result = self.filter_batch_by_bitmap(&batch, &valid_bitmap, start_doc_id);
+    //         log::debug!("    ⏱️  [scan] filter bitmap: {:?}", filter_start.elapsed());
+    //         log::info!(
+    //             "    ⏱️  [scan] TOTAL scan_with_skip_and_limit: {:?}",
+    //             scan_start.elapsed()
+    //         );
+    //         return result;
+    //     }
 
-        // 应用 WHERE 过滤条件
-        let (result_bitmap, unsupported_filters) = self.apply_filters(filters);
-        let result_bitmap = match result_bitmap {
-            Some(bitmap) => bitmap,
-            None => {
-                log::debug!(
-                    "📊 [SegmentScanner] Filter returned no matching docs, returning empty batch"
-                );
-                return self.create_empty_batch();
-            }
-        };
+    //     // 应用 WHERE 过滤条件
+    //     let (result_bitmap, unsupported_filters) = self.apply_filters(filters);
+    //     let result_bitmap = match result_bitmap {
+    //         Some(bitmap) => bitmap,
+    //         None => {
+    //             log::debug!(
+    //                 "📊 [SegmentScanner] Filter returned no matching docs, returning empty batch"
+    //             );
+    //             return self.create_empty_batch();
+    //         }
+    //     };
 
-        // 只保留在当前范围内且满足条件的行
-        let mut filtered_bitmap = RoaringBitmap::new();
-        for doc_id in start_doc_id..end_doc_id {
-            if result_bitmap.contains(doc_id) {
-                filtered_bitmap.insert(doc_id);
-            }
-        }
+    //     // 只保留在当前范围内且满足条件的行
+    //     let mut filtered_bitmap = RoaringBitmap::new();
+    //     for doc_id in start_doc_id..end_doc_id {
+    //         if result_bitmap.contains(doc_id) {
+    //             filtered_bitmap.insert(doc_id);
+    //         }
+    //     }
 
-        log::debug!(
-            "📊 [SegmentScanner] Physical range: [{}, {}), after filter: {} rows",
-            start_doc_id,
-            end_doc_id,
-            filtered_bitmap.len()
-        );
+    //     log::debug!(
+    //         "📊 [SegmentScanner] Physical range: [{}, {}), after filter: {} rows",
+    //         start_doc_id,
+    //         end_doc_id,
+    //         filtered_bitmap.len()
+    //     );
 
-        if filtered_bitmap.is_empty() {
-            return self.create_empty_batch();
-        }
+    //     if filtered_bitmap.is_empty() {
+    //         return self.create_empty_batch();
+    //     }
 
-        // 过滤 batch
-        let filtered_batch = self.filter_batch_by_bitmap(&batch, &filtered_bitmap, start_doc_id)?;
+    //     // 过滤 batch
+    //     let filtered_batch = self.filter_batch_by_bitmap(&batch, &filtered_bitmap, start_doc_id)?;
 
-        // 如果有不支持的过滤器，使用 DataFusion 进行二次过滤
-        if !unsupported_filters.is_empty() {
-            log::debug!(
-                "🔍 [scan_with_skip_and_limit] Applying {} DataFusion filters",
-                unsupported_filters.len()
-            );
-            return self.apply_datafusion_filter(filtered_batch, &unsupported_filters);
-        }
+    //     // 如果有不支持的过滤器，使用 DataFusion 进行二次过滤
+    //     if !unsupported_filters.is_empty() {
+    //         log::debug!(
+    //             "🔍 [scan_with_skip_and_limit] Applying {} DataFusion filters",
+    //             unsupported_filters.len()
+    //         );
+    //         return self.apply_datafusion_filter(filtered_batch, &unsupported_filters);
+    //     }
 
-        Ok(filtered_batch)
-    }
+    //     Ok(filtered_batch)
+    // }
 
     /// 使用 DataFusion 对 RecordBatch 进行二次过滤
-    fn apply_datafusion_filter(
-        &self,
-        batch: RecordBatch,
-        filters: &[Expr],
-    ) -> crate::utils::error::CoreResult<RecordBatch> {
-        use crate::utils::error::CoreError;
-        use datafusion::arrow::compute::filter_record_batch;
-        use datafusion::common::ToDFSchema;
-        use datafusion::execution::context::SessionContext;
-        use datafusion::physical_expr::create_physical_expr;
+    // fn apply_datafusion_filter(
+    //     &self,
+    //     batch: RecordBatch,
+    //     filters: &[Expr],
+    // ) -> crate::utils::error::CoreResult<RecordBatch> {
+    //     use crate::utils::error::CoreError;
+    //     use datafusion::arrow::compute::filter_record_batch;
+    //     use datafusion::common::ToDFSchema;
+    //     use datafusion::execution::context::SessionContext;
+    //     use datafusion::physical_expr::create_physical_expr;
 
-        if filters.is_empty() || batch.num_rows() == 0 {
-            return Ok(batch);
-        }
+    //     if filters.is_empty() || batch.num_rows() == 0 {
+    //         return Ok(batch);
+    //     }
 
-        // 组合所有 filters
-        let combined_filter = if filters.len() == 1 {
-            filters[0].clone()
-        } else {
-            let mut combined = filters[0].clone();
-            for i in 1..filters.len() {
-                combined = Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr {
-                    left: Box::new(combined),
-                    op: datafusion::logical_expr::Operator::And,
-                    right: Box::new(filters[i].clone()),
-                });
-            }
-            combined
-        };
+    //     // 组合所有 filters
+    //     let combined_filter = if filters.len() == 1 {
+    //         filters[0].clone()
+    //     } else {
+    //         let mut combined = filters[0].clone();
+    //         for i in 1..filters.len() {
+    //             combined = Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr {
+    //                 left: Box::new(combined),
+    //                 op: datafusion::logical_expr::Operator::And,
+    //                 right: Box::new(filters[i].clone()),
+    //             });
+    //         }
+    //         combined
+    //     };
 
-        let ctx = SessionContext::new();
-        let _fulltext_context = register_fulltext_udfs(&ctx);
-        let df_schema = batch.schema().to_dfschema_ref().map_err(|e| {
-            CoreError::Internal(format!("Failed to convert schema to DFSchema: {}", e))
-        })?;
+    //     let ctx = SessionContext::new();
+    //     let _fulltext_context = register_fulltext_udfs(&ctx);
+    //     let df_schema = batch.schema().to_dfschema_ref().map_err(|e| {
+    //         CoreError::Internal(format!("Failed to convert schema to DFSchema: {}", e))
+    //     })?;
 
-        let physical_expr =
-            create_physical_expr(&combined_filter, &df_schema, ctx.state().execution_props())
-                .map_err(|e| {
-                    CoreError::Internal(format!("Failed to create physical expr: {}", e))
-                })?;
+    //     let physical_expr =
+    //         create_physical_expr(&combined_filter, &df_schema, ctx.state().execution_props())
+    //             .map_err(|e| {
+    //                 CoreError::Internal(format!("Failed to create physical expr: {}", e))
+    //             })?;
 
-        let result = physical_expr
-            .evaluate(&batch)
-            .map_err(|e| CoreError::Internal(format!("Failed to evaluate filter: {}", e)))?;
+    //     let result = physical_expr
+    //         .evaluate(&batch)
+    //         .map_err(|e| CoreError::Internal(format!("Failed to evaluate filter: {}", e)))?;
 
-        let predicate = match result {
-            datafusion::physical_plan::ColumnarValue::Array(array) => {
-                use datafusion::arrow::array::AsArray;
-                let boolean_array = array.as_boolean();
-                if boolean_array.len() != batch.num_rows() {
-                    return Err(CoreError::Internal(format!(
-                        "Filter returned array of length {}, expected {}",
-                        boolean_array.len(),
-                        batch.num_rows()
-                    )));
-                }
-                boolean_array.clone()
-            }
-            datafusion::physical_plan::ColumnarValue::Scalar(scalar) => match scalar {
-                ScalarValue::Boolean(Some(v)) => {
-                    if v {
-                        return Ok(batch);
-                    } else {
-                        return Ok(RecordBatch::new_empty(batch.schema()));
-                    }
-                }
-                ScalarValue::Boolean(None) => {
-                    return Ok(RecordBatch::new_empty(batch.schema()));
-                }
-                _ => {
-                    return Err(CoreError::Internal(
-                        "Filter returned non-boolean scalar".to_string(),
-                    ))
-                }
-            },
-        };
+    //     let predicate = match result {
+    //         datafusion::physical_plan::ColumnarValue::Array(array) => {
+    //             use datafusion::arrow::array::AsArray;
+    //             let boolean_array = array.as_boolean();
+    //             if boolean_array.len() != batch.num_rows() {
+    //                 return Err(CoreError::Internal(format!(
+    //                     "Filter returned array of length {}, expected {}",
+    //                     boolean_array.len(),
+    //                     batch.num_rows()
+    //                 )));
+    //             }
+    //             boolean_array.clone()
+    //         }
+    //         datafusion::physical_plan::ColumnarValue::Scalar(scalar) => match scalar {
+    //             ScalarValue::Boolean(Some(v)) => {
+    //                 if v {
+    //                     return Ok(batch);
+    //                 } else {
+    //                     return Ok(RecordBatch::new_empty(batch.schema()));
+    //                 }
+    //             }
+    //             ScalarValue::Boolean(None) => {
+    //                 return Ok(RecordBatch::new_empty(batch.schema()));
+    //             }
+    //             _ => {
+    //                 return Err(CoreError::Internal(
+    //                     "Filter returned non-boolean scalar".to_string(),
+    //                 ))
+    //             }
+    //         },
+    //     };
 
-        filter_record_batch(&batch, &predicate)
-            .map_err(|e| CoreError::Internal(format!("Failed to filter batch: {}", e)))
-    }
+    //     filter_record_batch(&batch, &predicate)
+    //         .map_err(|e| CoreError::Internal(format!("Failed to filter batch: {}", e)))
+    // }
 
-    /// 获取指定范围内的有效文档（未删除）
-    fn get_valid_docs_in_range(&self, start: u32, end: u32) -> RoaringBitmap {
-        let mut valid = RoaringBitmap::new();
-        for doc_id in start..end {
-            if self.valid_docs.contains(doc_id) {
-                valid.insert(doc_id);
-            }
-        }
-        valid
-    }
+    // /// 获取指定范围内的有效文档（未删除）
+    // fn get_valid_docs_in_range(&self, start: u32, end: u32) -> RoaringBitmap {
+    //     let mut valid = RoaringBitmap::new();
+    //     for doc_id in start..end {
+    //         if self.valid_docs.contains(doc_id) {
+    //             valid.insert(doc_id);
+    //         }
+    //     }
+    //     valid
+    // }
 
     /// 根据 bitmap 过滤 RecordBatch
-    fn filter_batch_by_bitmap(
-        &self,
-        batch: &RecordBatch,
-        bitmap: &RoaringBitmap,
-        base_doc_id: u32,
-    ) -> crate::utils::error::CoreResult<RecordBatch> {
-        use crate::utils::error::CoreError;
-        use datafusion::arrow::array::UInt32Array;
-        use datafusion::arrow::compute::take;
+    // fn filter_batch_by_bitmap(
+    //     &self,
+    //     batch: &RecordBatch,
+    //     bitmap: &RoaringBitmap,
+    //     base_doc_id: u32,
+    // ) -> crate::utils::error::CoreResult<RecordBatch> {
+    //     use crate::utils::error::CoreError;
+    //     use datafusion::arrow::array::UInt32Array;
+    //     use datafusion::arrow::compute::take;
 
-        // 将 bitmap 中的 doc_id 转换为 batch 内的相对索引
-        let indices: Vec<u32> = bitmap.iter().map(|doc_id| doc_id - base_doc_id).collect();
+    //     // 将 bitmap 中的 doc_id 转换为 batch 内的相对索引
+    //     let indices: Vec<u32> = bitmap.iter().map(|doc_id| doc_id - base_doc_id).collect();
 
-        if indices.is_empty() {
-            // 返回与输入 batch 相同 schema 的空 batch
-            let empty_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = batch
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| datafusion::arrow::array::new_empty_array(field.data_type()))
-                .collect();
-            return RecordBatch::try_new(batch.schema(), empty_columns)
-                .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)));
-        }
+    //     if indices.is_empty() {
+    //         // 返回与输入 batch 相同 schema 的空 batch
+    //         let empty_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = batch
+    //             .schema()
+    //             .fields()
+    //             .iter()
+    //             .map(|field| datafusion::arrow::array::new_empty_array(field.data_type()))
+    //             .collect();
+    //         return RecordBatch::try_new(batch.schema(), empty_columns)
+    //             .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)));
+    //     }
 
-        let indices_array = UInt32Array::from(indices);
-        let mut columns = Vec::new();
+    //     let indices_array = UInt32Array::from(indices);
+    //     let mut columns = Vec::new();
 
-        // 使用 batch 实际的列数，而不是 self.schema（投影后列数会不同）
-        for i in 0..batch.num_columns() {
-            let column = batch.column(i);
-            let taken = take(column, &indices_array, None)
-                .map_err(|e| CoreError::Internal(format!("Failed to take rows: {}", e)))?;
-            columns.push(taken);
-        }
+    //     // 使用 batch 实际的列数，而不是 self.schema（投影后列数会不同）
+    //     for i in 0..batch.num_columns() {
+    //         let column = batch.column(i);
+    //         let taken = take(column, &indices_array, None)
+    //             .map_err(|e| CoreError::Internal(format!("Failed to take rows: {}", e)))?;
+    //         columns.push(taken);
+    //     }
 
-        // 使用 batch 的 schema，而不是 self.schema
-        RecordBatch::try_new(batch.schema(), columns)
-            .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))
-    }
+    //     // 使用 batch 的 schema，而不是 self.schema
+    //     RecordBatch::try_new(batch.schema(), columns)
+    //         .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))
+    // }
 
-    /// 创建空的 RecordBatch
-    fn create_empty_batch(&self) -> crate::utils::error::CoreResult<RecordBatch> {
-        use crate::utils::error::CoreError;
-        use datafusion::arrow::array::new_empty_array;
+    // /// 创建空的 RecordBatch
+    // fn create_empty_batch(&self) -> crate::utils::error::CoreResult<RecordBatch> {
+    //     use crate::utils::error::CoreError;
+    //     use datafusion::arrow::array::new_empty_array;
 
-        let empty_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = self
-            .schema
-            .fields()
-            .iter()
-            .map(|field| new_empty_array(field.data_type()))
-            .collect();
+    //     let empty_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = self
+    //         .schema
+    //         .fields()
+    //         .iter()
+    //         .map(|field| new_empty_array(field.data_type()))
+    //         .collect();
 
-        RecordBatch::try_new(self.schema.clone(), empty_columns)
-            .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)))
-    }
+    //     RecordBatch::try_new(self.schema.clone(), empty_columns)
+    //         .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)))
+    // }
 
-    /// 创建空的 RecordBatch（带投影）
-    fn create_empty_batch_with_projection(
-        &self,
-        projection: &[usize],
-    ) -> crate::utils::error::CoreResult<RecordBatch> {
-        use crate::utils::error::CoreError;
-        use datafusion::arrow::array::new_empty_array;
+    // /// 创建空的 RecordBatch（带投影）
+    // fn create_empty_batch_with_projection(
+    //     &self,
+    //     projection: &[usize],
+    // ) -> crate::utils::error::CoreResult<RecordBatch> {
+    //     use crate::utils::error::CoreError;
+    //     use datafusion::arrow::array::new_empty_array;
 
-        let projected_schema = self.build_projected_schema(Some(&projection.to_vec()));
-        let empty_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = projected_schema
-            .fields()
-            .iter()
-            .map(|field| new_empty_array(field.data_type()))
-            .collect();
+    //     let projected_schema = self.build_projected_schema(Some(&projection.to_vec()));
+    //     let empty_columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = projected_schema
+    //         .fields()
+    //         .iter()
+    //         .map(|field| new_empty_array(field.data_type()))
+    //         .collect();
 
-        RecordBatch::try_new(projected_schema, empty_columns)
-            .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)))
-    }
+    //     RecordBatch::try_new(projected_schema, empty_columns)
+    //         .map_err(|e| CoreError::Internal(format!("Failed to create empty batch: {}", e)))
+    // }
 
-    /// 根据 doc_ids 读取数据
-    fn read_docs_by_ids(&self, doc_ids: &[u32]) -> crate::utils::error::CoreResult<RecordBatch> {
-        use crate::utils::error::CoreError;
+    // /// 根据 doc_ids 读取数据
+    // fn read_docs_by_ids(&self, doc_ids: &[u32]) -> crate::utils::error::CoreResult<RecordBatch> {
+    //     use crate::utils::error::CoreError;
 
-        let read_start = std::time::Instant::now();
+    //     let read_start = std::time::Instant::now();
 
-        if doc_ids.is_empty() {
-            return self.create_empty_batch();
-        }
+    //     if doc_ids.is_empty() {
+    //         return self.create_empty_batch();
+    //     }
 
-        let include_internal_id = should_emit_internal_id_for_projection(
-            self.emit_internal_id,
-            self.internal_id_index,
-            None,
-        );
+    //     let include_internal_id = should_emit_internal_id_for_projection(
+    //         self.emit_internal_id,
+    //         self.internal_id_index,
+    //         None,
+    //     );
 
-        log::debug!(
-            "📖 [read_docs_by_ids] Requested {} doc_ids: first={}, last={}, doc_count={}",
-            doc_ids.len(),
-            doc_ids.first().unwrap(),
-            doc_ids.last().unwrap(),
-            self.doc_count
-        );
+    //     log::debug!(
+    //         "📖 [read_docs_by_ids] Requested {} doc_ids: first={}, last={}, doc_count={}",
+    //         doc_ids.len(),
+    //         doc_ids.first().unwrap(),
+    //         doc_ids.last().unwrap(),
+    //         self.doc_count
+    //     );
 
-        // 查找 doc_ids 对应的 batch_key
-        let lookup_start = std::time::Instant::now();
-        let batch_doc_map = self.raw_data.batch_lookup_doc_ids(doc_ids);
-        log::debug!(
-            "      ⏱️  [read_docs] batch_lookup: {:?}",
-            lookup_start.elapsed()
-        );
+    //     // 查找 doc_ids 对应的 batch_key
+    //     let lookup_start = std::time::Instant::now();
+    //     let batch_doc_map = self.raw_data.batch_lookup_doc_ids(doc_ids);
+    //     log::debug!(
+    //         "      ⏱️  [read_docs] batch_lookup: {:?}",
+    //         lookup_start.elapsed()
+    //     );
 
-        if batch_doc_map.is_empty() {
-            log::warn!("⚠️  batch_lookup_doc_ids returned empty");
-            return self.create_empty_batch();
-        }
+    //     if batch_doc_map.is_empty() {
+    //         log::warn!("⚠️  batch_lookup_doc_ids returned empty");
+    //         return self.create_empty_batch();
+    //     }
 
-        log::debug!(
-            "📋 [read_docs_by_ids] Found {} batches: keys={:?}",
-            batch_doc_map.len(),
-            batch_doc_map.keys().collect::<Vec<_>>()
-        );
+    //     log::debug!(
+    //         "📋 [read_docs_by_ids] Found {} batches: keys={:?}",
+    //         batch_doc_map.len(),
+    //         batch_doc_map.keys().collect::<Vec<_>>()
+    //     );
 
-        // 🚀 性能优化:
-        // - 少量 batches (≤5): 批量读取,一次打开文件 → 快
-        // - 大量 batches (>5): 逐个读取,避免内存占用过大
-        let batch_read_start = std::time::Instant::now();
-        let source_batches = if batch_doc_map.len() <= 5 {
-            let batch_keys: Vec<u32> = batch_doc_map.keys().copied().collect();
-            let result = self.raw_data.get_batch_with_projection(&batch_keys, None);
-            log::info!(
-                "      ⏱️  [read_docs] batch_read ({} RowGroups): {:?}",
-                batch_keys.len(),
-                batch_read_start.elapsed()
-            );
-            result
-        } else {
-            HashMap::new() // 空,后面逐个读取
-        };
+    //     // 🚀 性能优化:
+    //     // - 少量 batches (≤5): 批量读取,一次打开文件 → 快
+    //     // - 大量 batches (>5): 逐个读取,避免内存占用过大
+    //     let batch_read_start = std::time::Instant::now();
+    //     let source_batches = if batch_doc_map.len() <= 5 {
+    //         let batch_keys: Vec<u32> = batch_doc_map.keys().copied().collect();
+    //         let result = self.raw_data.get_batch_with_projection(&batch_keys, None);
+    //         log::info!(
+    //             "      ⏱️  [read_docs] batch_read ({} RowGroups): {:?}",
+    //             batch_keys.len(),
+    //             batch_read_start.elapsed()
+    //         );
+    //         result
+    //     } else {
+    //         HashMap::new() // 空,后面逐个读取
+    //     };
 
-        // 读取各个 batch 并合并
-        let merge_start = std::time::Instant::now();
-        let mut batches = Vec::new();
-        for (batch_key, doc_ids_in_batch) in batch_doc_map {
-            log::debug!(
-                "📦 Processing batch_key={}, contains {} doc_ids (first={}, last={})",
-                batch_key,
-                doc_ids_in_batch.len(),
-                doc_ids_in_batch.first().unwrap(),
-                doc_ids_in_batch.last().unwrap()
-            );
+    //     // 读取各个 batch 并合并
+    //     let merge_start = std::time::Instant::now();
+    //     let mut batches = Vec::new();
+    //     for (batch_key, doc_ids_in_batch) in batch_doc_map {
+    //         log::debug!(
+    //             "📦 Processing batch_key={}, contains {} doc_ids (first={}, last={})",
+    //             batch_key,
+    //             doc_ids_in_batch.len(),
+    //             doc_ids_in_batch.first().unwrap(),
+    //             doc_ids_in_batch.last().unwrap()
+    //         );
 
-            // 尝试从批量读取的结果中获取,否则单独读取
-            let batch = if let Some(b) = source_batches.get(&batch_key) {
-                b.clone()
-            } else {
-                match self.raw_data.get(&batch_key) {
-                    Some(b) => b,
-                    None => {
-                        log::warn!("⚠️  Batch not found for key={}", batch_key);
-                        continue;
-                    }
-                }
-            };
+    //         // 尝试从批量读取的结果中获取,否则单独读取
+    //         let batch = if let Some(b) = source_batches.get(&batch_key) {
+    //             b.clone()
+    //         } else {
+    //             match self.raw_data.get(&batch_key) {
+    //                 Some(b) => b,
+    //                 None => {
+    //                     log::warn!("⚠️  Batch not found for key={}", batch_key);
+    //                     continue;
+    //                 }
+    //             }
+    //         };
 
-            {
-                // 从 batch 中提取需要的行
-                // batch_key 是 batch 的起始 doc_id，需要转换为相对索引
-                let batch_size = batch.num_rows() as u32;
+    //         {
+    //             // 从 batch 中提取需要的行
+    //             // batch_key 是 batch 的起始 doc_id，需要转换为相对索引
+    //             let batch_size = batch.num_rows() as u32;
 
-                log::debug!(
-                    "📦 [read_docs_by_ids] batch_key={}, batch_size={}, doc_ids range=[{}, {}]",
-                    batch_key,
-                    batch_size,
-                    doc_ids_in_batch.first().unwrap(),
-                    doc_ids_in_batch.last().unwrap()
-                );
+    //             log::debug!(
+    //                 "📦 [read_docs_by_ids] batch_key={}, batch_size={}, doc_ids range=[{}, {}]",
+    //                 batch_key,
+    //                 batch_size,
+    //                 doc_ids_in_batch.first().unwrap(),
+    //                 doc_ids_in_batch.last().unwrap()
+    //             );
 
-                let mut indices: Vec<u32> = Vec::new();
-                let mut selected_doc_ids: Vec<u32> = Vec::new();
-                for doc_id in doc_ids_in_batch.iter() {
-                    let relative_idx = doc_id - batch_key;
-                    if relative_idx < batch_size {
-                        indices.push(relative_idx);
-                        selected_doc_ids.push(*doc_id);
-                    } else {
-                        log::error!(
-                            "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
-                            doc_id, batch_key, relative_idx, batch_size
-                        );
-                    }
-                }
+    //             let mut indices: Vec<u32> = Vec::new();
+    //             let mut selected_doc_ids: Vec<u32> = Vec::new();
+    //             for doc_id in doc_ids_in_batch.iter() {
+    //                 let relative_idx = doc_id - batch_key;
+    //                 if relative_idx < batch_size {
+    //                     indices.push(relative_idx);
+    //                     selected_doc_ids.push(*doc_id);
+    //                 } else {
+    //                     log::error!(
+    //                         "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
+    //                         doc_id, batch_key, relative_idx, batch_size
+    //                     );
+    //                 }
+    //             }
 
-                if indices.is_empty() {
-                    log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
-                    continue;
-                }
+    //             if indices.is_empty() {
+    //                 log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
+    //                 continue;
+    //             }
 
-                log::trace!(
-                    "📖 [read_docs_by_ids] batch_key={}, batch_rows={}, reading {} indices (first few: {:?})",
-                    batch_key,
-                    batch_size,
-                    indices.len(),
-                    &indices[..indices.len().min(5)]
-                );
+    //             log::trace!(
+    //                 "📖 [read_docs_by_ids] batch_key={}, batch_rows={}, reading {} indices (first few: {:?})",
+    //                 batch_key,
+    //                 batch_size,
+    //                 indices.len(),
+    //                 &indices[..indices.len().min(5)]
+    //             );
 
-                // 使用 arrow 的 take 操作提取指定行
-                use datafusion::arrow::array::UInt32Array;
-                use datafusion::arrow::compute::take;
+    //             // 使用 arrow 的 take 操作提取指定行
+    //             use datafusion::arrow::array::UInt32Array;
+    //             use datafusion::arrow::compute::take;
 
-                let indices_array = UInt32Array::from(indices);
-                let mut columns = Vec::new();
+    //             let indices_array = UInt32Array::from(indices);
+    //             let mut columns = Vec::new();
 
-                for i in 0..self.data_field_count {
-                    let column = batch.column(i);
-                    let taken = take(column, &indices_array, None).map_err(|e| {
-                        CoreError::Internal(format!(
-                            "Failed to take rows from batch {} (size={}): {}",
-                            batch_key, batch_size, e
-                        ))
-                    })?;
-                    columns.push(taken);
-                }
+    //             for i in 0..self.data_field_count {
+    //                 let column = batch.column(i);
+    //                 let taken = take(column, &indices_array, None).map_err(|e| {
+    //                     CoreError::Internal(format!(
+    //                         "Failed to take rows from batch {} (size={}): {}",
+    //                         batch_key, batch_size, e
+    //                     ))
+    //                 })?;
+    //                 columns.push(taken);
+    //             }
 
-                if include_internal_id {
-                    columns.push(build_internal_id_array(
-                        self.segment_start,
-                        &selected_doc_ids,
-                    ));
-                }
+    //             if include_internal_id {
+    //                 columns.push(build_internal_id_array(
+    //                     self.segment_start,
+    //                     &selected_doc_ids,
+    //                 ));
+    //             }
 
-                let selected_batch = RecordBatch::try_new(self.schema.clone(), columns)
-                    .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))?;
-                batches.push(selected_batch);
-            }
-        }
+    //             let selected_batch = RecordBatch::try_new(self.schema.clone(), columns)
+    //                 .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))?;
+    //             batches.push(selected_batch);
+    //         }
+    //     }
 
-        log::debug!(
-            "      ⏱️  [read_docs] merge & extract: {:?}",
-            merge_start.elapsed()
-        );
+    //     log::debug!(
+    //         "      ⏱️  [read_docs] merge & extract: {:?}",
+    //         merge_start.elapsed()
+    //     );
 
-        log::debug!(
-            "      ⏱️  [read_docs] TOTAL read_docs_by_ids: {:?}",
-            read_start.elapsed()
-        );
+    //     log::debug!(
+    //         "      ⏱️  [read_docs] TOTAL read_docs_by_ids: {:?}",
+    //         read_start.elapsed()
+    //     );
 
-        if batches.is_empty() {
-            return self.create_empty_batch();
-        }
+    //     if batches.is_empty() {
+    //         return self.create_empty_batch();
+    //     }
 
-        if batches.len() == 1 {
-            return Ok(batches.into_iter().next().unwrap());
-        }
+    //     if batches.len() == 1 {
+    //         return Ok(batches.into_iter().next().unwrap());
+    //     }
 
-        // 合并所有 batches
-        use datafusion::arrow::compute::concat_batches;
-        concat_batches(&self.schema, &batches)
-            .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
-    }
+    //     // 合并所有 batches
+    //     use datafusion::arrow::compute::concat_batches;
+    //     concat_batches(&self.schema, &batches)
+    //         .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
+    // }
 
-    /// 根据 doc_ids 读取数据（带投影下推）
-    fn read_docs_by_ids_with_projection(
-        &self,
-        doc_ids: &[u32],
-        projection: &[usize],
-    ) -> crate::utils::error::CoreResult<RecordBatch> {
-        use crate::utils::error::CoreError;
+    // /// 根据 doc_ids 读取数据（带投影下推）
+    // fn read_docs_by_ids_with_projection(
+    //     &self,
+    //     doc_ids: &[u32],
+    //     projection: &[usize],
+    // ) -> crate::utils::error::CoreResult<RecordBatch> {
+    //     use crate::utils::error::CoreError;
 
-        let read_start = std::time::Instant::now();
+    //     let read_start = std::time::Instant::now();
 
-        if doc_ids.is_empty() {
-            return self.create_empty_batch_with_projection(projection);
-        }
+    //     if doc_ids.is_empty() {
+    //         return self.create_empty_batch_with_projection(projection);
+    //     }
 
-        log::debug!(
-            "📖 [read_docs_by_ids_with_projection] Requested {} doc_ids with projection {:?}",
-            doc_ids.len(),
-            projection
-        );
+    //     log::debug!(
+    //         "📖 [read_docs_by_ids_with_projection] Requested {} doc_ids with projection {:?}",
+    //         doc_ids.len(),
+    //         projection
+    //     );
 
-        let include_internal_id = should_emit_internal_id_for_projection(
-            self.emit_internal_id,
-            self.internal_id_index,
-            Some(projection),
-        );
-        let storage_projection =
-            storage_projection_indices(Some(projection), self.internal_id_index);
+    //     let include_internal_id = should_emit_internal_id_for_projection(
+    //         self.emit_internal_id,
+    //         self.internal_id_index,
+    //         Some(projection),
+    //     );
+    //     let storage_projection =
+    //         storage_projection_indices(Some(projection), self.internal_id_index);
 
-        // 查找 doc_ids 对应的 batch_key
-        let lookup_start = std::time::Instant::now();
-        let batch_doc_map = self.raw_data.batch_lookup_doc_ids(doc_ids);
-        log::debug!(
-            "      ⏱️  [read_docs] batch_lookup: {:?}",
-            lookup_start.elapsed()
-        );
+    //     // 查找 doc_ids 对应的 batch_key
+    //     let lookup_start = std::time::Instant::now();
+    //     let batch_doc_map = self.raw_data.batch_lookup_doc_ids(doc_ids);
+    //     log::debug!(
+    //         "      ⏱️  [read_docs] batch_lookup: {:?}",
+    //         lookup_start.elapsed()
+    //     );
 
-        if batch_doc_map.is_empty() {
-            log::warn!("⚠️  batch_lookup_doc_ids returned empty");
-            return self.create_empty_batch_with_projection(projection);
-        }
+    //     if batch_doc_map.is_empty() {
+    //         log::warn!("⚠️  batch_lookup_doc_ids returned empty");
+    //         return self.create_empty_batch_with_projection(projection);
+    //     }
 
-        // 🚀 投影下推：只读取需要的列
-        let batch_read_start = std::time::Instant::now();
-        let source_batches = if batch_doc_map.len() <= 5 {
-            let batch_keys: Vec<u32> = batch_doc_map.keys().copied().collect();
-            let result = self.raw_data.get_batch_with_projection(
-                &batch_keys,
-                storage_projection.as_ref().map(|v| v.as_slice()),
-            );
-            log::debug!(
-                "      ⏱️  [read_docs] batch_read ({} RowGroups, {} cols): {:?}",
-                batch_keys.len(),
-                projection.len(),
-                batch_read_start.elapsed()
-            );
-            result
-        } else {
-            HashMap::new()
-        };
+    //     // 🚀 投影下推：只读取需要的列
+    //     let batch_read_start = std::time::Instant::now();
+    //     let source_batches = if batch_doc_map.len() <= 5 {
+    //         let batch_keys: Vec<u32> = batch_doc_map.keys().copied().collect();
+    //         let result = self.raw_data.get_batch_with_projection(
+    //             &batch_keys,
+    //             storage_projection.as_ref().map(|v| v.as_slice()),
+    //         );
+    //         log::debug!(
+    //             "      ⏱️  [read_docs] batch_read ({} RowGroups, {} cols): {:?}",
+    //             batch_keys.len(),
+    //             projection.len(),
+    //             batch_read_start.elapsed()
+    //         );
+    //         result
+    //     } else {
+    //         HashMap::new()
+    //     };
 
-        // 构建投影后的 schema
-        let projected_schema = self.build_projected_schema(Some(&projection.to_vec()));
+    //     // 构建投影后的 schema
+    //     let projected_schema = self.build_projected_schema(Some(&projection.to_vec()));
 
-        // 读取各个 batch 并合并
-        let merge_start = std::time::Instant::now();
-        let mut batches = Vec::new();
-        for (batch_key, doc_ids_in_batch) in batch_doc_map {
-            // 尝试从批量读取的结果中获取，否则单独读取
-            let batch = if let Some(b) = source_batches.get(&batch_key) {
-                b.clone()
-            } else {
-                // 单独读取时也应用投影
-                match self.raw_data.get_with_projection(
-                    &batch_key,
-                    storage_projection.as_ref().map(|v| v.as_slice()),
-                ) {
-                    Some(b) => b,
-                    None => {
-                        log::warn!("⚠️  Batch not found for key={}", batch_key);
-                        continue;
-                    }
-                }
-            };
+    //     // 读取各个 batch 并合并
+    //     let merge_start = std::time::Instant::now();
+    //     let mut batches = Vec::new();
+    //     for (batch_key, doc_ids_in_batch) in batch_doc_map {
+    //         // 尝试从批量读取的结果中获取，否则单独读取
+    //         let batch = if let Some(b) = source_batches.get(&batch_key) {
+    //             b.clone()
+    //         } else {
+    //             // 单独读取时也应用投影
+    //             match self.raw_data.get_with_projection(
+    //                 &batch_key,
+    //                 storage_projection.as_ref().map(|v| v.as_slice()),
+    //             ) {
+    //                 Some(b) => b,
+    //                 None => {
+    //                     log::warn!("⚠️  Batch not found for key={}", batch_key);
+    //                     continue;
+    //                 }
+    //             }
+    //         };
 
-            {
-                let batch_size = batch.num_rows() as u32;
-                let mut rows_with_ids: Vec<(u32, u32)> = Vec::new();
-                for doc_id in doc_ids_in_batch.iter() {
-                    let relative_idx = doc_id - batch_key;
-                    if relative_idx < batch_size {
-                        rows_with_ids.push((relative_idx, *doc_id));
-                    } else {
-                        log::error!(
-                            "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
-                            doc_id, batch_key, relative_idx, batch_size
-                        );
-                    }
-                }
+    //         {
+    //             let batch_size = batch.num_rows() as u32;
+    //             let mut rows_with_ids: Vec<(u32, u32)> = Vec::new();
+    //             for doc_id in doc_ids_in_batch.iter() {
+    //                 let relative_idx = doc_id - batch_key;
+    //                 if relative_idx < batch_size {
+    //                     rows_with_ids.push((relative_idx, *doc_id));
+    //                 } else {
+    //                     log::error!(
+    //                         "❌ CRITICAL: doc_id={} mapped to batch_key={} but relative_idx={} >= batch_size={}",
+    //                         doc_id, batch_key, relative_idx, batch_size
+    //                     );
+    //                 }
+    //             }
 
-                if rows_with_ids.is_empty() {
-                    log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
-                    continue;
-                }
+    //             if rows_with_ids.is_empty() {
+    //                 log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
+    //                 continue;
+    //             }
 
-                rows_with_ids.sort_unstable_by_key(|(row_idx, _)| *row_idx);
-                let indices: Vec<u32> = rows_with_ids.iter().map(|(row_idx, _)| *row_idx).collect();
-                let doc_ids_for_rows: Vec<u32> =
-                    rows_with_ids.iter().map(|(_, doc_id)| *doc_id).collect();
+    //             rows_with_ids.sort_unstable_by_key(|(row_idx, _)| *row_idx);
+    //             let indices: Vec<u32> = rows_with_ids.iter().map(|(row_idx, _)| *row_idx).collect();
+    //             let doc_ids_for_rows: Vec<u32> =
+    //                 rows_with_ids.iter().map(|(_, doc_id)| *doc_id).collect();
 
-                if indices.is_empty() {
-                    log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
-                    continue;
-                }
+    //             if indices.is_empty() {
+    //                 log::warn!("⚠️  No valid indices for batch_key={}, skipping", batch_key);
+    //                 continue;
+    //             }
 
-                // 使用 arrow 的 take 操作提取指定行
-                use datafusion::arrow::array::UInt32Array;
-                use datafusion::arrow::compute::take;
+    //             // 使用 arrow 的 take 操作提取指定行
+    //             use datafusion::arrow::array::UInt32Array;
+    //             use datafusion::arrow::compute::take;
 
-                let indices_array = UInt32Array::from(indices);
-                let mut data_columns = Vec::new();
-                for column in batch.columns() {
-                    let taken = take(column, &indices_array, None).map_err(|e| {
-                        CoreError::Internal(format!(
-                            "Failed to take rows from batch {}: {}",
-                            batch_key, e
-                        ))
-                    })?;
-                    data_columns.push(taken);
-                }
+    //             let indices_array = UInt32Array::from(indices);
+    //             let mut data_columns = Vec::new();
+    //             for column in batch.columns() {
+    //                 let taken = take(column, &indices_array, None).map_err(|e| {
+    //                     CoreError::Internal(format!(
+    //                         "Failed to take rows from batch {}: {}",
+    //                         batch_key, e
+    //                     ))
+    //                 })?;
+    //                 data_columns.push(taken);
+    //             }
 
-                let mut data_iter = data_columns.into_iter();
-                let internal_id_column = if include_internal_id {
-                    Some(build_internal_id_array(
-                        self.segment_start,
-                        &doc_ids_for_rows,
-                    ))
-                } else {
-                    None
-                };
-                let mut columns = Vec::new();
-                for idx in projection {
-                    if self
-                        .internal_id_index
-                        .is_some_and(|internal_idx| internal_idx == *idx)
-                    {
-                        if let Some(array) = internal_id_column.as_ref() {
-                            columns.push(array.clone());
-                        }
-                    } else if let Some(col) = data_iter.next() {
-                        columns.push(col);
-                    }
-                }
+    //             let mut data_iter = data_columns.into_iter();
+    //             let internal_id_column = if include_internal_id {
+    //                 Some(build_internal_id_array(
+    //                     self.segment_start,
+    //                     &doc_ids_for_rows,
+    //                 ))
+    //             } else {
+    //                 None
+    //             };
+    //             let mut columns = Vec::new();
+    //             for idx in projection {
+    //                 if self
+    //                     .internal_id_index
+    //                     .is_some_and(|internal_idx| internal_idx == *idx)
+    //                 {
+    //                     if let Some(array) = internal_id_column.as_ref() {
+    //                         columns.push(array.clone());
+    //                     }
+    //                 } else if let Some(col) = data_iter.next() {
+    //                     columns.push(col);
+    //                 }
+    //             }
 
-                let selected_batch = RecordBatch::try_new(projected_schema.clone(), columns)
-                    .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))?;
-                batches.push(selected_batch);
-            }
-        }
+    //             let selected_batch = RecordBatch::try_new(projected_schema.clone(), columns)
+    //                 .map_err(|e| CoreError::Internal(format!("Failed to create batch: {}", e)))?;
+    //             batches.push(selected_batch);
+    //         }
+    //     }
 
-        log::debug!(
-            "      ⏱️  [read_docs] merge & extract: {:?}",
-            merge_start.elapsed()
-        );
+    //     log::debug!(
+    //         "      ⏱️  [read_docs] merge & extract: {:?}",
+    //         merge_start.elapsed()
+    //     );
 
-        log::debug!(
-            "      ⏱️  [read_docs] TOTAL read_docs_by_ids_with_projection: {:?}",
-            read_start.elapsed()
-        );
+    //     log::debug!(
+    //         "      ⏱️  [read_docs] TOTAL read_docs_by_ids_with_projection: {:?}",
+    //         read_start.elapsed()
+    //     );
 
-        if batches.is_empty() {
-            return self.create_empty_batch_with_projection(projection);
-        }
+    //     if batches.is_empty() {
+    //         return self.create_empty_batch_with_projection(projection);
+    //     }
 
-        if batches.len() == 1 {
-            return Ok(batches.into_iter().next().unwrap());
-        }
+    //     if batches.len() == 1 {
+    //         return Ok(batches.into_iter().next().unwrap());
+    //     }
 
-        // 合并所有 batches
-        use datafusion::arrow::compute::concat_batches;
-        concat_batches(&projected_schema, &batches)
-            .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
-    }
+    //     // 合并所有 batches
+    //     use datafusion::arrow::compute::concat_batches;
+    //     concat_batches(&projected_schema, &batches)
+    //         .map_err(|e| CoreError::Internal(format!("Failed to concat batches: {}", e)))
+    // }
 
     /// 判断是否应该使用有序扫描
     ///
@@ -1038,6 +1041,11 @@ impl SegmentScanner {
 
         // 构建执行计划
         let projected_schema = self.build_projected_schema(projection);
+
+        // ordered_scan 不会有 unsupported_filters，所以这里 count_only 总是 false
+        // (如果是 COUNT(*) with ORDER BY，不会走 ordered_scan 路径)
+        let count_only = false;
+
         let exec = SegmentExec::new(
             self.raw_data.clone(),
             self.schema.clone(),
@@ -1046,6 +1054,7 @@ impl SegmentScanner {
             projection.map(|p| p.to_vec()),
             Some((field_name.to_string(), ascending)),
             Some(limit),
+            count_only,
         );
 
         Some(Arc::new(exec))
@@ -1080,6 +1089,14 @@ impl SegmentScanner {
 
         let projected_schema = self.build_projected_schema(exec_projection.as_ref());
 
+        // 🎯 COUNT(*) 优化：使用从 SQL 层传递下来的 count_only 标志
+        // 但是如果有 unsupported_filters，必须禁用优化（需要读取列数据来过滤）
+        let count_only = self.count_only && unsupported_filters.is_empty();
+
+        if count_only {
+            log::debug!("🎯 [build_exec_plan] COUNT(*) optimization enabled");
+        }
+
         let exec = SegmentExec::new(
             self.raw_data.clone(),
             self.schema.clone(),
@@ -1088,6 +1105,7 @@ impl SegmentScanner {
             exec_projection,
             sort,
             limit,
+            count_only,
         );
 
         let mut plan: Arc<dyn ExecutionPlan> = Arc::new(exec);
@@ -1499,6 +1517,7 @@ struct SegmentExec {
     properties: datafusion::physical_plan::PlanProperties,
     sort: Option<(String, bool)>,
     limit: Option<usize>,
+    count_only: bool, // COUNT(*) 优化标记
 }
 
 impl SegmentExec {
@@ -1510,6 +1529,7 @@ impl SegmentExec {
         projection: Option<Vec<usize>>,
         sort: Option<(String, bool)>,
         limit: Option<usize>,
+        count_only: bool,
     ) -> Self {
         use datafusion::physical_expr::EquivalenceProperties;
         use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -1540,6 +1560,7 @@ impl SegmentExec {
             properties,
             sort,
             limit,
+            count_only,
         }
     }
 }
@@ -1619,9 +1640,10 @@ impl ExecutionPlan for SegmentExec {
         const CHUNK_SIZE: usize = 1000;
 
         log::debug!(
-            "🔍 [SegmentExec::execute] Starting streaming execution, total matched_docs={}, pushdown_limit={:?}",
+            "🔍 [SegmentExec::execute] Starting streaming execution, total matched_docs={}, pushdown_limit={:?}, count_only={}",
             matched_docs.len(),
-            pushdown_limit
+            pushdown_limit,
+            self.count_only
         );
 
         Ok(Box::pin(SegmentStream::new(
@@ -1631,6 +1653,7 @@ impl ExecutionPlan for SegmentExec {
             projection.unwrap_or_default(),
             CHUNK_SIZE,
             pushdown_limit,
+            self.count_only,
         )))
     }
 }
@@ -1647,6 +1670,7 @@ struct SegmentStream {
     limit: Option<usize>,
     rows_returned: i32,
     pending_batches: std::vec::IntoIter<RecordBatch>,
+    count_only: bool, // COUNT(*) 优化标记
 }
 
 impl SegmentStream {
@@ -1657,6 +1681,7 @@ impl SegmentStream {
         projection: Vec<usize>,
         chunk_size: usize,
         limit: Option<usize>,
+        count_only: bool,
     ) -> Self {
         let reader = RowDataStoreReader::new(store, projection);
 
@@ -1669,6 +1694,7 @@ impl SegmentStream {
             limit,
             rows_returned: 0,
             pending_batches: Vec::new().into_iter(),
+            count_only,
         }
     }
 
@@ -1686,16 +1712,29 @@ impl SegmentStream {
             return Ok(None);
         }
 
-        //先判断是否是空投影（COUNT 优化）
-        if self.reader.is_empty_projection() {
-            // 空投影，直接返回行数
+        // 🎯 COUNT(*) 优化：如果只需要行数，直接返回空列 + row_count
+        // 必须同时满足：
+        // 1. count_only = true（从 SQL 层判断是 COUNT(*)）
+        // 2. 没有 unsupported_filters（已经在 build_exec_plan 中检查）
+        // 注意：COUNT(*) 应该返回全部匹配行数，LIMIT 不影响 COUNT 结果
+        if self.count_only {
+            // COUNT(*) 只执行一次，返回总行数
+            if self.rows_returned > 0 {
+                return Ok(None);
+            }
+
+            log::info!(
+                "🎯 [COUNT optimization] Returning total {} rows without reading data (ignoring LIMIT)",
+                self.doc_count
+            );
+
             let batch = RecordBatch::try_new_with_options(
                 self.schema.clone(),
                 vec![],
                 &datafusion::arrow::record_batch::RecordBatchOptions::new()
                     .with_row_count(Some(self.doc_count)),
             )?;
-            self.rows_returned += self.doc_count as i32;
+            self.rows_returned = self.doc_count as i32;
             return Ok(Some(batch));
         }
 
@@ -1752,11 +1791,12 @@ impl SegmentStream {
         }
 
         log::info!(
-            "🔍 [generate_next_chunk] type:{} Completed reading chunk: max_rows={}, total_rows={}, batches={}, elapsed={:?}",
+            "🔍 [generate_next_chunk] type:{} Completed reading chunk: max_rows={}, total_rows={}, batches={}, field_size:{} elapsed={:?}",
             self.reader.segment_type(),
             max_rows,
             total_rows,
             batches.len(),
+            self.schema.fields().len(),
             start.elapsed()
         );
 
@@ -1800,60 +1840,4 @@ impl futures::Stream for SegmentStream {
             Err(e) => Poll::Ready(Some(Err(e))),
         }
     }
-}
-
-fn should_emit_internal_id_for_projection(
-    emit_internal_id: bool,
-    internal_id_index: Option<usize>,
-    projection: Option<&[usize]>,
-) -> bool {
-    if !emit_internal_id {
-        return false;
-    }
-
-    match projection {
-        Some(indices) => internal_id_index
-            .map(|internal_idx| indices.iter().any(|idx| *idx == internal_idx))
-            .unwrap_or(false),
-        None => true,
-    }
-}
-
-fn storage_projection_indices(
-    projection: Option<&[usize]>,
-    internal_id_index: Option<usize>,
-) -> Option<Vec<usize>> {
-    projection.map(|indices| {
-        if let Some(internal_idx) = internal_id_index {
-            indices
-                .iter()
-                .filter(|&&idx| idx != internal_idx)
-                .cloned()
-                .collect()
-        } else {
-            indices.to_vec()
-        }
-    })
-}
-
-fn build_internal_id_array(
-    segment_start: u64,
-    doc_ids: &[u32],
-) -> datafusion::arrow::array::ArrayRef {
-    use datafusion::arrow::array::{ArrayRef, UInt32Builder};
-
-    let mut builder = UInt32Builder::with_capacity(doc_ids.len());
-    for doc_id in doc_ids {
-        if (*doc_id as u64) < segment_start {
-            log::warn!(
-                "⚠️  doc_id={} is less than segment_start={} when building _internal_id column",
-                doc_id,
-                segment_start
-            );
-        }
-
-        builder.append_value(*doc_id);
-    }
-
-    Arc::new(builder.finish()) as ArrayRef
 }

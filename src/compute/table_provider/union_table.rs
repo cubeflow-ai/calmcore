@@ -47,6 +47,9 @@ pub struct UnionTableProvider {
 
     /// 是否需要输出 `_internal_id` 列
     emit_internal_id: bool,
+
+    /// 是否为 COUNT(*) 优化查询
+    count_only: bool,
 }
 
 impl UnionTableProvider {
@@ -66,6 +69,7 @@ impl UnionTableProvider {
         engine: Arc<Engine>,
         schema: SchemaRef,
         emit_internal_id: bool,
+        count_only: bool,
     ) -> CoreResult<Self> {
         let final_schema = if partitions.is_empty() {
             // 本地没有partition，使用传入的schema
@@ -94,6 +98,7 @@ impl UnionTableProvider {
             table_name,
             engine,
             emit_internal_id,
+            count_only,
         })
     }
 }
@@ -125,6 +130,12 @@ impl TableProvider for UnionTableProvider {
         &self,
         filters: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
+        // 🎯 COUNT(*) 优化: 如果是 count_only 查询，所有 filters 都已在索引层处理
+        // 返回 Exact 告诉 DataFusion 不要再添加 FilterExec
+        if self.count_only {
+            return Ok(vec![TableProviderFilterPushDown::Exact; filters.len()]);
+        }
+
         // 告诉DataFusion我们支持filter下推 (Inexact表示我们会尽力处理)
         Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
@@ -148,8 +159,11 @@ impl TableProvider for UnionTableProvider {
         let mut partition_plans: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
 
         for partition in &self.partitions {
-            let partition_provider =
-                super::PartitionTableProvider::new(partition.clone(), self.emit_internal_id);
+            let partition_provider = super::PartitionTableProvider::new(
+                partition.clone(),
+                self.emit_internal_id,
+                self.count_only,
+            );
 
             let plan = partition_provider
                 .scan(_state, projection, filters, limit)

@@ -159,6 +159,7 @@ impl TableProvider for RemoteTableProvider {
             projection.cloned(),
             filters.to_vec(),
             limit,
+            false, // count_only = false for remote provider
             self.executor.clone(),
         )))
     }

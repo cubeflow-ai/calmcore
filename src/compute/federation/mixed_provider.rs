@@ -58,6 +58,8 @@ pub struct MixedTableProvider {
     engine: Arc<Engine>,
     /// 是否需要输出 _internal_id
     emit_internal_id: bool,
+    /// 是否为 COUNT(*) 优化查询
+    count_only: bool,
 }
 
 impl MixedTableProvider {
@@ -69,6 +71,7 @@ impl MixedTableProvider {
         remote_nodes: Vec<NodePartitions>,
         engine: Arc<Engine>,
         emit_internal_id: bool,
+        count_only: bool,
     ) -> Self {
         Self {
             table_name,
@@ -78,6 +81,7 @@ impl MixedTableProvider {
             remote_nodes,
             engine,
             emit_internal_id,
+            count_only,
         }
     }
 }
@@ -113,6 +117,12 @@ impl TableProvider for MixedTableProvider {
         &self,
         filters: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
+        // 🎯 COUNT(*) 优化: 如果是 count_only 查询，所有 filters 都已在索引层处理
+        // 返回 Exact 告诉 DataFusion 不要再添加 FilterExec
+        if self.count_only {
+            return Ok(vec![TableProviderFilterPushDown::Exact; filters.len()]);
+        }
+
         Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 
@@ -135,8 +145,11 @@ impl TableProvider for MixedTableProvider {
 
         // 1. 扫描本地分区
         for partition in &self.local_partitions {
-            let partition_provider =
-                PartitionTableProvider::new(partition.clone(), self.emit_internal_id);
+            let partition_provider = PartitionTableProvider::new(
+                partition.clone(),
+                self.emit_internal_id,
+                self.count_only,
+            );
             let plan = partition_provider
                 .scan(state, projection, filters, limit)
                 .await?;
@@ -168,7 +181,7 @@ impl TableProvider for MixedTableProvider {
                 grpc_addr.clone(),
             ));
 
-            // 创建 RemoteScanExec，直接传递 projection/filters/limit
+            // 创建 RemoteScanExec，直接传递 projection/filters/limit/count_only
             let remote_exec = RemoteScanExec::new(
                 self.table_name.clone(),
                 node_info.partition_names.clone(),
@@ -176,6 +189,7 @@ impl TableProvider for MixedTableProvider {
                 projection.cloned(),
                 filters.to_vec(),
                 limit,
+                self.count_only,
                 executor,
             );
 

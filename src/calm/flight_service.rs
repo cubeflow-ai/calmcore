@@ -130,6 +130,11 @@ impl CalmFlightService {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
 
+        let count_only: bool = json
+            .get("count_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         // 反序列化 filters
         let filters: Vec<Expr> = if let Some(filters_array) =
             json.get("filters").and_then(|v| v.as_array())
@@ -172,18 +177,19 @@ impl CalmFlightService {
         };
 
         log::info!(
-            "🛫️  [Flight Service] Executing scan: table={}, partitions={:?}, projection={:?}, filters={}, limit={:?}",
+            "🛫️  [Flight Service] Executing scan: table={}, partitions={:?}, projection={:?}, filters={}, limit={:?}, count_only={}",
             table_name,
             partition_names,
             projection,
             filters.len(),
-            limit
+            limit,
+            count_only
         );
 
         // 执行本地 partition 扫描
         let stream = self
             .calm_service
-            .execute_local_partition_scan(&table_name, &partition_names, projection, filters, limit)
+            .execute_local_partition_scan(&table_name, &partition_names, projection, filters, limit, count_only)
             .await
             .map_err(|e| Status::internal(format!("Local partition scan failed: {}", e)))?;
 
