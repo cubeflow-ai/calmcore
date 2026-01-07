@@ -172,6 +172,23 @@ impl TableProvider for UnionTableProvider {
         }
 
         // 使用 UnionExec 合并所有 partition 的 plan
-        UnionExec::try_new(partition_plans)
+        let union_plan: Arc<dyn ExecutionPlan> = UnionExec::try_new(partition_plans)?;
+
+        // 如果有 limit，在 UnionExec 之上包装 GlobalLimitExec
+        // 确保 LIMIT 语义正确（跨多个分区只返回总共 N 行）
+        if let Some(limit_val) = limit {
+            log::debug!(
+                "🔢 [UnionTableProvider::scan] Applying GlobalLimitExec with limit={}",
+                limit_val
+            );
+            use datafusion::physical_plan::limit::GlobalLimitExec;
+            Ok(Arc::new(GlobalLimitExec::new(
+                union_plan,
+                0,               // skip: 0（OFFSET 通过其他方式处理）
+                Some(limit_val), // fetch: limit
+            )))
+        } else {
+            Ok(union_plan)
+        }
     }
 }

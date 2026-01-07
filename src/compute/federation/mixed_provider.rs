@@ -216,6 +216,23 @@ impl TableProvider for MixedTableProvider {
             "🔗 [MixedTableProvider::scan] Unioning {} plans",
             all_plans.len()
         );
-        UnionExec::try_new(all_plans)
+        let union_plan: Arc<dyn ExecutionPlan> = UnionExec::try_new(all_plans)?;
+
+        // 6. 如果有 limit，在 UnionExec 之上包装 GlobalLimitExec
+        // 这样可以确保 LIMIT 语义正确（跨多个分区/节点只返回总共 N 行）
+        if let Some(limit_val) = limit {
+            log::debug!(
+                "🔢 [MixedTableProvider::scan] Applying GlobalLimitExec with limit={}",
+                limit_val
+            );
+            use datafusion::physical_plan::limit::GlobalLimitExec;
+            Ok(Arc::new(GlobalLimitExec::new(
+                union_plan,
+                0,               // skip: 0（OFFSET 通过其他方式处理）
+                Some(limit_val), // fetch: limit
+            )))
+        } else {
+            Ok(union_plan)
+        }
     }
 }
