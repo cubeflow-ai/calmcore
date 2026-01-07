@@ -1739,7 +1739,7 @@ impl SegmentStream {
         }
 
         // 计算本次最多取多少行
-        let max_rows = match self.limit {
+        let max_rows = match self.limit.clone() {
             Some(limit) => {
                 let remaining = (limit as i32 - self.rows_returned) as usize;
                 if remaining == 0 {
@@ -1791,12 +1791,13 @@ impl SegmentStream {
         }
 
         log::info!(
-            "🔍 [generate_next_chunk] type:{} Completed reading chunk: max_rows={}, total_rows={}, batches={}, field_size:{} elapsed={:?}",
+            "🔍 [generate_next_chunk] type:{} Completed reading chunk: max_rows={}, total_rows={}, batches={}, field_size:{} limit={:?} elapsed={:?}",
             self.reader.segment_type(),
             max_rows,
             total_rows,
             batches.len(),
             self.schema.fields().len(),
+            self.limit,
             start.elapsed()
         );
 

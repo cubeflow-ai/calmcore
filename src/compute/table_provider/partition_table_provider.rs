@@ -435,11 +435,16 @@ async fn process_segment(
 ) -> Result<usize> {
     let mut segment_rows = 0;
     log::error!(
-        "        🔍 [process_segment] Called with projection={:?}",
-        projection
+        "        🔍 [process_segment] Called with projection={:?}, limit={:?}",
+        projection,
+        limit
     );
     let start = std::time::Instant::now();
-    let plan = match scanner.create_plan(filters, projection.as_ref(), None, None) {
+
+    // 🔧 修复: 传递实际的 limit 参数到 SegmentScanner，而不是硬编码 None
+    // 注意: sort=None 是正确的，因为 Segment 级别不需要排序信息
+    // (排序由上层的 SortExec 处理)
+    let plan = match scanner.create_plan(filters, projection.as_ref(), limit, None) {
         Some(p) => p,
         None => return Ok(0),
     };
