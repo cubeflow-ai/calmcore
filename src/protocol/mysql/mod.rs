@@ -956,15 +956,15 @@ async fn execute_query<W: io::Read + io::Write>(
     let query_upper = query.to_uppercase();
     if query_upper.contains("INFORMATION_SCHEMA") {
         log::info!("🔍 [MySQL] Detected INFORMATION_SCHEMA query");
-        
+
         use crate::compute::InformationSchemaExecutor;
         use futures::StreamExt;
-        
+
         let info_executor = InformationSchemaExecutor::new(
             calm_service.engine().clone(),
             calm_service.catalog().clone(),
         );
-        
+
         let mut stream = match info_executor.execute_stream(query).await {
             Ok(stream) => stream,
             Err(e) => {
@@ -973,11 +973,11 @@ async fn execute_query<W: io::Read + io::Write>(
                 return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
             }
         };
-        
+
         // 收集结果
         let mut batches = Vec::new();
         let mut total_rows = 0;
-        
+
         while let Some(batch_result) = stream.next().await {
             let batch = match batch_result {
                 Ok(b) => b,
@@ -987,20 +987,23 @@ async fn execute_query<W: io::Read + io::Write>(
                     return results.error(ErrorKind::ER_UNKNOWN_ERROR, msg.as_bytes());
                 }
             };
-            
+
             total_rows += batch.num_rows();
             batches.push(batch);
         }
-        
-        log::info!("✅ [MySQL] INFORMATION_SCHEMA query returned {} rows", total_rows);
-        
+
+        log::info!(
+            "✅ [MySQL] INFORMATION_SCHEMA query returned {} rows",
+            total_rows
+        );
+
         let schema = if batches.is_empty() {
             use datafusion::arrow::datatypes::Schema;
             std::sync::Arc::new(Schema::empty())
         } else {
             batches[0].schema()
         };
-        
+
         return write_query_result(results, &schema, &batches);
     }
 
