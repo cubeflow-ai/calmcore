@@ -4,7 +4,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    calm::{new_data_client, CalmRpcService, CalmService},
+    calm::{new_data_client, CalmService},
     cluster::keys,
     utils::error::{CoreError, CoreResult},
 };
@@ -23,9 +23,9 @@ pub enum CoordClusterEvent {
 /// 节点状态
 #[derive(Debug, Clone)]
 struct NodeState {
-    node_id: String,
-    partitions: Vec<(String, String)>, // (table_name, partition_name)
-    last_seen: u64,
+    _node_id: String,
+    _partitions: Vec<(String, String)>, // (table_name, partition_name)
+    _last_seen: u64,
 }
 
 /// 孤儿分区（owner 节点不存在）
@@ -33,7 +33,7 @@ struct NodeState {
 pub struct OrphanPartition {
     pub table_name: String,
     pub partition_name: String,
-    pub old_owner: Option<String>,
+    pub _old_owner: Option<String>,
 }
 
 /// 分区冲突（被多个节点同时持有）
@@ -162,7 +162,7 @@ impl JobService {
                     orphans.push(OrphanPartition {
                         table_name: table_name.to_string(),
                         partition_name: partition_name.clone(),
-                        old_owner: Some(pm.owner.clone()),
+                        _old_owner: Some(pm.owner.clone()),
                     });
                 }
             }
@@ -340,22 +340,8 @@ impl JobService {
         Ok(report)
     }
 
-    /// 更新节点状态缓存
-    fn update_node_state(&mut self, node_id: String, partitions: Vec<(String, String)>) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
 
-        self.node_states.insert(
-            node_id.clone(),
-            NodeState {
-                node_id,
-                partitions,
-                last_seen: now,
-            },
-        );
-    }
+
 }
 
 // ==================== 任务调度器 ====================

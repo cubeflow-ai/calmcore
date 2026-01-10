@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use byteorder::ReadBytesExt;
+
 use datafusion::arrow::array::{Array, ArrayRef, RecordBatch, StringArray};
 use roaring::RoaringBitmap;
 
@@ -184,7 +184,7 @@ impl FullTextField {
             sorted_terms.sort();
 
             for term in sorted_terms {
-                let (stats, postings) = &temp_postings[term];
+                let (_stats, postings) = &temp_postings[term];
 
                 // Serialize postings to binary format
                 let mut postings_data = Vec::new();

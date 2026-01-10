@@ -409,7 +409,7 @@ impl ArrowFlightService for CalmFlightService {
         log::debug!("📥 [Flight] Received {} batches", batches.len());
 
         // 直接插入 RecordBatch 到指定分区（不需要 JSON 转换！）
-        let table_info = self
+        let _table_info = self
             .calm_service
             .catalog
             .get_or_load_table(&table_name)

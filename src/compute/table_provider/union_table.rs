@@ -40,10 +40,10 @@ pub struct UnionTableProvider {
     partitions: Vec<Arc<Partition>>,
 
     /// 表名
-    table_name: String,
+    _table_name: String,
 
     /// Engine 引用
-    engine: Arc<Engine>,
+    _engine: Arc<Engine>,
 
     /// 是否需要输出 `_internal_id` 列
     emit_internal_id: bool,
@@ -95,8 +95,8 @@ impl UnionTableProvider {
         Ok(Self {
             schema: final_schema,
             partitions,
-            table_name,
-            engine,
+            _table_name: table_name,
+            _engine: engine,
             emit_internal_id,
             count_only,
         })

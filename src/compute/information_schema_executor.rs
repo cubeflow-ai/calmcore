@@ -18,21 +18,21 @@ use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
 
 pub struct InformationSchemaExecutor {
-    engine: Arc<Engine>,
+    _engine: Arc<Engine>,
     catalog: Option<Arc<Catalog>>,
 }
 
 impl InformationSchemaExecutor {
     pub fn new(engine: Arc<Engine>, catalog: Arc<Catalog>) -> Self {
         Self {
-            engine,
+            _engine: engine,
             catalog: Some(catalog),
         }
     }
 
     pub fn new_simple(engine: Arc<Engine>) -> Self {
         Self {
-            engine,
+            _engine: engine,
             catalog: None,
         }
     }

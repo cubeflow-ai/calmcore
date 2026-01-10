@@ -370,7 +370,6 @@ async fn process_partition_segments(
         let frozen_segments = partition.get_frozen_segments(); // 已经是 Vec<(u64, Arc<Segment>)>
         let mut scanners = Vec::new();
 
-        let start = std::time::Instant::now();
         for (seg_id, segment) in frozen_segments.iter() {
             let doc_count = segment.doc_count();
             if doc_count == 0 {

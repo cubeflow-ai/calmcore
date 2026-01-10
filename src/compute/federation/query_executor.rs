@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::datasource::empty::EmptyTable;
-use datafusion::datasource::view::ViewTable;
+
 use datafusion::prelude::*;
 
 use crate::catalog::Catalog;
@@ -15,8 +15,6 @@ use crate::compute::{
 };
 use crate::engine::Engine;
 use crate::utils::error::{CoreError, CoreResult};
-
-use super::flight_executor::FlightExecutor;
 
 /// 联邦查询执行器
 ///
@@ -91,7 +89,7 @@ impl FederatedQueryExecutor {
             return Err(CoreError::Internal("No tables found in SQL".to_string()));
         }
 
-        let my_node_id = self.cluster_manager.node_id().to_string();
+        let my_node_id = self.cluster_manager.node_id();
         let partition_hint_set: Option<HashSet<String>> =
             partition_hint.map(|names| names.iter().cloned().collect::<HashSet<String>>());
 
@@ -163,25 +161,10 @@ impl FederatedQueryExecutor {
                 .get(table_name)
                 .cloned()
                 .ok_or_else(|| CoreError::Internal("Missing table schema".to_string()))?;
-            let nodes = table_partition_nodes.get(table_name).unwrap();
+            let nodes = table_partition_nodes.get_mut(table_name).unwrap();
 
             if local_only {
-                let local_partitions = nodes.get(&my_node_id).cloned().unwrap_or_default();
-                if local_partitions.is_empty() {
-                    self.register_empty_table(&ctx, table_name, schema.clone())?;
-                } else {
-                    // 统一使用 MixedTableProvider（remote_nodes 为空）
-                    self.register_unified_table(
-                        &ctx,
-                        table_name,
-                        nodes,
-                        normalized.needs_score_column,
-                        normalized.is_count_only,
-                        normalized.limit,
-                    )
-                    .await?;
-                }
-                continue;
+                nodes.retain(|node_id, _| node_id == my_node_id);
             }
 
             if nodes.is_empty() {
@@ -194,56 +177,25 @@ impl FederatedQueryExecutor {
                 "🔍 [FederatedQueryExecutor] Table '{}' decision: nodes.len()={}, contains_my_node={}, my_node_id={}",
                 table_name,
                 nodes.len(),
-                nodes.contains_key(&my_node_id),
+                nodes.contains_key(my_node_id),
                 my_node_id
             );
 
-            if nodes.len() == 1 && nodes.contains_key(&my_node_id) {
-                let local_partitions = nodes.get(&my_node_id).cloned().unwrap_or_default();
-                if local_partitions.is_empty() {
-                    log::debug!("🏠 [FederatedQueryExecutor] Table '{}': All local but no partitions, using empty table", table_name);
-                    self.register_empty_table(&ctx, table_name, schema.clone())?;
-                } else {
-                    log::debug!("🏠 [FederatedQueryExecutor] Table '{}': All {} partition(s) on local node, using unified table", table_name, local_partitions.len());
-                    // 统一使用 MixedTableProvider（remote_nodes 为空）
-                    self.register_unified_table(
-                        &ctx,
-                        table_name,
-                        nodes,
-                        normalized.needs_score_column,
-                        normalized.is_count_only,
-                        normalized.limit,
-                    )
-                    .await?;
-                }
-            } else if !nodes.contains_key(&my_node_id) {
-                log::debug!(
-                    "🌐 [FederatedQueryExecutor] Table '{}': All partitions on remote nodes, using unified table",
-                    table_name
-                );
-                // 统一使用 MixedTableProvider（local_partitions 为空）
-                self.register_unified_table(
-                    &ctx,
-                    table_name,
-                    nodes,
-                    normalized.needs_score_column,
-                    normalized.is_count_only,
-                    normalized.limit,
-                )
-                .await?;
-            } else {
-                log::debug!("🔀 [FederatedQueryExecutor] Table '{}': Partitions distributed across {} nodes, using unified table", table_name, nodes.len());
-                // 统一使用 MixedTableProvider
-                self.register_unified_table(
-                    &ctx,
-                    table_name,
-                    nodes,
-                    normalized.needs_score_column,
-                    normalized.is_count_only,
-                    normalized.limit,
-                )
-                .await?;
-            }
+            // 统一使用 MixedTableProvider
+            // MixedTableProvider 可以自适应处理所有情况：
+            // 1. 纯本地 (nodes只有本地节点)
+            // 2. 纯远程 (nodes只有远程节点)
+            // 3. 混合模式 (都有)
+            // 4. 空表 (nodes为空的情况此前已处理)
+            self.register_unified_table(
+                &ctx,
+                table_name,
+                nodes,
+                normalized.needs_score_column,
+                normalized.is_count_only,
+                normalized.limit,
+            )
+            .await?;
         }
 
         log::debug!("[FederatedQueryExecutor] Parsing SQL: {}", sql);
@@ -288,12 +240,6 @@ impl FederatedQueryExecutor {
             .table
             .schema
             .to_arrow_schema();
-
-        log::debug!(
-            "📊 [FederatedQueryExecutor] Registering unified table '{}' from nodes {:?}",
-            table_name,
-            nodes.keys().collect::<Vec<_>>()
-        );
 
         // 收集本地分区
         let mut local_partitions = Vec::new();

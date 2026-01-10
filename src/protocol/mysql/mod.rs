@@ -1350,9 +1350,9 @@ async fn handle_drop_table(
 
 /// DELETE 语句处理
 async fn handle_delete<W: io::Read + io::Write>(
-    calm_service: Arc<CalmService>,
-    query: &str,
-    results: QueryResultWriter<'_, W>,
+    mut _calm_service: Arc<CalmService>,
+    _query: &str,
+    _results: QueryResultWriter<'_, W>,
 ) -> io::Result<()> {
     // 解析 DELETE 语句
     // 格式: DELETE FROM table WHERE condition;
@@ -1524,13 +1524,7 @@ async fn handle_describe(
     // 移除分号
     let table_name = table_name.trim_end_matches(';').trim();
 
-    // 获取表元数据
-    let table_info = calm_service
-        .catalog()
-        .get_or_load_table(table_name)
-        .await
-        .map_err(|e| format!("Table '{}' not found: {}", table_name, e))?;
-    let table_meta = &table_info.table;
+
 
     // 获取表元数据
     let table_info = calm_service

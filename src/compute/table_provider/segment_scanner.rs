@@ -29,10 +29,10 @@ pub(crate) struct SegmentScanner {
     doc_count: u32,
     /// 有效文档的 bitmap (doc_count - del)，预先计算避免每次都重新生成
     valid_docs: RoaringBitmap,
-    emit_internal_id: bool,
-    internal_id_index: Option<usize>,
-    data_field_count: usize,
-    segment_start: u64,
+    _emit_internal_id: bool,
+    _internal_id_index: Option<usize>,
+    _data_field_count: usize,
+    _segment_start: u64,
     count_only: bool,
 }
 
@@ -85,10 +85,10 @@ impl SegmentScanner {
             index_readers,
             doc_count,
             valid_docs,
-            emit_internal_id,
-            internal_id_index,
-            data_field_count,
-            segment_start,
+            _emit_internal_id: emit_internal_id,
+            _internal_id_index: internal_id_index,
+            _data_field_count: data_field_count,
+            _segment_start: segment_start,
             count_only,
         }
     }

@@ -1,6 +1,6 @@
 use std::{any::Any, borrow::Cow, collections::HashSet, error::Error, sync::Arc};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
 use datafusion::{
     arrow::array::{ArrayRef, RecordBatch},

@@ -584,7 +584,6 @@ impl CalmService {
 
         // 获取表元数据
         let table_info = self.catalog.get_table_info(table_name).await?;
-        let schema = Arc::new(table_info.table.schema.clone());
 
         // 收集本地分区
         let mut partitions = Vec::new();
@@ -625,7 +624,7 @@ impl CalmService {
             if partition_plans.len() == 1 {
                 partition_plans.into_iter().next().unwrap()
             } else {
-                Arc::new(UnionExec::new(partition_plans))
+                UnionExec::try_new(partition_plans)?
             };
 
         // 执行计划

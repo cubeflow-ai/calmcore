@@ -1,6 +1,6 @@
 //! Arrow Flight 执行器 - 封装远程节点调用
 
-use arrow_flight::decode::FlightRecordBatchStream;
+
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, Ticket};
 use base64::prelude::*;
@@ -67,7 +67,7 @@ impl FlightExecutor {
             sql
         );
 
-        let mut client = self.connect().await?;
+        let _client = self.connect().await?;
         log::debug!("✅ [FlightExecutor] Connected to node '{}'", self.node_id);
 
         // 创建结构化的 Ticket payload

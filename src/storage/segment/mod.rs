@@ -1549,7 +1549,7 @@ impl Segment {
                 .downcast_ref::<field_store::TimestampField>()
             {
                 readers.insert(name, Box::new(timestamp.clone()) as Box<dyn IndexReader>);
-            } else if let Some(fulltext) = field_writer.as_any().downcast_ref::<FullTextField>() {
+            } else if let Some(_fulltext) = field_writer.as_any().downcast_ref::<FullTextField>() {
                 //TODO: ANSJ
                 // readers.insert(name, Box::new(fulltext.clone()) as Box<dyn IndexReader>);
             }

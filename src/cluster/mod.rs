@@ -171,7 +171,7 @@ pub struct ClusterManager {
     node_id: String,
 
     /// tarpc RPC address (host:port) for this node
-    tarpc_addr: String,
+    _tarpc_addr: String,
 
     pub coord_node: RwLock<Option<String>>,
 }
@@ -232,7 +232,7 @@ impl ClusterManager {
             chitchat,
             node_id,
             coord_node: RwLock::new(None),
-            tarpc_addr,
+            _tarpc_addr: tarpc_addr,
         };
 
         manager.set_my_status_preparing().await;

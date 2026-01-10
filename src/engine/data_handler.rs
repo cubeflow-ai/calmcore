@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::catalog::TableMeta;
+
 use crate::utils::error::{CoreError, CoreResult};
 
 use super::Engine;
@@ -59,73 +59,9 @@ impl Engine {
         Ok(())
     }
 
-    /// 确保分区存在（按需创建）
-    async fn ensure_partition_exists(
-        &self,
-        table_name: &str,
-        partition_name: &str,
-        meta: &Arc<TableMeta>,
-    ) -> CoreResult<()> {
-        todo!()
-        // // 检查分区是否已存在
-        // if self
-        //     .get_partition(table_name, partition_name)
-        //     .await
-        //     .is_some()
-        // {
-        //     return Ok(());
-        // }
 
-        // // 分区不存在，创建新分区
-        // let partition_dir = self
-        //     .config
-        //     .data_dir
-        //     .join("tables")
-        //     .join(table_name)
-        //     .join("partitions")
-        //     .join(crate::catalog::PartitionStrategy::generate_partition_dir_name(partition_name));
 
-        // log::info!(
-        //     "Creating partition {} for table '{}' at {:?}",
-        //     partition_name,
-        //     table_name,
-        //     partition_dir
-        // );
 
-        // let partition = Partition::new(
-        //     partition_name.to_string(),
-        //     table_name.to_string(),
-        //     partition_dir,
-        //     meta.schema.clone(),
-        //     (*self.partition_notify_tx).clone(),
-        // );
-
-        // self.add_partition_with_table(table_name, Arc::new(partition))
-        //     .await;
-
-        // Ok(())
-    }
-
-    /// 插入数据到指定分区
-    async fn insert_to_partition(
-        &self,
-        table_name: &str,
-        partition_name: &str,
-        batch: datafusion::arrow::record_batch::RecordBatch,
-    ) -> CoreResult<()> {
-        // let partition = self
-        //     .get_partition(table_name, partition_name)
-        //     .await
-        //     .ok_or_else(|| {
-        //         CoreError::Internal(format!(
-        //             "Partition {} not found for table '{}'",
-        //             partition_name, table_name
-        //         ))
-        //     })?;
-
-        // partition.upsert(batch)?;
-        Ok(())
-    }
 
     /// 加载外部文件到 segment
     ///

@@ -26,7 +26,7 @@ use datafusion::physical_plan::{union::UnionExec, ExecutionPlan};
 use crate::compute::table_provider::PartitionTableProvider;
 use crate::engine::Engine;
 use crate::partition::Partition;
-use crate::utils::error::CoreResult;
+
 
 use super::flight_executor::FlightExecutor;
 use super::remote_scan_exec::RemoteScanExec;
@@ -55,7 +55,7 @@ pub struct MixedTableProvider {
     /// 远程节点分区映射
     remote_nodes: Vec<NodePartitions>,
     /// Engine 引用
-    engine: Arc<Engine>,
+    _engine: Arc<Engine>,
     /// 是否需要输出 _internal_id
     emit_internal_id: bool,
     /// 是否为 COUNT(*) 优化查询
@@ -82,7 +82,7 @@ impl MixedTableProvider {
             local_node_id,
             local_partitions,
             remote_nodes,
-            engine,
+            _engine: engine,
             emit_internal_id,
             count_only,
             query_limit,

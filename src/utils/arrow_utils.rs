@@ -7,8 +7,8 @@ use ahash::AHasher;
 use datafusion::arrow::{
     self as arrow,
     array::{
-        Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Float32Array,
-        Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, LargeBinaryArray,
+        Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Int16Array,
+        Int32Array, Int64Array, Int8Array, LargeBinaryArray,
         LargeStringArray, RecordBatch, StringArray, TimestampMicrosecondArray,
         TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array,
         UInt32Array, UInt64Array, UInt8Array,

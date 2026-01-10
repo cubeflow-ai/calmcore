@@ -1,5 +1,6 @@
 // Executor 层
 mod information_schema_executor;
+mod query_executor;
 pub use information_schema_executor::InformationSchemaExecutor;
 
 // Table Provider 层

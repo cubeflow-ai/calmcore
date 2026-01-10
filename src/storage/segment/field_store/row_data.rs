@@ -172,7 +172,7 @@ impl ParquetRowDataReader {
 
         // Build reader with specific row group selection
         let reader_start = std::time::Instant::now();
-        let mut reader = builder.with_row_groups(vec![rg_idx]).build().ok()?;
+        let reader = builder.with_row_groups(vec![rg_idx]).build().ok()?;
         log::debug!(
             "        ⏱️  [Parquet] build reader: {:?}",
             reader_start.elapsed()
@@ -257,7 +257,7 @@ impl ParquetRowDataReader {
         }
 
         // Build reader with specific row group
-        let mut reader = builder.with_row_groups(vec![rg_idx]).build().ok()?;
+        let reader = builder.with_row_groups(vec![rg_idx]).build().ok()?;
 
         let mut current_offset = 0;
         let mut collected_batches = Vec::new();
@@ -497,7 +497,7 @@ impl ParquetRowDataReader {
         }
 
         // 6. 读取指定的 RowGroup
-        let mut reader = builder
+        let reader = builder
             .with_row_groups(vec![rg_idx])
             .build()
             .map_err(|e| crate::utils::error::CoreError::Internal(e.to_string()))?;
